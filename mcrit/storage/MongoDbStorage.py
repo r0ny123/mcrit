@@ -15,6 +15,7 @@ try:
     from pymongo import InsertOne, MongoClient, UpdateOne
     from pymongo.collection import ReturnDocument
     from gridfs import GridFS
+    from bson import ObjectId # Ensure ObjectId is imported
 except:
     LOGGER.warning("pymongo package import failed - MongoDB backend will not be available.")
 
@@ -411,7 +412,7 @@ class MongoDbStorage(StorageInterface):
         # Delete from GridFS if applicable
         if sample_entry.gridfs_id and self.fs:
             try:
-                self.fs.delete(sample_entry.gridfs_id)
+                self.fs.delete(ObjectId(sample_entry.gridfs_id))
             except Exception as e:
                 LOGGER.error(f"Failed to delete from GridFS (id: {sample_entry.gridfs_id}): {e}")
         if sample_id < 0:
@@ -603,7 +604,7 @@ class MongoDbStorage(StorageInterface):
                     target_sample = SampleEntry.fromDict(report_dict)
                     if target_sample and target_sample.gridfs_id and self.fs:
                         try:
-                            gridfs_file = self.fs.get(target_sample.gridfs_id)
+                            gridfs_file = self.fs.get(ObjectId(target_sample.gridfs_id))
                             target_sample.binary_data = gridfs_file.read()
                         except Exception as e:
                             LOGGER.error(f"Failed to retrieve from GridFS (id: {target_sample.gridfs_id}): {e}")
@@ -1089,7 +1090,7 @@ class MongoDbStorage(StorageInterface):
         sample_entry = SampleEntry.fromDict(sample_document)
         if sample_entry and sample_entry.gridfs_id and self.fs and sample_id >= 0: # only for non-query samples
             try:
-                gridfs_file = self.fs.get(sample_entry.gridfs_id)
+                gridfs_file = self.fs.get(ObjectId(sample_entry.gridfs_id))
                 sample_entry.binary_data = gridfs_file.read()
             except Exception as e:
                 LOGGER.error(f"Failed to retrieve from GridFS (id: {sample_entry.gridfs_id}): {e}")

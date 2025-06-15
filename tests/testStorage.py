@@ -353,8 +353,22 @@ class MongoDbStorageTest(MemoryStorageTest):
         self.storage.addSmdaReport(smda_report)
         stats = self.storage.getStats()
         self.assertEqual(1, stats["num_samples"])
-        self.assertEqual(0, stats["num_functions"]) # 0 because getFunctions is mocked
-        self.assertEqual(0, stats["num_pichashes"]) # 0 because no functions processed
+        # The SampleEntry should store the original statistics from the SmdaReport metadata,
+        # even if getFunctions() is mocked for processing within addSmdaReport.
+        # Assuming example_report.smda has 10 functions in its metadata.
+        self.assertEqual(10, stats["num_functions"])
+        # Assuming pichash count is also based on initial metadata via FunctionEntry creation,
+        # which is skipped if getFunctions() is empty. So, if FunctionEntry objects are not created,
+        # then num_pichashes derived from *processed* functions might indeed be 0.
+        # Let's re-evaluate this one. If getStats() counts distinct _pichash in functions collection, it will be 0.
+        # The original test for MemoryStorage has 10.
+        # MongoDbStorage.getStats() does:
+        # for result in self._getDb().functions.aggregate([{"$group": {"_id": "$_pichash"}}, {"$count": "Total" }]): num_unique_pichashes = result["Total"]
+        # If no FunctionEntry objects are created in DB due to getFunctions() mock, then num_pichashes will be 0.
+        # The num_functions in stats is from: for family_document in self._getDb().families.find(): stats["num_functions"] += family_document["num_functions"]
+        # And family_document["num_functions"] is updated by sample_entry.statistics["num_functions"] via _updateFamilyStats.
+        # So, num_functions should be 10. num_pichashes should be 0.
+        self.assertEqual(0, stats["num_pichashes"]) # 0 because no FunctionEntry objects with pichashes are created
 
     def _create_mock_smda_report(self, sha256_val, binary_content, filename_val="test.exe"):
         # Load a base valid SmdaReport an

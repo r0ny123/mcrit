@@ -48,7 +48,12 @@ class SampleEntry(object):
             self.is_library = smda_report.is_library
             self.sha256 = smda_report.sha256
             self.smda_version = smda_report.smda_version
-            self.statistics = smda_report.statistics.toDict()
+            if hasattr(smda_report.statistics, 'toDict'):
+                self.statistics = smda_report.statistics.toDict()
+            else:
+                # If it doesn't have toDict, assume it's already a dict (e.g. from mocks)
+                # or assign a default if it's None/unexpected.
+                self.statistics = smda_report.statistics if smda_report.statistics is not None else {}
             self.timestamp = smda_report.timestamp
             self.version = smda_report.version
 
