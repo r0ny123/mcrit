@@ -1,11 +1,9 @@
 import json
 import logging
 import os
-import time
 from datetime import datetime
 from unittest import TestCase, main
 
-import pymongo
 from bson import ObjectId
 from mcrit.config.McritConfig import McritConfig
 from mcrit.config.StorageConfig import StorageConfig
@@ -18,7 +16,6 @@ from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
 from smda.common.SmdaReport import SmdaReport
 
-from .context import config
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(message)s")
@@ -291,7 +288,7 @@ class MemoryStorageTest(TestCase):
         self.assertEqual({1000: set([1, 3])}, candidates)
 
         # band rebuild test
-        num_reindexed_minhashes = self.storage.rebuildMinhashBandIndex()
+        self.storage.rebuildMinhashBandIndex()
         minhash_c = MinHash(
             function_id=1000, minhash_signature=[0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39], minhash_bits=8
         )
@@ -407,20 +404,33 @@ class MongoDbStorageTest(MemoryStorageTest):
             smda_json = json.load(fjson)
 
         smda_report_a = SmdaReport.fromDict(smda_json)
-        smda_report_a.family = "family_1"; smda_report_a.is_library = False; smda_report_a.sha256 = 64 * "a"
-        smda_report_a.buffer = b"dummy_a"; smda_report_a.getFunctions = lambda: []
+        smda_report_a.family = "family_1"
+        smda_report_a.is_library = False 
+        smda_report_a.sha256 = 64 * "a"
+        smda_report_a.buffer = b"dummy_a"
+        smda_report_a.getFunctions = lambda: []
 
         smda_report_b = SmdaReport.fromDict(smda_json)
-        smda_report_b.family = "family_1"; smda_report_b.is_library = False; smda_report_b.sha256 = 64 * "b"
-        smda_report_b.buffer = b"dummy_b"; smda_report_b.getFunctions = lambda: []
+        smda_report_b.family = "family_1"
+        smda_report_b.is_library = False
+        smda_report_b.sha256 = 64 * "b"
+        smda_report_b.buffer = b"dummy_b"
+        smda_report_b.getFunctions = lambda: []
 
         smda_report_c = SmdaReport.fromDict(smda_json)
-        smda_report_c.family = "family_2"; smda_report_c.is_library = False; smda_report_c.sha256 = 64 * "c"
-        smda_report_c.buffer = b"dummy_c"; smda_report_c.getFunctions = lambda: []
+        smda_report_c.family = "family_2"
+        smda_report_c.is_library = False
+        smda_report_c.sha256 = 64 * "c"
+        smda_report_c.buffer = b"dummy_c"
+        smda_report_c.getFunctions = lambda: []
 
         smda_report_d = SmdaReport.fromDict(smda_json)
-        smda_report_d.family = "family_3"; smda_report_d.is_library = True; smda_report_d.version = "3.42"; smda_report_d.sha256 = 64 * "d"
-        smda_report_d.buffer = b"dummy_d"; smda_report_d.getFunctions = lambda: []
+        smda_report_d.family = "family_3"
+        smda_report_d.is_library = True
+        smda_report_d.version = "3.42"
+        smda_report_d.sha256 = 64 * "d"
+        smda_report_d.buffer = b"dummy_d"
+        smda_report_d.getFunctions = lambda: []
 
         self.storage.addSmdaReport(smda_report_a)
         self.storage.addSmdaReport(smda_report_b)
@@ -464,12 +474,16 @@ class MongoDbStorageTest(MemoryStorageTest):
             smda_json = json.load(fjson)
 
         smda_report_a = SmdaReport.fromDict(smda_json)
-        smda_report_a.sha256 = 64 * "a"; smda_report_a.family = "family_1"
-        smda_report_a.buffer = b"dummy_fa"; smda_report_a.getFunctions = lambda: []
+        smda_report_a.sha256 = 64 * "a"
+        smda_report_a.family = "family_1"
+        smda_report_a.buffer = b"dummy_fa"
+        smda_report_a.getFunctions = lambda: []
 
         smda_report_b = SmdaReport.fromDict(smda_json)
-        smda_report_b.family = "family_1"; smda_report_b.sha256 = 64 * "b"
-        smda_report_b.buffer = b"dummy_fb"; smda_report_b.getFunctions = lambda: []
+        smda_report_b.family = "family_1"
+        smda_report_b.sha256 = 64 * "b"
+        smda_report_b.buffer = b"dummy_fb"
+        smda_report_b.getFunctions = lambda: []
 
         self.storage.addSmdaReport(smda_report_a)
         self.storage.addSmdaReport(smda_report_b)
@@ -496,12 +510,16 @@ class MongoDbStorageTest(MemoryStorageTest):
             smda_json = json.load(fjson)
 
         smda_report_a = SmdaReport.fromDict(smda_json)
-        smda_report_a.sha256 = 64 * "a"; smda_report_a.family = "family_1"
-        smda_report_a.buffer = b"dummy_ha"; smda_report_a.getFunctions = lambda: []
+        smda_report_a.sha256 = 64 * "a"
+        smda_report_a.family = "family_1"
+        smda_report_a.buffer = b"dummy_ha"
+        smda_report_a.getFunctions = lambda: []
 
         smda_report_b = SmdaReport.fromDict(smda_json)
-        smda_report_b.family = "family_1"; smda_report_b.sha256 = 64 * "b"
-        smda_report_b.buffer = b"dummy_hb"; smda_report_b.getFunctions = lambda: []
+        smda_report_b.family = "family_1"
+        smda_report_b.sha256 = 64 * "b"
+        smda_report_b.buffer = b"dummy_hb"
+        smda_report_b.getFunctions = lambda: []
 
         self.storage.addSmdaReport(smda_report_a)
         self.storage.addSmdaReport(smda_report_b)
