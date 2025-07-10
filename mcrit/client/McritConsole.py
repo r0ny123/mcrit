@@ -177,7 +177,7 @@ class McritConsole(object):
         # client submit
         client_submit = subparser_client.add_parser("submit", help="Various ways of file submission incl. disassembly using SMDA if needed.")
         client_submit.add_argument("filepath", type=str, help="Submit the folllowing <filepath>, indicating a (file/dir).")
-        client_submit.add_argument("--mode", type=str, default="file", choices=["file", "dir", "recursive", "malpedia"], help="Submit a single <file> or all files in a <dir>. Use <recursive> submission for a folder structured as ./family_name/version/version/files. Synchronize <malpedia> into MCRIT. Default: <file>.")
+        client_submit.add_argument("--mode", type=str, default="file", choices=["file", "dir", "recursive", "malpedia", "ida"], help="Submit a single <file> or all files in a <dir>. Use <recursive> submission for a folder structured as ./family_name/version/version/files. Synchronize <malpedia> into MCRIT. Use <ida> for IDA-based FLIRT signature analysis. Default: <file>.")
         client_submit.add_argument("-f", "--family", type=str, help="Set/Override SmdaReport with this family (only in modes: file/dir)")
         client_submit.add_argument("-v", "--version", type=str, help="Set/Override SmdaReport with this version (only in modes: file/dir)")
         client_submit.add_argument("-l", "--library", action="store_true", help="Set/Override SmdaReport with the library flag (only in modes: file/dir/recursive, default: False).")
@@ -186,6 +186,7 @@ class McritConsole(object):
         client_submit.add_argument("-s", "--smda", action="store_true", help="Do not disassemble, instead only submit files that are recognized as SMDA reports (only works with modes: file/dir).")
         client_submit.add_argument("-w", "--worker", action="store_true", help="Spawn workers to process the submission (only in modes: dir/recursive/malpedia, default: False).")
         client_submit.add_argument("-t", "--worker-timeout", type=int, default=300, help="Timeout for workers to conclude the submission (default: 300 seconds).")
+        client_submit.add_argument("--sig-bundles", nargs="*", default=None, help="List of FLIRT .sig files to apply in IDA mode (default: Hex-Rays standard set). Only used with --mode ida.")
         # client query
         client_query = subparser_client.add_parser("query", help="Query MCRIT with a sample incl. disassembly using SMDA if needed.")
         client_query.add_argument("filepath", type=str, help="Submit the folllowing <filepath>.")
@@ -382,6 +383,8 @@ class McritConsole(object):
             self._handle_submit_recursive(args)
         if args.mode == "malpedia":
             self._handle_submit_malpedia(args)
+        if args.mode == "ida":
+            self._handle_submit_ida(args)  # To be implemented
 
     def _handle_submit_file(self, args):
         sample_sha256 = sha256(readFileContent(args.filepath))
@@ -512,3 +515,71 @@ class McritConsole(object):
     def _isMalpediaFilename(self, filename):
         malpedia_file_pattern = re.compile("^[0-9a-f]{64}(_unpacked|dump7?_0x[0-9a-fA-F]{8,16})")
         return re.search(malpedia_file_pattern, filename)
+
+    def _handle_submit_ida(self, args):
+        import subprocess
+        import tempfile
+        import shutil
+        import glob
+        # Determine files to process
+        if os.path.isfile(args.filepath):
+            files = [args.filepath]
+        elif os.path.isdir(args.filepath):
+            files = [os.path.join(args.filepath, f) for f in os.listdir(args.filepath) if os.path.isfile(os.path.join(args.filepath, f))]
+        else:
+            print(f"Invalid filepath: {args.filepath}")
+            return
+        # Prepare signature bundles
+        sig_bundles = args.sig_bundles if args.sig_bundles else []
+        # Progress tracking
+        total = len(files)
+        processed = 0
+        for fpath in files:
+            try:
+                sample_sha256 = sha256(readFileContent(fpath))
+                if self.client.getSampleBySha256(sample_sha256):
+                    print(f"SKIPPING: {fpath} - already in MCRIT.")
+                    continue
+                # Prepare temp output file for SMDA report
+                with tempfile.NamedTemporaryFile(suffix='.smda', delete=False) as tmp_report:
+                    tmp_report_path = tmp_report.name
+                # Build IDA headless command
+                ida_path = shutil.which('ida64') or shutil.which('ida')
+                if not ida_path:
+                    print("IDA executable not found in PATH. Please ensure ida64 or ida is available.")
+                    return
+                runner_script = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../ida_bulk_flirt.py'))
+                cmd = [
+                    ida_path,
+                    '-A',
+                    f'-S"{runner_script} --input \"{fpath}\" --output \"{tmp_report_path}\"' + (f' --sig-bundles {" ".join([shutil.quote(s) for s in sig_bundles])}' if sig_bundles else '') + '"',
+                    fpath
+                ]
+                print(f"[IDA] Processing {fpath} ...")
+                result = subprocess.run(' '.join(cmd), shell=True, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"[IDA ERROR] Failed to process {fpath}: {result.stderr}")
+                    continue
+                # Read and upload the SMDA report
+                try:
+                    from smda.common.SmdaReport import SmdaReport
+                    smda_report = SmdaReport.fromFile(tmp_report_path)
+                    if args.family:
+                        smda_report.family = args.family
+                    if args.version:
+                        smda_report.version = args.version
+                    if args.library:
+                        smda_report.is_library = True
+                    print(smda_report)
+                    self.client.addReport(smda_report)
+                    if args.output:
+                        shutil.copy(tmp_report_path, os.path.join(args.output, os.path.basename(fpath) + '.smda'))
+                except Exception as e:
+                    print(f"[UPLOAD ERROR] Could not upload or save report for {fpath}: {e}")
+                finally:
+                    os.remove(tmp_report_path)
+                processed += 1
+                print(f"[{processed}/{total}] Processed {fpath}")
+            except Exception as e:
+                print(f"[ERROR] Failed to process {fpath}: {e}")
+        print(f"[IDA MODE] Finished processing {processed}/{total} files.")

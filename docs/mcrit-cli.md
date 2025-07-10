@@ -8,8 +8,8 @@ The `submit` command supports 4 methods of data submission, supported by a numbe
 Here is its documentation:
 
 ```
-usage: mcrit client submit [-h] [--mode {file,dir,recursive,malpedia}] [-f FAMILY] [-v VERSION] [-l] [-x] [-o OUTPUT]
-                           [-s] [-w] [-t WORKER_TIMEOUT]
+usage: mcrit client submit [-h] [--mode {file,dir,recursive,malpedia,ida}] [-f FAMILY] [-v VERSION] [-l] [-x] [-o OUTPUT]
+                           [-s] [-w] [-t WORKER_TIMEOUT] [--sig-bundles SIG_BUNDLES [SIG_BUNDLES ...]]
                            filepath
 
 positional arguments:
@@ -17,10 +17,9 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  --mode {file,dir,recursive,malpedia}
+  --mode {file,dir,recursive,malpedia,ida}
                         Submit a single <file> or all files in a <dir>. Use <recursive> submission for a folder
-                        structured as ./family_name/version/version/files. Synchronize <malpedia> into MCRIT. Default:
-                        <file>.
+                        structured as ./family_name/version/version/files. Synchronize <malpedia> into MCRIT. Use <ida> for IDA-based FLIRT signature analysis. Default: <file>.
   -f FAMILY, --family FAMILY
                         Set/Override SmdaReport with this family (only in modes: file/dir)
   -v VERSION, --version VERSION
@@ -37,6 +36,8 @@ options:
                         False).
   -t WORKER_TIMEOUT, --worker-timeout WORKER_TIMEOUT
                         Timeout for workers to conclude the submission (default: 300 seconds).
+  --sig-bundles SIG_BUNDLES [SIG_BUNDLES ...]
+                        List of FLIRT .sig files to apply in IDA mode (default: Hex-Rays standard set). Only used with --mode ida.
 ```
 
 ### File
@@ -84,6 +85,17 @@ Only ELF and PE (win.*) families and only files labeled as `_unpacked` or `_dump
 [...]
 ```
 
+### IDA (FLIRT Signature Bulk Analysis)
+
+Submit a single file or all files in a directory using IDA in headless mode. For each sample, IDA will apply the specified FLIRT signature bundles (or the default set), extract all identified function names and addresses, and upload the results to MCRIT in SMDA report format.
+
+```bash
+$ mcrit client submit --mode ida --sig-bundles /path/to/flirt1.sig /path/to/flirt2.sig /samples_dir
+[IDA MODE] Placeholder: will run IDA headless for each sample, apply FLIRT signatures, and upload results.
+```
+
+- The `--sig-bundles` option is optional; if omitted, the default Hex-Rays signature set will be used.
+- Progress and errors will be reported for each sample.
 
 ## Export
 
