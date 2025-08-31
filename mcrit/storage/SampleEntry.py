@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import datetime
-from typing import Dict, TYPE_CHECKING
+from typing import Dict, TYPE_CHECKING, Optional
 
 from mcrit.libs.utility import encode_two_complement, decode_two_complement
 
@@ -27,11 +27,15 @@ class SampleEntry(object):
     summary: None
     statistics: Dict[str, int]
     timestamp: datetime.datetime
+    gridfs_id: Optional[str] = None
+    binary_data: Optional[bytes] = None # For transient storage when retrieved from GridFS
 
     # TODO -> rename to fromSmdaReport
     def __init__(self, smda_report: "SmdaReport", sample_id=-1, family_id=0):
         self.sample_id = sample_id
         self.family_id = family_id
+        self.gridfs_id = None
+        self.binary_data = None
         if smda_report:
             self.architecture = smda_report.architecture
             self.base_addr = smda_report.base_addr
@@ -44,7 +48,12 @@ class SampleEntry(object):
             self.is_library = smda_report.is_library
             self.sha256 = smda_report.sha256
             self.smda_version = smda_report.smda_version
-            self.statistics = smda_report.statistics.toDict()
+            if hasattr(smda_report.statistics, 'toDict'):
+                self.statistics = smda_report.statistics.toDict()
+            else:
+                # If it doesn't have toDict, assume it's already a dict (e.g. from mocks)
+                # or assign a default if it's None/unexpected.
+                self.statistics = smda_report.statistics if smda_report.statistics is not None else {}
             self.timestamp = smda_report.timestamp
             self.version = smda_report.version
 
@@ -79,6 +88,8 @@ class SampleEntry(object):
             "timestamp": self.timestamp.strftime("%Y-%m-%dT%H-%M-%S"),
             "version": self.version,
         }
+        if self.gridfs_id:
+            sample_entry["gridfs_id"] = self.gridfs_id
         return sample_entry
 
     @classmethod
@@ -86,6 +97,7 @@ class SampleEntry(object):
         sample_entry = cls(None) #type: ignore
         sample_entry.family_id = entry_dict["family_id"]
         sample_entry.sample_id = entry_dict["sample_id"]
+        sample_entry.gridfs_id = entry_dict.get("gridfs_id")
         sample_entry.architecture = entry_dict["architecture"]
         sample_entry.base_addr = decode_two_complement(entry_dict["base_addr"])
         sample_entry.binary_size = entry_dict["binary_size"]
