@@ -495,6 +495,8 @@ class MemoryStorage(StorageInterface):
                 self._query_functions[function_entry.function_id] = function_entry
             else:
                 self._functions[function_entry.function_id] = function_entry
+            if function_entry.sample_id not in self._sample_id_to_function_ids:
+                self._sample_id_to_function_ids[function_entry.sample_id] = []
             if function_entry.function_id not in self._sample_id_to_function_ids[function_entry.sample_id]:
                 self._sample_id_to_function_ids[function_entry.sample_id].append(function_entry.function_id)
 
