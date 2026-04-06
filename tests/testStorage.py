@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from datetime import datetime
+from types import SimpleNamespace
 from unittest import TestCase, main
 
 import pymongo
@@ -301,6 +302,13 @@ class MemoryStorageTest(TestCase):
         cache = self.storage.createMatchingCache([])
         self.assertTrue(hasattr(cache, "getMinHashByFunctionId"))
         self.assertTrue(hasattr(cache, "getSampleIdByFunctionId"))
+        self.assertIsNot(cache, self.storage)
+        self.assertTrue(hasattr(cache, "addFunctionEntriesToCache"))
+
+    def testAddFunctionEntriesToCacheRejectsNonQueryFunctionIds(self):
+        function_entry = SimpleNamespace(function_id=1, sample_id=1, minhash=b"")
+        with self.assertRaises(ValueError):
+            self.storage.addFunctionEntriesToCache([function_entry])
 
 
 ### Added mongo attribute
