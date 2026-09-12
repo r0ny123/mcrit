@@ -98,3 +98,100 @@ These bound stage-1 work *independently of N*, which is exactly the property the
 
 `benchmarks/analyze_corpus.py` measures (1) and (2); `benchmarks/bench_matching.py` measures
 the per-stage growth curve that (3) has to beat.
+
+---
+
+## 4. Measurements
+
+### The corpus
+
+- **Real**: 257 Malpedia samples disassembled with SMDA -> 280,804 functions, 185,387 of them
+  hashed (the rest fall below `MINHASH_FN_MIN_INS`). A further ~1.5k samples were pulled from
+  the Malpedia API in the background; the API enforces a cumulative quota, so the fetch is
+  paced and resumable rather than parallel.
+- **Synthetic**: grown from that real population by `benchmarks/synth_corpus.py`, which draws
+  functions-per-sample from the real empirical distribution and signatures from a
+  preferential-attachment urn calibrated so the distinct-signature count follows the Heaps'
+  law *measured* on the real corpus. Validated against the law it targets to within 1.6%.
+
+### Corpus structure (257 real samples, `benchmarks/analyze_corpus.py`)
+
+| Distribution | p50 | p90 | p99 | p99.9 | max |
+|---|---|---|---|---|---|
+| band posting lists | 1 | 9 | 42 | 181 | **3,598** |
+| pichash posting lists | 1 | 4 | 20 | 96 | **16,976** |
+| minhash signature groups | 1 | 5 | 22 | 70 | 458 |
+
+The median band hash is held by a single function and the maximum by thousands: the skew the
+whole design turns on. 185,387 hashed functions carry only **75,323 distinct signatures**.
+
+`benchmarks/measure_growth.py` fits **V(n) = 1412.8 * n^0.7247** over samples, extrapolating to
+~31.5M distinct signatures at a million samples against ~750M functions - a **~24x** signature
+dedup factor there, versus 2.46x at 257 samples.
+
+### The baseline does not scale (fixed query set, same corpus, growing)
+
+| corpus | median 1-vs-N | sample 148 candidate pairs | sample 148 matched samples |
+|---|---|---|---|
+| 257 | 0.268 s | 20,744 | 35 |
+| 993 | 0.520 s | 33,328 | 568 |
+| 10,000 | 3.128 s | 361,325 | 5,930 |
+
+From 993 to 10,000 samples the corpus grew 10x; candidate pairs grew **10.8x**, matched samples
+**10.4x**, and latency **6.0x** (latency ~ corpus^0.78). Extrapolated to a million samples that
+is ~2 minutes per query, which is the reported problem exactly.
+
+Note what the middle columns say: the growth is not an inefficiency, it is the *answer* getting
+bigger. 5,930 matched samples is not a result anybody reads.
+
+### Two-stage matching at 10,000 samples
+
+| configuration | median | vs stock |
+|---|---|---|
+| one-stage (stock) | 3.128 s | - |
+| two-stage, shortlist 100 | 0.814 s | 3.8x |
+| two-stage, shortlist 100 + df cutoff 1000 | 0.696 s | **4.5x** |
+
+Per stage, on the widest query (sample 148, 754 query functions), stock vs two-stage:
+matching-cache fetch 0.923 s -> 0.069 s, scoring 0.411 s -> 0.048 s, result assembly
+0.930 s -> 0.058 s. Those three stopped scaling with the corpus; what remains is stage 1.
+
+### Quality (`benchmarks/compare_quality.py`, 10,000 samples, vs unrestricted)
+
+- **top-10 sample recall 1.000**, **top-25 sample recall 1.000**
+- **0.9945** of surviving function matches keep a bit-identical score
+- overall sample recall 0.67 - which is the shortlist doing its job, not a defect: sample 148's
+  5,930 matched samples become 99
+
+## 5. Things that were wrong, and how measurement caught them
+
+- **The quality metric itself.** `matched.percent.score_weighted` is nested; reading a flat key
+  returned 0.0 for every sample, so "top-10 recall" was comparing two arbitrary orderings and
+  reported 0.60 for a shortlist that was in fact keeping all ten. Fixed, and the reader now
+  raises rather than defaulting to 0.0.
+- **Ranking the shortlist by vote count.** MCRIT scores a matched sample by the *percentage* of
+  it that matched, so a small sample whose few functions all match outranks a large one sharing
+  them. Count-ranking dropped exactly those. Now ranked by count and coverage, interleaved.
+- **Ignoring PicHash evidence in the vote.** A sample can be reported through exact matches
+  alone; ranking on band votes alone dropped samples the unrestricted matcher ranked highly.
+- **Filtering the cutoff with `$size`.** Correct but nearly worthless - mongod reads every
+  document to measure it. Measured at 10k: cutoffs of 20000/5000 gave 0.822 s/0.890 s against
+  0.814 s for no cutoff. Storing `df` with a (band_hash, df) index gave 0.807 s/0.696 s.
+- **Boxing candidates twice.** Accumulation is numpy, was boxed to Python sets, and the
+  shortlist unboxed them again. The restriction pass also re-resolved every candidate's sample.
+  Vectorising both took the restriction from 1.063 s to 0.009 s.
+- **Assuming one contiguous id run per sample.** True on the normal path, false when writers
+  interleave counter reservations - which happened on this corpus and silently disabled the
+  shortlist. Spans are now stored per run, exact for any layout.
+
+## 6. Operational notes (things that cost real time here)
+
+- **mongod aborts rather than degrades when it runs out of file descriptors.** The container's
+  default `nofile` is 1024; WiredTiger hits EMFILE while creating a collection and takes the
+  whole server down with a panic, which looks like data loss. Run it with
+  `--ulimit nofile=20000:20000` and keep client pools small (`maxPoolSize`), especially in
+  harnesses that build a fresh client per measured run.
+- **Malpedia's API enforces a cumulative quota, not just a rate.** Concurrency makes it worse:
+  8 threads produced 1,378 rate-limit failures against 136 successes. One or two threads under
+  a global pace, with the sample listing cached so a restart during a cooldown does not die on
+  its first call, fetches reliably.
