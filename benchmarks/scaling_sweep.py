@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import time
+from typing import Any, Dict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bench_matching import make_config  # noqa: E402
@@ -126,7 +127,7 @@ def main():
         rebuild_range_index(args.db, args.mongo_host, args.mongo_port)
         num_samples, num_functions = corpus_size(args.db, args.mongo_host, args.mongo_port)
         print("\n=== corpus: %d samples, %d functions ===" % (num_samples, num_functions), flush=True)
-        checkpoint = {"num_samples": num_samples, "num_functions": num_functions, "configs": {}}
+        checkpoint: Dict[str, Any] = {"num_samples": num_samples, "num_functions": num_functions, "configs": {}}
         for name, overrides in configs.items():
             out_path = os.path.join(args.work_dir, "sweep_%s_%d.json" % (name.replace(" ", "_"), num_samples))
             started = time.time()
@@ -160,7 +161,7 @@ def main():
         print(row, flush=True)
     if len(results) > 1:
         first, last = results[0], results[-1]
-        corpus_growth = last["num_samples"] / max(1, first["num_samples"])
+        corpus_growth = int(last["num_samples"]) / max(1, int(first["num_samples"]))
         print("\ncorpus grew %.1fx (%d -> %d samples); latency grew:" % (corpus_growth, first["num_samples"], last["num_samples"]), flush=True)
         for name in names:
             before = first["configs"][name]["median_seconds"]

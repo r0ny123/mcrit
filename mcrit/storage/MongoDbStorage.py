@@ -145,6 +145,10 @@ class MongoDbStorage(StorageInterface):
     # Same reasoning as the picblockhash flag: a partially filled range index would silently
     # attribute functions to the wrong sample, so it is only read once something vouches for it.
     _FUNCTION_RANGE_SETTING = "function_range_index_complete"
+    # settings flag: band documents carry a df (posting-list length) that a (band_hash, df)
+    # index can filter on. Only trusted once something has vouched for it, because a missing or
+    # stale df would silently hide posting lists from candidate generation.
+    _BAND_DF_SETTING = "band_df_index_complete"
 
     _database: Optional["Database"]
 
@@ -262,6 +266,7 @@ class MongoDbStorage(StorageInterface):
         self._getDb()["logs"].create_index("username")
         for band_id in range(self._storage_config.STORAGE_NUM_BANDS):
             self._getDb()["band_%d" % band_id].create_index("band_hash")
+            self._getDb()["band_%d" % band_id].create_index([("band_hash", 1), ("df", 1)])
         # Add Family "" (family_id 0) if it is not already in storage. Two processes can bootstrap
         # the same database concurrently (e.g. server and worker), so instead of check-then-addFamily
         # (which would hand out two different family_ids for "") this uses a single upsert keyed on
@@ -1236,8 +1241,10 @@ class MongoDbStorage(StorageInterface):
                 if len(function_ids) < 1:
                     continue
                 if method == "push":
-                    # a band hash seen for the first time gets its document here
-                    band_updates.append(UpdateOne({"band_hash": band_hash}, {"$push": {"function_ids": {"$each": function_ids}}}, upsert=True))
+                    # a band hash seen for the first time gets its document here. df counts the
+                    # posting list so a candidate lookup can skip an over-long one from the
+                    # index, without reading the list to measure it (#band-df)
+                    band_updates.append(UpdateOne({"band_hash": band_hash}, {"$push": {"function_ids": {"$each": function_ids}}, "$inc": {"df": len(function_ids)}}, upsert=True))
                 else:
                     # pulling from a band hash that has no document must not create one (#149)
                     band_updates.append(UpdateOne({"band_hash": band_hash}, {"$pull": {"function_ids": {"$in": function_ids}}}))
@@ -1248,6 +1255,12 @@ class MongoDbStorage(StorageInterface):
                     # a posting list the pull emptied is removed, not kept as a tombstone; scoped to
                     # the hashes just touched, so it is one indexed delete per band (#149)
                     collection.delete_many({"band_hash": {"$in": list(band_data)}, **self._EMPTY_BAND_DOCUMENT})
+                    # $pull cannot report how many elements it removed, so df is restored from
+                    # the list itself rather than decremented by a guess
+                    collection.update_many(
+                        {"band_hash": {"$in": list(band_data)}},
+                        [{"$set": {"df": {"$size": {"$ifNull": ["$function_ids", []]}}}}],
+                    )
             num_band_updates += len(band_updates)
         return num_band_updates
 
@@ -1281,13 +1294,23 @@ class MongoDbStorage(StorageInterface):
         millions of entries, so a client-side check would pay almost the whole price before
         discarding it.
         """
-        pipeline: List[Dict[str, Any]] = [{"$match": {"band_hash": {"$in": band_hashes}}}]
         cutoff = getattr(self._storage_config, "STORAGE_BAND_DF_CUTOFF", 0)
-        if cutoff > 0:
-            pipeline.append({"$match": {"$expr": {"$lte": [{"$size": {"$ifNull": ["$function_ids", []]}}, cutoff]}}})
-        return pipeline
+        if cutoff <= 0:
+            return [{"$match": {"band_hash": {"$in": band_hashes}}}]
+        if self.isBandDfIndexComplete():
+            # the whole point of storing df: with a (band_hash, df) index mongod decides from
+            # the index entry alone, so an over-long posting list is never read. Filtering on
+            # $size instead still reads every document to measure it, which measured no faster
+            # than not filtering at all.
+            return [{"$match": {"band_hash": {"$in": band_hashes}, "df": {"$lte": cutoff}}}]
+        # no trustworthy df yet: fall back to measuring the list, which is correct but only
+        # saves the transfer, not the read
+        return [
+            {"$match": {"band_hash": {"$in": band_hashes}}},
+            {"$match": {"$expr": {"$lte": [{"$size": {"$ifNull": ["$function_ids", []]}}, cutoff]}}},
+        ]
 
-    def _getCandidatesForMinHashesNumpy(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1) -> Dict[int, Set[int]]:
+    def _getCandidatesForMinHashesNumpy(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1, as_arrays=False):
         """Variant C: accumulate band hits as int32 arrays instead of dict[qid][cid] -> count.
 
         Semantically identical to the dict version (np.unique(..., return_counts=True) counts
@@ -1320,8 +1343,18 @@ class MongoDbStorage(StorageInterface):
                 unique_ids, counts = np.unique(all_hits, return_counts=True)
                 surviving = unique_ids[counts >= band_matches_required]
             if surviving.size:
-                valid_candidates[function_id] = set(surviving.tolist())
+                valid_candidates[function_id] = surviving.astype(np.int64, copy=False) if as_arrays else set(surviving.tolist())
         return valid_candidates
+
+    def getCandidateArraysForMinHashes(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1) -> Dict[int, "np.ndarray"]:
+        """Candidates as sorted int64 arrays rather than sets.
+
+        The accumulation already produces arrays and then boxes them into Python sets; a caller
+        that wants to keep working in numpy (the shortlist stage does) would immediately unbox
+        them again. Measured on a 361k-pair query against 10k samples, that round trip alone was
+        most of a second.
+        """
+        return self._getCandidatesForMinHashesNumpy(function_id_to_minhash, band_matches_required=band_matches_required, as_arrays=True)
 
     def getCandidatesForMinHashes(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1) -> Dict[int, Set[int]]:
         if getattr(self._storage_config, "STORAGE_CANDIDATE_ACCUMULATION", "dict") == "numpy":
@@ -1369,25 +1402,44 @@ class MongoDbStorage(StorageInterface):
                 valid_candidates.add(function_id)
         return valid_candidates
 
+    @staticmethod
+    def _contiguousRuns(function_ids: List[int]) -> List[Tuple[int, int]]:
+        """[(first, last)] for each run of consecutive ids in the given set."""
+        runs: List[Tuple[int, int]] = []
+        ordered = sorted(set(function_ids))
+        if not ordered:
+            return runs
+        run_start = previous = ordered[0]
+        for function_id in ordered[1:]:
+            if function_id != previous + 1:
+                runs.append((run_start, previous))
+                run_start = function_id
+            previous = function_id
+        runs.append((run_start, previous))
+        return runs
+
     def _recordFunctionRange(self, sample_id: int, function_ids: List[int]) -> None:
-        """Record which function ids a sample owns, as one [first, last] span."""
+        """Record which function ids a sample owns, as one document per contiguous run.
+
+        Ids normally arrive as one dense run per sample - they come from a single bulk counter
+        reservation - but nothing guarantees it: an import can add functions to an existing
+        sample later, and concurrent writers interleave their reservations. Storing a span per
+        run rather than a single [first, last] makes the index exact for any layout instead of
+        correct only for the common one, and the lookup is a searchsorted over spans either
+        way, so the generality costs nothing at query time.
+        """
         if not function_ids:
             return
-        first_function_id, last_function_id = min(function_ids), max(function_ids)
-        # A span is only usable if the sample really owns every id inside it. Ids come from one
-        # bulk counter reservation per sample, so this holds on the normal path; a sample built
-        # by a different route (an import adding functions later) can break it, and a wrong span
-        # would misattribute another sample's functions. Store the span only when it is dense,
-        # and mark the index incomplete when it is not, rather than storing something plausible.
-        if last_function_id - first_function_id + 1 != len(set(function_ids)):
-            LOGGER.warning("Sample %d has non-contiguous function ids; disabling the function range index.", sample_id)
-            self._setFunctionRangeIndexComplete(False)
-            return
-        self._getDb()[self._FUNCTION_RANGE_COLLECTION].update_one(
-            {"sample_id": sample_id},
-            {"$set": {"sample_id": sample_id, "first_function_id": first_function_id, "last_function_id": last_function_id}},
-            upsert=True,
-        )
+        operations = [
+            UpdateOne(
+                {"sample_id": sample_id, "first_function_id": first_function_id},
+                {"$set": {"sample_id": sample_id, "first_function_id": first_function_id, "last_function_id": last_function_id}},
+                upsert=True,
+            )
+            for first_function_id, last_function_id in self._contiguousRuns(function_ids)
+        ]
+        if operations:
+            self._getDb()[self._FUNCTION_RANGE_COLLECTION].bulk_write(operations, ordered=False)
 
     def isFunctionRangeIndexComplete(self) -> bool:
         settings_document = self._getDb().settings.find_one({}, {self._FUNCTION_RANGE_SETTING: 1})
@@ -1399,37 +1451,53 @@ class MongoDbStorage(StorageInterface):
     def rebuildFunctionRangeIndex(self, progress_reporter=None) -> int:
         """Build the function-range index from the functions collection; returns samples covered.
 
-        One grouping pass over the functions collection. Any sample whose ids are not one dense
-        run leaves the index incomplete, which makes every reader fall back to the exact (and
-        slower) lookup rather than trust a mapping that cannot be right.
+        One ordered scan, emitting a span whenever the sample changes or the ids jump. Exact for
+        any id layout, where grouping on min/max per sample would be correct only when every
+        sample owns one dense run - and a wrong span misattributes another sample's functions,
+        which is a worse outcome than a slower rebuild.
         """
         collection = self._getDb()[self._FUNCTION_RANGE_COLLECTION]
         collection.delete_many({})
-        pipeline = [{"$group": {"_id": "$sample_id", "first": {"$min": "$function_id"}, "last": {"$max": "$function_id"}, "count": {"$sum": 1}}}]
         operations = []
-        num_samples = 0
-        is_complete = True
-        for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True):
-            if group["last"] - group["first"] + 1 != group["count"]:
-                LOGGER.warning("Sample %s has non-contiguous function ids; function range index will stay incomplete.", group["_id"])
-                is_complete = False
-                continue
+        num_spans = 0
+        samples_seen = set()
+        state = {"sample_id": None, "run_start": None, "previous": None}
+
+        def flush_span():
+            nonlocal num_spans
+            if state["sample_id"] is None:
+                return
             operations.append(
-                UpdateOne({"sample_id": group["_id"]}, {"$set": {"sample_id": group["_id"], "first_function_id": group["first"], "last_function_id": group["last"]}}, upsert=True)
+                UpdateOne(
+                    {"sample_id": state["sample_id"], "first_function_id": state["run_start"]},
+                    {"$set": {"sample_id": state["sample_id"], "first_function_id": state["run_start"], "last_function_id": state["previous"]}},
+                    upsert=True,
+                )
             )
-            num_samples += 1
+            num_spans += 1
+
+        cursor = self._getDb().functions.find({}, {"_id": 0, "function_id": 1, "sample_id": 1}).sort("function_id", 1).batch_size(10000)
+        for document in cursor:
+            function_id, sample_id = document["function_id"], document["sample_id"]
+            samples_seen.add(sample_id)
+            if state["sample_id"] == sample_id and state["previous"] is not None and function_id == state["previous"] + 1:
+                state["previous"] = function_id
+                continue
+            flush_span()
+            state["sample_id"], state["run_start"], state["previous"] = sample_id, function_id, function_id
             if len(operations) >= 10000:
                 collection.bulk_write(operations, ordered=False)
                 operations = []
                 if progress_reporter is not None:
                     progress_reporter.step()
+        flush_span()
         if operations:
             collection.bulk_write(operations, ordered=False)
         collection.create_index("sample_id")
         collection.create_index("first_function_id")
-        self._setFunctionRangeIndexComplete(is_complete)
-        LOGGER.info("Function range index rebuilt over %d samples (complete=%s).", num_samples, is_complete)
-        return num_samples
+        self._setFunctionRangeIndexComplete(True)
+        LOGGER.info("Function range index rebuilt: %d spans over %d samples.", num_spans, len(samples_seen))
+        return len(samples_seen)
 
     def _getFunctionRangeLookup(self):
         """(first_function_id array, sample_id array) for searchsorted, cached per db_state.
@@ -1477,6 +1545,31 @@ class MongoDbStorage(StorageInterface):
         resolved = np.where(inside, sample_ids[candidate_positions], -1)
         result[valid] = resolved
         return result
+
+    def isBandDfIndexComplete(self) -> bool:
+        settings_document = self._getDb().settings.find_one({}, {self._BAND_DF_SETTING: 1})
+        return bool(settings_document and settings_document.get(self._BAND_DF_SETTING))
+
+    def _setBandDfIndexComplete(self, is_complete: bool) -> None:
+        self._getDb().settings.update_one({}, {"$set": {self._BAND_DF_SETTING: bool(is_complete)}})
+
+    def rebuildBandDfIndex(self, progress_reporter=None) -> int:
+        """Set df on every band document and index (band_hash, df); returns documents updated.
+
+        Needed once on a database built before df existed. Until it has run, a configured
+        cutoff still applies - it just cannot skip the read, so it saves less.
+        """
+        num_updated = 0
+        for band_number in range(self._storage_config.STORAGE_NUM_BANDS):
+            collection = self._getDb()["band_%d" % band_number]
+            result = collection.update_many({}, [{"$set": {"df": {"$size": {"$ifNull": ["$function_ids", []]}}}}])
+            num_updated += result.modified_count
+            collection.create_index([("band_hash", 1), ("df", 1)])
+            if progress_reporter is not None:
+                progress_reporter.step()
+        self._setBandDfIndexComplete(True)
+        LOGGER.info("Band df index rebuilt over %d documents.", num_updated)
+        return num_updated
 
     def _getCacheDataForFunctionIds(self, function_ids: List[int]) -> Dict:
         cache_data = {}

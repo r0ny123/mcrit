@@ -80,7 +80,7 @@ class MatcherInterface:
         # concurrent jobs cannot see each other's shortlists.
         self._sample_shortlist: Optional[Set[int]] = None
         # candidate groups produced by the stage-1 banding pass, served back to the batch loop
-        self._shortlist_candidate_cache: Optional[Dict[int, Set[int]]] = None
+        self._shortlist_candidate_cache: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None
         # the shortlist as a sorted array, for vectorised membership tests
         self._shortlist_array: Optional[np.ndarray] = None
         self._minhash_threshold = minhash_threshold
@@ -170,24 +170,41 @@ class MatcherInterface:
             return None
         signature_bits = self._worker._minhash_config.MINHASH_SIGNATURE_BITS
         votes: Counter = Counter()
-        cached_groups: Dict[int, Set[int]] = {}
+        # candidates are kept as arrays, together with the sample each one belongs to, so the
+        # restriction pass can be a boolean mask instead of resolving and re-boxing every
+        # candidate a second time. Measured on a 10k-sample corpus, doing this per candidate in
+        # Python cost 1.2 s of voting plus 1.1 s of restriction on a 361k-pair query.
+        cached_groups: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        per_function_votes: List[np.ndarray] = []
         chunk_size = max(1, min(self._worker.config.MINHASH_CONFIG.MINHASH_MATCHING_FUNCTION_BATCH_SIZE, 1000))
         for start_index in range(0, len(self._function_entries), chunk_size):
             function_id_to_minhash = {}
             for function_entry in self._function_entries[start_index : start_index + chunk_size]:
                 function_id_to_minhash[function_entry.function_id] = function_entry.getMinHash(minhash_bits=signature_bits)
-            candidate_groups = self._storage.getCandidatesForMinHashes(function_id_to_minhash, band_matches_required=self._band_matches_required)
+            # ask for arrays where storage can produce them: the accumulation is already
+            # numpy, and boxing it into sets only to unbox it here is pure overhead
+            array_getter = getattr(self._storage, "getCandidateArraysForMinHashes", None)
+            if array_getter is not None:
+                candidate_groups = array_getter(function_id_to_minhash, band_matches_required=self._band_matches_required)
+            else:
+                candidate_groups = self._storage.getCandidatesForMinHashes(function_id_to_minhash, band_matches_required=self._band_matches_required)
             for function_id, candidate_ids in candidate_groups.items():
-                if not candidate_ids:
+                if not len(candidate_ids):
                     continue
-                candidates = np.fromiter(candidate_ids, dtype=np.int64, count=len(candidate_ids))
+                candidates = candidate_ids if isinstance(candidate_ids, np.ndarray) else np.fromiter(candidate_ids, dtype=np.int64, count=len(candidate_ids))
                 sample_ids = self._resolveSampleIds(candidates)
                 if sample_ids is None:
                     LOGGER.warning("Shortlisting requested but the function range index is unavailable; matching against the whole corpus instead.")
                     return None
-                for sample_id in np.unique(sample_ids[sample_ids >= 0]).tolist():
-                    votes[sample_id] += 1
-            cached_groups.update(candidate_groups)
+                cached_groups[function_id] = (candidates, sample_ids)
+                # np.unique per query function is what makes this one vote per sample per
+                # query function rather than one per candidate pair
+                resolved = sample_ids[sample_ids >= 0]
+                if resolved.size:
+                    per_function_votes.append(np.unique(resolved))
+        if per_function_votes:
+            voted_samples, vote_counts = np.unique(np.concatenate(per_function_votes), return_counts=True)
+            votes = Counter(dict(zip(voted_samples.tolist(), vote_counts.tolist())))
         # an exact match is worth more than a band collision; the weight only has to be big
         # enough that a pichash-only sample outranks a sample carried by a single band hit
         for _own_function_id, foreign_sample_id, _foreign_function_id in pichash_matches or {}:
@@ -231,20 +248,31 @@ class MatcherInterface:
                         return shortlist
         return shortlist
 
-    def _restrictToShortlist(self, candidate_groups: Dict[int, Set[int]]) -> Dict[int, Set[int]]:
-        """Drop candidates outside the shortlist, so the exact stage is bounded by it."""
+    def _restrictToShortlist(self, candidate_groups: Dict[int, Any]) -> Dict[int, Set[int]]:
+        """Drop candidates outside the shortlist, so the exact stage is bounded by it.
+
+        Entries arrive as the (candidates, sample_ids) arrays stage 1 already produced, so this
+        is a boolean mask per query function and the only Python-level work left is boxing the
+        *surviving* candidates - which is the small set, by construction.
+        """
         if self._sample_shortlist is None:
             return candidate_groups
         if self._shortlist_array is None:
             self._shortlist_array = np.fromiter(sorted(self._sample_shortlist), dtype=np.int64, count=len(self._sample_shortlist))
         restricted = {}
-        for function_id, candidate_ids in candidate_groups.items():
-            if not candidate_ids:
+        for function_id, entry in candidate_groups.items():
+            if isinstance(entry, tuple):
+                candidates, sample_ids = entry
+            else:  # a caller that did not come through stage 1's cache
+                if not entry:
+                    continue
+                candidates = np.fromiter(entry, dtype=np.int64, count=len(entry))
+                resolved = self._resolveSampleIds(candidates)
+                if resolved is None:
+                    return entry
+                sample_ids = resolved
+            if not candidates.size:
                 continue
-            candidates = np.fromiter(candidate_ids, dtype=np.int64, count=len(candidate_ids))
-            sample_ids = self._resolveSampleIds(candidates)
-            if sample_ids is None:
-                return candidate_groups
             surviving = candidates[np.isin(sample_ids, self._shortlist_array)]
             if surviving.size:
                 restricted[function_id] = set(surviving.tolist())

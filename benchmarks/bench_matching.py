@@ -199,10 +199,14 @@ def cmd_match(args):
     for query_id in queries:
         timer = StageTimer()
         timer.wrap(storage, "getCandidatesForMinHashes", "band_candidate_lookup", _observe_candidates)
+        timer.wrap(storage, "getCandidateArraysForMinHashes", "band_candidate_lookup", _observe_candidates)
         timer.wrap(storage, "getPicHashMatchesBySampleId", "pichash_lookup", _observe_pichash)
         timer.wrap(storage, "createMatchingCache", "matching_cache_fetch")
         timer.wrap(MatcherSample, "_performMinHashMatching", "minhash_scoring")
         timer.wrap(MatcherSample, "_craftResultDict", "result_assembly")
+        # stage 1 of two-stage matching; a no-op (and untimed) when shortlisting is disabled
+        timer.wrap(MatcherSample, "_computeSampleShortlist", "shortlist_stage1")
+        timer.wrap(MatcherSample, "_restrictToShortlist", "shortlist_restrict")
         matcher = MatcherSample(worker)
         started = time.perf_counter()
         try:
