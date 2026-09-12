@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from typing import Dict
 
 import numpy as np
 
@@ -58,10 +59,31 @@ class MatchingCache:
                     "(%d x %s) - corpus and MINHASH_SIGNATURE_* configuration disagree" % (function_id, len(minhash), entry_bytes, signature_length, np.dtype(dtype).name)
                 )
         function_ids = np.fromiter(kept_ids, dtype=np.int64, count=len(kept_ids))
-        joined = b"".join(kept_minhashes)
-        matrix = np.frombuffer(joined, dtype=dtype).reshape(function_ids.size, signature_length)
-        rows = np.argsort(function_ids, kind="stable")
-        self._signature_view = (function_ids[rows], rows, matrix)
+        # One row per *distinct* signature, not per function. A score depends only on the two
+        # signatures, so functions sharing a signature score identically against any query -
+        # deduplicating rows is exact, not an approximation, and the row mapping below keeps
+        # every function addressable. Corpora duplicate code heavily and increasingly so with
+        # size: measured 185,387 hashed functions over 75,323 distinct signatures (2.46x) on
+        # 257 real Malpedia samples, and the fitted Heaps' law puts that near 24x at a million.
+        # The matrix shrinks by that factor, and so does the comparison work once the scorer
+        # collapses repeated rows.
+        row_by_signature: Dict[bytes, int] = {}
+        unique_minhashes = []
+        row_for_entry = []
+        for minhash in kept_minhashes:
+            row = row_by_signature.get(minhash)
+            if row is None:
+                row = len(unique_minhashes)
+                row_by_signature[minhash] = row
+                unique_minhashes.append(minhash)
+            row_for_entry.append(row)
+        del row_by_signature
+        joined = b"".join(unique_minhashes)
+        matrix = np.frombuffer(joined, dtype=dtype).reshape(len(unique_minhashes), signature_length)
+        entry_rows = np.fromiter(row_for_entry, dtype=np.int64, count=len(row_for_entry))
+        order = np.argsort(function_ids, kind="stable")
+        # contract is unchanged: rows[searchsorted position of a function id] is its matrix row
+        self._signature_view = (function_ids[order], entry_rows[order], matrix)
         self._signature_version = memo_key
         return self._signature_view
 

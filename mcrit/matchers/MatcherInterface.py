@@ -432,7 +432,11 @@ class MatcherInterface:
             for offset in range(0, candidates.size, block_limit):
                 chunk_rows = candidate_rows[offset : offset + block_limit]
                 chunk_ids = candidates[offset : offset + block_limit]
-                matches = (matrix[chunk_rows] == query_signature).sum(axis=1, dtype=np.int16)
+                # candidates sharing a signature share a matrix row, so compare each distinct
+                # row once and fan the result back out. Same scores, fewer comparisons - and
+                # the gathered block is the deduplicated one, so peak memory drops with it.
+                unique_rows, inverse = np.unique(chunk_rows, return_inverse=True)
+                matches = (matrix[unique_rows] == query_signature).sum(axis=1, dtype=np.int16)[inverse]
                 score_counts += np.bincount(matches, minlength=signature_length + 1)
                 surviving = np.flatnonzero(matches >= min_matches)
                 if not surviving.size:
