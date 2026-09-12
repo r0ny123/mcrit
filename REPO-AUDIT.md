@@ -337,15 +337,33 @@ each is recorded where it was found rather than folded into an unrelated PR.
    three buttons on the admin maintenance page. Recorded in the comment above the
    empty-state map so the next reader does not re-derive it.
 
-6. **`get_cached_job_id` sorts on `finished_at, created_at` with no index to match.**
-   The queue's compound index is `(locked_by, finished_at, priority, created_at)`,
-   shaped for `next()`. The cache lookup filters on `payload.descriptor` and sorts on
-   `(finished_at desc, created_at desc)`; nothing serves it. Not measured under load —
-   flagged as the next thing to profile rather than as a known regression.
+6. ~~**`get_cached_job_id` sorts with no index to match.**~~ **Withdrawn — measured and
+   wrong.** See the benchmark in section 7; the existing `payload.descriptor` index
+   already serves this query and a compound index is not worth adding.
+
 
 ## 7. Dead ends and mistakes, recorded
 
 Kept because the next person doing this will hit the same things.
+
+- **A proposed index for `get_cached_job_id` was measured and dropped.** The queue's
+  compound index is `(locked_by, finished_at, priority, created_at)`, shaped for
+  `next()`, and the cache lookup filters on `payload.descriptor` and sorts on
+  `(finished_at desc, created_at desc)` — so it looked unserved. Benchmarked on 200,000
+  job documents in `mongo:7.0`, 60 lookups per configuration:
+
+  | configuration | plan | median | p95 |
+  |---|---|---|---|
+  | no index at all (**wrong baseline**) | `SORT <- COLLSCAN` | 83.62 ms | 88.43 ms |
+  | **as shipped today** | `SORT <- FETCH <- IXSCAN` | **0.82 ms** | 3.08 ms |
+  | with `(descriptor, finished_at, created_at)` | `FETCH <- IXSCAN` | 0.63 ms | 3.60 ms |
+
+  The first run omitted the single-field `payload.descriptor` index that
+  `_ensure_indices` already creates, and reported a 97.9x win that does not exist.
+  Against the real baseline it is **1.3x at the median and slightly worse at p95** —
+  the descriptor is selective enough (~20 jobs each) that the in-memory sort is
+  trivial. Not worth a third index on a hot write path. Recorded because the reasoning
+  that led to the idea was sound and someone will have it again.
 
 - **A sweep reported 17 failures on `feat/34-74-function-pages` that did not exist.** I
   had checked a branch out in a worktree while that worktree's own test run was in
@@ -370,6 +388,29 @@ Kept because the next person doing this will hit the same things.
 - **`docker run --ulimit nofile=...` is refused in this sandbox** (`error setting
   rlimit type 7`). Dropping the flag works; the container inherits nofile 20000, which
   was enough for the full suite repeatedly.
+
+## 7a. State at the end of the audit — verified, not assumed
+
+Every line below was re-measured after the last push.
+
+| | before | after |
+|---|---|---|
+| mcrit PRs 0 commits behind base, conflict-free | 0 / 17 | **17 / 17** |
+| mcrit PRs with a green CI run on their current head | 17 / 17 (stale base) | **17 / 17 (current base)** |
+| mcritweb PRs 0 behind, conflict-free | 62 / 63 | **62 / 62** (#1 closed) |
+| mcritweb PRs passing locally against mcrit 1.9.0 | 59 / 62 | **62 / 62** |
+| mcritweb PRs with `make init` that installs pytest | 54 / 62 | **62 / 62** |
+| unresolved review threads | 8 | **0** |
+
+- mcrit: all 17 CI runs on the new heads are `success` (runs 222-238).
+- mcritweb: the 10 PRs pushed to are green — 100 check runs across `Ruff` and
+  `Unit tests` on 3.11/3.12/3.13/3.14, every one `success`.
+- The local sweep ran all 62 mcritweb branches against mcrit 1.9.0: 62 green, test
+  counts from 239 to 369, zero failures and zero ruff findings.
+
+Push mechanics worth knowing for next time: the account rejects commits authored with
+its private address (`GH007`). Everything here is authored as
+`49360849+r0ny123@users.noreply.github.com`.
 
 ## 8. What remains
 
