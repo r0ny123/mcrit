@@ -91,6 +91,21 @@ class StorageConfig(ConfigInterface):
     # function_ids per $in query. Must stay well under Mongo's 16 MB command limit; smaller
     # slices also give the thread pool something to overlap.
     STORAGE_CACHE_FETCH_SLICE_SIZE: int = 500000
+    # Skip band hashes whose posting list is longer than this when generating candidates.
+    # 0 (the default) keeps every posting list, i.e. the behaviour this knob was added to.
+    #
+    # A band hash held by a large fraction of the corpus says almost nothing about *which*
+    # samples resemble the query - it is the binary-similarity equivalent of a stopword, and
+    # it is also exactly the posting list that is expensive to read and turns into candidate
+    # pairs. Measured on 257 real Malpedia samples: band posting lists are p50=1, p99=42, but
+    # max=3598, and that tail grows with the corpus while the median does not. Capping it
+    # bounds candidate volume by (query functions x bands x cutoff) instead of by corpus size.
+    #
+    # This is a recall/latency trade: a match findable *only* through a band hash that common
+    # is no longer found by the fuzzy path. It is not a silent one - PicHash matching is
+    # unaffected, and benchmarks/compare_quality.py measures what a given cutoff costs against
+    # the uncapped result on a real corpus. See docs/scaling/ for measured numbers.
+    STORAGE_BAND_DF_CUTOFF: int = 0
     # limit maximum export size to protect the system against running OOM, default: 1 GB
     STORAGE_MAX_EXPORT_SIZE = 1024 * 1024 * 1024
 

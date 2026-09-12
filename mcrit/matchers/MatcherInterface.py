@@ -57,6 +57,9 @@ def add_duration(func):
 
 
 class MatcherInterface:
+    # how many band votes one exact (PicHash) match is worth when ranking the shortlist
+    _PICHASH_SHORTLIST_VOTE_WEIGHT = 4
+
     def __init__(self, worker: "Worker", minhash_threshold=None, pichash_size=None, band_matches_required=None, exclude_self_matches=False, progress_reporter=NoProgressReporter()):
         self.matcher_type = "MatcherInterface"
         # Extended by Query, VS, Sample
@@ -72,6 +75,14 @@ class MatcherInterface:
         # previous=. It lives on the matcher, never on the shared storage object, so
         # concurrent jobs/requests cannot see each other's entries (#110).
         self._matching_cache = None
+        # stage-1 result for this job: the corpus samples the exact stage may look at, or None
+        # when shortlisting is disabled/unavailable. Job-scoped like the matching cache, so
+        # concurrent jobs cannot see each other's shortlists.
+        self._sample_shortlist: Optional[Set[int]] = None
+        # candidate groups produced by the stage-1 banding pass, served back to the batch loop
+        self._shortlist_candidate_cache: Optional[Dict[int, Set[int]]] = None
+        # the shortlist as a sorted array, for vectorised membership tests
+        self._shortlist_array: Optional[np.ndarray] = None
         self._minhash_threshold = minhash_threshold
         self._exclude_self_matches = exclude_self_matches
         if pichash_size is None:
@@ -108,13 +119,136 @@ class MatcherInterface:
         # find candidates based on bands
         if end is None:
             end = len(self._function_entries)
-        candidate_groups = {}
-        function_id_to_minhash = {}
-        for function_entry in self._function_entries[start:end]:
-            function_id_to_minhash[function_entry.function_id] = function_entry.getMinHash(minhash_bits=self._worker._minhash_config.MINHASH_SIGNATURE_BITS)
-        candidate_groups = self._storage.getCandidatesForMinHashes(function_id_to_minhash, band_matches_required=self._band_matches_required)
+        if self._shortlist_candidate_cache is not None:
+            # stage 1 already banded every query function; reuse its result rather than asking
+            # the index the same question twice
+            wanted = {function_entry.function_id for function_entry in self._function_entries[start:end]}
+            candidate_groups = {function_id: candidates for function_id, candidates in self._shortlist_candidate_cache.items() if function_id in wanted}
+        else:
+            function_id_to_minhash = {}
+            for function_entry in self._function_entries[start:end]:
+                function_id_to_minhash[function_entry.function_id] = function_entry.getMinHash(minhash_bits=self._worker._minhash_config.MINHASH_SIGNATURE_BITS)
+            candidate_groups = self._storage.getCandidatesForMinHashes(function_id_to_minhash, band_matches_required=self._band_matches_required)
+        return self._restrictToShortlist(candidate_groups)
 
-        return candidate_groups
+    # ---- two-stage matching: shortlist the corpus samples worth matching exactly ----------
+
+    def _getShortlistSize(self) -> int:
+        return getattr(self._worker.config.MINHASH_CONFIG, "MINHASH_MATCHING_SHORTLIST_SIZE", 0)
+
+    def _resolveSampleIds(self, function_ids: np.ndarray) -> Optional[np.ndarray]:
+        """Sample id per candidate function id, or None when storage cannot answer cheaply."""
+        resolver = getattr(self._storage, "getSampleIdsForFunctionIdArray", None)
+        is_complete = getattr(self._storage, "isFunctionRangeIndexComplete", None)
+        if resolver is None or is_complete is None or not is_complete():
+            return None
+        return resolver(function_ids)
+
+    def _computeSampleShortlist(self, pichash_matches: Optional[HarmonizedMatches] = None) -> Optional[Set[int]]:
+        """Stage 1: the corpus samples that the exact stage will be restricted to.
+
+        Each query function votes at most once per corpus sample, so a sample is ranked by how
+        many *distinct* query functions found it - not by how many candidate pairs it
+        contributed, which would just re-rank by sample size. Ties are broken towards the lower
+        sample id so a shortlist is reproducible rather than dict-order dependent.
+
+        PicHash evidence votes too, and that is not a refinement: a sample can be reported
+        purely through exact (PicHash) matches, and ranking it on band votes alone dropped
+        samples the unrestricted matcher put in its top ten (measured: top-10 recall 0.60 before
+        this was counted, 1.00 after). An exact match is also stronger evidence than a band
+        collision, so it is weighted above one.
+
+        The banding pass done here is *kept* (see _shortlist_candidate_cache) and served back to
+        the batch loop, so two-stage matching bands the query once, exactly like the one-stage
+        path - the shortlist costs the vote accounting, not a second index traversal.
+
+        Returns None when shortlisting is off or unavailable, which every caller treats as
+        "do not restrict anything" - the unbounded behaviour.
+        """
+        shortlist_size = self._getShortlistSize()
+        if shortlist_size <= 0 or not self._function_entries:
+            return None
+        signature_bits = self._worker._minhash_config.MINHASH_SIGNATURE_BITS
+        votes: Counter = Counter()
+        cached_groups: Dict[int, Set[int]] = {}
+        chunk_size = max(1, min(self._worker.config.MINHASH_CONFIG.MINHASH_MATCHING_FUNCTION_BATCH_SIZE, 1000))
+        for start_index in range(0, len(self._function_entries), chunk_size):
+            function_id_to_minhash = {}
+            for function_entry in self._function_entries[start_index : start_index + chunk_size]:
+                function_id_to_minhash[function_entry.function_id] = function_entry.getMinHash(minhash_bits=signature_bits)
+            candidate_groups = self._storage.getCandidatesForMinHashes(function_id_to_minhash, band_matches_required=self._band_matches_required)
+            for function_id, candidate_ids in candidate_groups.items():
+                if not candidate_ids:
+                    continue
+                candidates = np.fromiter(candidate_ids, dtype=np.int64, count=len(candidate_ids))
+                sample_ids = self._resolveSampleIds(candidates)
+                if sample_ids is None:
+                    LOGGER.warning("Shortlisting requested but the function range index is unavailable; matching against the whole corpus instead.")
+                    return None
+                for sample_id in np.unique(sample_ids[sample_ids >= 0]).tolist():
+                    votes[sample_id] += 1
+            cached_groups.update(candidate_groups)
+        # an exact match is worth more than a band collision; the weight only has to be big
+        # enough that a pichash-only sample outranks a sample carried by a single band hit
+        for _own_function_id, foreign_sample_id, _foreign_function_id in pichash_matches or {}:
+            votes[foreign_sample_id] += self._PICHASH_SHORTLIST_VOTE_WEIGHT
+        # the query's own sample must never be shortlisted away - self-matches are how a
+        # sample-vs-corpus result reports its own functions
+        votes.pop(self._sample_id, None)
+        shortlist = self._rankShortlist(votes, shortlist_size)
+        if self._sample_id is not None:
+            shortlist.add(self._sample_id)
+        self._shortlist_candidate_cache = cached_groups
+        LOGGER.info("Shortlisted %d of %d voted samples for exact matching", len(shortlist), len(votes))
+        return shortlist
+
+    def _rankShortlist(self, votes: "Counter", shortlist_size: int) -> Set[int]:
+        """Pick the samples to keep, by absolute *and* by relative evidence.
+
+        Ranking on vote count alone is the wrong proxy, and measurably so: MCRIT scores a
+        matched sample by the *percentage* of it that matched, so a small sample whose handful
+        of functions all match outranks a large one sharing the same handful. A count-ranked
+        shortlist drops exactly those, and it showed up as top-10 recall of 0.60 against the
+        unrestricted result.
+
+        Neither ranking alone is right either - coverage alone would fill the shortlist with
+        one-function samples at 100%. So the two rankings are interleaved, and the shortlist is
+        the first `shortlist_size` distinct samples of that merge: whichever ranking a sample
+        belongs in, it only has to be near the top of *one* of them to survive.
+        """
+        function_counts = {}
+        counts_getter = getattr(self._storage, "getSampleFunctionCounts", None)
+        if counts_getter is not None:
+            function_counts = counts_getter()
+        by_count = sorted(votes.items(), key=lambda item: (-item[1], item[0]))
+        by_coverage = sorted(votes.items(), key=lambda item: (-(item[1] / max(1, function_counts.get(item[0], 1))), -item[1], item[0]))
+        shortlist: Set[int] = set()
+        for position in range(max(len(by_count), len(by_coverage))):
+            for ranking in (by_count, by_coverage):
+                if position < len(ranking):
+                    shortlist.add(ranking[position][0])
+                    if len(shortlist) >= shortlist_size:
+                        return shortlist
+        return shortlist
+
+    def _restrictToShortlist(self, candidate_groups: Dict[int, Set[int]]) -> Dict[int, Set[int]]:
+        """Drop candidates outside the shortlist, so the exact stage is bounded by it."""
+        if self._sample_shortlist is None:
+            return candidate_groups
+        if self._shortlist_array is None:
+            self._shortlist_array = np.fromiter(sorted(self._sample_shortlist), dtype=np.int64, count=len(self._sample_shortlist))
+        restricted = {}
+        for function_id, candidate_ids in candidate_groups.items():
+            if not candidate_ids:
+                continue
+            candidates = np.fromiter(candidate_ids, dtype=np.int64, count=len(candidate_ids))
+            sample_ids = self._resolveSampleIds(candidates)
+            if sample_ids is None:
+                return candidate_groups
+            surviving = candidates[np.isin(sample_ids, self._shortlist_array)]
+            if surviving.size:
+                restricted[function_id] = set(surviving.tolist())
+        return restricted
 
     def _createMatchingCache(self, candidate_groups):
         # Query, VS, Sample
@@ -154,6 +288,8 @@ class MatcherInterface:
             # from inside the batch loop) would otherwise keep up to
             # STORAGE_MATCHING_CACHE_MAX_ENTRIES minhashes pinned for this matcher's lifetime.
             self._matching_cache = None
+            self._shortlist_candidate_cache = None
+            self._shortlist_array = None
 
     def _iterCandidateGroupBatches(self):
         """Yield candidate_groups dicts sized for one cache+scoring pass each.
@@ -220,6 +356,9 @@ class MatcherInterface:
         all_minhash_matches = {}
         # only do minhashing, if we have bands to evaluate
         if self._band_matches_required > 0:
+            # stage 1 runs once for the whole query, not per batch: a shortlist that differed
+            # between batches would make the reported matches depend on batch boundaries
+            self._sample_shortlist = self._computeSampleShortlist(pichash_matches)
             for candidate_groups in self._iterCandidateGroupBatches():
                 LOGGER.info("Created candidate groups from MinHash bands")
                 matching_cache = self._createMatchingCache(candidate_groups)

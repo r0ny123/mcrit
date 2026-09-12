@@ -29,6 +29,7 @@ import statistics
 import sys
 import time
 from collections import OrderedDict
+from typing import Any, Dict
 
 logging.basicConfig(level=logging.WARNING)
 for name in ("mcrit", "mcrit.matchers.MatcherInterface", "mcrit.Worker", "mcrit.index.MinHashIndex"):
@@ -42,6 +43,12 @@ def make_config(db_name, mongo_host="127.0.0.1", mongo_port="27017", overrides=N
     config.STORAGE_CONFIG.STORAGE_MONGODB_DBNAME = db_name
     config.STORAGE_CONFIG.STORAGE_SERVER = mongo_host
     config.STORAGE_CONFIG.STORAGE_PORT = mongo_port
+    # The harness builds a fresh index (and therefore a fresh connection pool) per measured
+    # run, so pymongo's default maxPoolSize of 100 multiplies quickly. mongod answers a file
+    # descriptor it cannot get by aborting the whole server with a WiredTiger panic (errno 24),
+    # which looks like data loss rather than a benchmark harness holding too many sockets -
+    # so the pools are kept small here.
+    config.STORAGE_CONFIG.STORAGE_MONGODB_FLAGS = "maxPoolSize=8"
     config.QUEUE_CONFIG.QUEUE_SERVER = mongo_host
     config.QUEUE_CONFIG.QUEUE_PORT = mongo_port
     config.QUEUE_CONFIG.QUEUE_MONGODB_DBNAME = db_name + "_queue"
@@ -202,7 +209,7 @@ def cmd_match(args):
             report = matcher.getMatchesForSample(query_id)
             total = time.perf_counter() - started
             sample_info = report["info"]["sample"]
-            record = {
+            record: Dict[str, Any] = {
                 "sample_id": query_id,
                 "family": sample_info.get("family"),
                 "num_query_functions": sample_info.get("statistics", {}).get("num_functions", 0),
@@ -223,7 +230,7 @@ def cmd_match(args):
             extra = "  " + json.dumps(entry["observed"]) if entry["observed"] else ""
             print("    %-24s %7.3f s  (%d calls)%s" % (label, entry["seconds"], entry["calls"], extra), flush=True)
 
-    totals = [record["total_seconds"] for record in results]
+    totals = [float(record["total_seconds"]) for record in results]
     summary = {
         "db": args.db,
         "num_corpus_samples": num_samples,

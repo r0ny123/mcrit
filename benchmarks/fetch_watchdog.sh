@@ -14,8 +14,8 @@ LOG_DIR="${2:-/home/user/data}"
 PYTHON="${PYTHON:-/home/user/venv/bin/python}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK_INTERVAL="${CHECK_INTERVAL:-300}"   # how often to look
-STALL_CHECKS="${STALL_CHECKS:-3}"         # consecutive idle checks before restarting
-RATE="${RATE:-0.4}"
+STALL_CHECKS="${STALL_CHECKS:-2}"         # consecutive idle checks before restarting
+RATE="${RATE:-0.8}"
 
 count_done() { find "$OUT_DIR" -name '*.done' 2>/dev/null | wc -l; }
 

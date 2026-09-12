@@ -93,7 +93,7 @@ class RateLimiter:
             time.sleep(wait)
 
 
-def get_with_retry(session, url, limiter, attempts=9, timeout=300):
+def get_with_retry(session, url, limiter, attempts=9, timeout=90):
     """GET with the shared pacing and exponential backoff on 429/5xx."""
     last_error = None
     for attempt in range(attempts):
@@ -104,13 +104,13 @@ def get_with_retry(session, url, limiter, attempts=9, timeout=300):
                 last_error = "HTTP %d" % response.status_code
                 # the server is telling us the global pace is still too high; backing off
                 # here (rather than failing the sample) is what keeps a long fetch intact
-                time.sleep(min(900.0, 5.0 * (2**attempt)))
+                time.sleep(min(120.0, 3.0 * (2**attempt)))
                 continue
             response.raise_for_status()
             return response
         except requests.RequestException as error:
             last_error = error
-            time.sleep(min(900.0, 5.0 * (2**attempt)))
+            time.sleep(min(120.0, 3.0 * (2**attempt)))
     raise RuntimeError("giving up on %s after %d attempts: %s" % (url, attempts, last_error))
 
 
