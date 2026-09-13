@@ -96,6 +96,27 @@ signatures and so are more diverse than real library code), which means this des
 validated for pichash behaviour at a million real samples. The same two remedies apply as for
 bands - a document-frequency cutoff and a top-K bound - and neither is implemented.
 
+## End-to-end validation on a real instance
+
+The numbers above come from the benchmark harness driving the matcher in-process. The same
+configuration was also run through an actual MCRIT deployment - `mcrit server` (waitress) plus
+a `mcrit worker`, against the 12,500-sample corpus, with `MINHASH_MATCHING_SHORTLIST_SIZE=100`
+and `STORAGE_BAND_DF_CUTOFF=200` - by POSTing a real 1-vs-N job and reading the stored result
+back over the REST API:
+
+```
+GET /matches/sample/148          -> job 6aa6009529e14ab92c3a50fa
+GET /results/<result_id>         -> 286,543 bytes, 100 matched samples, 754 query functions
+```
+
+- **2.18 s** job duration end to end, queue to stored result.
+- The worker logged `Vectorized matching over 5753 pairs in 618 candidate groups` - the
+  shortlist took the same query from **361,325 candidate pairs to 5,753**, a 63x reduction in
+  scoring work.
+- The result is correct, not merely fast: the query sample is `win.zloader`, and the four
+  highest-scoring matches are all `win.zloader` (51.6%, 21.9%, 21.5%, 21.0%), with the first
+  synthetic filler sample only appearing at 8.1%.
+
 ## The architecture, and why
 
 Keep LSH banding - it is already the correct index for MinHash/Jaccard, and every dense-vector
