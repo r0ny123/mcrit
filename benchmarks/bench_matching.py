@@ -137,6 +137,14 @@ def cmd_index(args):
         chunk_sample_ids = []
         for path in chunk_paths:
             try:
+                # The report file is named for the sha256 of the sample it describes, and that
+                # is exactly what addSmdaReport dedupes on - so an already-indexed sample can be
+                # skipped without gunzipping and parsing a report only to throw it away. This is
+                # the whole cost of resuming: a restart part-way through a 7,803-report corpus
+                # otherwise re-parses every report it already has.
+                sha256 = os.path.basename(path).split(".")[0]
+                if len(sha256) == 64 and storage.getSampleBySha256(sha256) is not None:
+                    continue
                 report = load_report(path)
                 # SMDA writes a report even when it recovered no functions (packed, .NET, or a
                 # format it cannot read); such a report has no statistics to count.
