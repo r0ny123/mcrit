@@ -151,6 +151,27 @@ class TwoStageMatchingTest(TestCase):
         finally:
             storage._setFunctionRangeIndexComplete(True)
 
+    def testFreshDatabaseVouchesForBothIndexes(self):
+        """A database with no functions maintains both indexes from its first write.
+
+        Without this a new instance would keep both perfectly up to date and still take the
+        fallback path forever, because nothing had ever vouched for them.
+        """
+        config = buildConfig()
+        config.STORAGE_CONFIG.STORAGE_MONGODB_DBNAME = DB_NAME + "_fresh"
+        storage = MinHashIndex(config=config)._storage
+        storage.clearStorage()
+        self.assertTrue(storage.isFunctionRangeIndexComplete())
+        self.assertTrue(storage.isBandDfIndexComplete())
+
+    def testBandDfIsMaintainedOnInsert(self):
+        """df must equal the posting list it counts, or the cutoff hides lists that should match."""
+        storage = MinHashIndex(config=buildConfig())._storage
+        for band_number in range(storage._storage_config.STORAGE_NUM_BANDS):
+            collection = storage._getDb()["band_%d" % band_number]
+            mismatching = collection.count_documents({"$expr": {"$ne": ["$df", {"$size": {"$ifNull": ["$function_ids", []]}}]}})
+            self.assertEqual(mismatching, 0, "band_%d has %d documents whose df disagrees with its posting list" % (band_number, mismatching))
+
     def testBandDfCutoffKeepsMatchesItDoesNotFilter(self):
         """A cutoff above every posting list must leave results identical."""
         reference = self._match()

@@ -229,8 +229,20 @@ class MongoDbStorage(StorageInterface):
         # into this code: it keeps using the scan until an operator rebuilds. Correctness first;
         # an index that is merely present would report blocks as unique that are not.
         # find_one is used rather than a count because this runs on every storage construction.
-        if not self._isPicBlockHashIndexComplete() and self._getDb()["functions"].find_one({}, {"_id": 1}) is None:
+        # Same argument for the two indexes two-stage matching depends on, and the same
+        # find_one rather than a count, since this runs on every storage construction. Both are
+        # maintained from the first write - addSmdaReport records the sample's function id span,
+        # and _updateBands keeps each posting list's df - so a database with no functions has
+        # them trivially complete. Without this a fresh instance would maintain both correctly
+        # and still take the fallback path forever, because nothing had vouched for them.
+        is_empty = self._getDb()["functions"].find_one({}, {"_id": 1}) is None
+        if not self._isPicBlockHashIndexComplete() and is_empty:
             self._setPicBlockHashIndexComplete(True)
+        if is_empty:
+            if not self.isFunctionRangeIndexComplete():
+                self._setFunctionRangeIndexComplete(True)
+            if not self.isBandDfIndexComplete():
+                self._setBandDfIndexComplete(True)
         self._getDb()["samples"].create_index("sample_id")
         self._getDb()["samples"].create_index("sha256")
         self._getDb()["samples"].create_index("family_id")
