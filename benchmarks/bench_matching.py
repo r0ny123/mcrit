@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import random
+import resource
 import statistics
 import sys
 import time
@@ -246,10 +247,17 @@ def cmd_match(args):
         timer.wrap(MatcherSample, "_computeSampleShortlist", "shortlist_stage1")
         timer.wrap(MatcherSample, "_restrictToShortlist", "shortlist_restrict")
         matcher = MatcherSample(worker)
+        # Peak RSS, not just wall time. Upstream issue #69 is this same problem seen from the
+        # memory side - workers reaching tens of GB on a 20M-function instance - and this
+        # project's own tuning notes measured peak RSS correlating 0.98 with bytes fetched from
+        # MongoDB. Bounding candidates should bound the peak, and that claim needs a number.
+        # ru_maxrss is a process-wide high-water mark, so it is the peak observed up to and
+        # including this query, not this query's own allocation.
         started = time.perf_counter()
         try:
             report = matcher.getMatchesForSample(query_id)
             total = time.perf_counter() - started
+            peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
             sample_info = report["info"]["sample"]
             record: Dict[str, Any] = {
                 "sample_id": query_id,
@@ -257,6 +265,7 @@ def cmd_match(args):
                 "family": sample_info.get("family"),
                 "num_query_functions": sample_info.get("statistics", {}).get("num_functions", 0),
                 "total_seconds": total,
+                "peak_rss_mb": peak_rss_mb,
                 "num_matched_samples": len(report["matches"]["samples"]),
                 "num_matched_functions": len(report["matches"]["functions"]),
                 "stages": {label: dict(entry) for label, entry in timer.stages.items()},
@@ -265,8 +274,16 @@ def cmd_match(args):
             timer.restore()
         results.append(record)
         print(
-            "sample %d (%s): %.3f s  %d query functions -> %d matched samples, %d matched functions"
-            % (query_id, record["family"], record["total_seconds"], record["num_query_functions"], record["num_matched_samples"], record["num_matched_functions"]),
+            "sample %d (%s): %.3f s  peak RSS %.0f MB  %d query functions -> %d matched samples, %d matched functions"
+            % (
+                query_id,
+                record["family"],
+                record["total_seconds"],
+                record["peak_rss_mb"],
+                record["num_query_functions"],
+                record["num_matched_samples"],
+                record["num_matched_functions"],
+            ),
             flush=True,
         )
         for label, entry in record["stages"].items():
@@ -282,10 +299,12 @@ def cmd_match(args):
         "median_total_seconds": statistics.median(totals) if totals else 0.0,
         "mean_total_seconds": statistics.fmean(totals) if totals else 0.0,
         "max_total_seconds": max(totals) if totals else 0.0,
+        "peak_rss_mb": max((float(record["peak_rss_mb"]) for record in results), default=0.0),
         "config_overrides": overrides,
     }
     print(
-        "\nmedian %.3f s, mean %.3f s, max %.3f s over %d queries" % (summary["median_total_seconds"], summary["mean_total_seconds"], summary["max_total_seconds"], len(totals)),
+        "\nmedian %.3f s, mean %.3f s, max %.3f s over %d queries; peak RSS %.0f MB"
+        % (summary["median_total_seconds"], summary["mean_total_seconds"], summary["max_total_seconds"], len(totals), summary["peak_rss_mb"]),
         flush=True,
     )
     if args.json:
