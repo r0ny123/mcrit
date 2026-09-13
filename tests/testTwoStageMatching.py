@@ -258,6 +258,24 @@ class TwoStageMatchingTest(TestCase):
             rebuild()
             self.assertTrue(is_complete(), "%s did not restore its flag on a clean run" % rebuild.__name__)
 
+    def testBandRebuildKeepsTheIndexTheCutoffNeeds(self):
+        """Rebuilding the bands must leave the (band_hash, df) index the cutoff reads.
+
+        _updateBands maintains df from the first write, so a rebuilt band collection has correct
+        counts either way - the failure is silent and performance-only: without the compound
+        index STORAGE_BAND_DF_CUTOFF falls back to scanning, which is the cost it exists to
+        avoid. Cheap to assert, invisible otherwise.
+        """
+        storage = MinHashIndex(config=buildConfig())._storage
+        storage.rebuildMinhashBandIndex()
+        for band_number in range(storage._storage_config.STORAGE_NUM_BANDS):
+            index_keys = [tuple(index["key"].items()) for index in storage._getDb()["band_%d" % band_number].list_indexes()]
+            self.assertIn(
+                (("band_hash", 1), ("df", 1)),
+                index_keys,
+                "band_%d lost the (band_hash, df) index the df cutoff reads" % band_number,
+            )
+
     def testPicHashCutoffDefaultsToOff(self):
         self.assertEqual(MinHashConfig().MINHASH_PICHASH_MAX_MATCHES, 0)
 

@@ -2073,6 +2073,10 @@ class MongoDbStorage(StorageInterface):
             collections.append("band_%d" % band_id)
         for c in collections:
             self._getDb()[c].create_index("band_hash")
+            # the df cutoff reads (band_hash, df); without this the rebuilt bands would carry a
+            # correct df - _updateBands maintains it by $inc from the first write - that no index
+            # could serve, so STORAGE_BAND_DF_CUTOFF would silently fall back to scanning
+            self._getDb()[c].create_index([("band_hash", 1), ("df", 1)])
         # re-add minhashes in batches
         total_functions = self._getDb().functions.count_documents(filter={})
         minhash_functions = 0
