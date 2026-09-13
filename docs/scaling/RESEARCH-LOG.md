@@ -184,6 +184,37 @@ matching-cache fetch 0.923 s -> 0.069 s, scoring 0.411 s -> 0.048 s, result asse
   interleave counter reservations - which happened on this corpus and silently disabled the
   shortlist. Spans are now stored per run, exact for any layout.
 
+## 5b. A mistake worth recording: dropping disassembly before hashing
+
+While building the full real corpus, disk ran low and I dropped the `xcfg` collection mid-run
+to reclaim it, on the belief that disassembly is retrievable detail the matching path never
+reads. **That belief was wrong, and it cost the run.** `xcfg` is the *input* to minhash
+computation - `Worker.calculateMinHashes` reads `FunctionEntry.xcfg` through
+`_attachXcfgBlobs` - so removing it before a sample is hashed leaves that sample permanently
+unhashable. The damage was silent: no error, no failed job, just 3.97M of 5.2M functions
+carrying neither disassembly nor a minhash, and a corpus that would have quietly under-reported
+every match had it been measured.
+
+It was recoverable because the failure had a clean boundary - every sample hashed before the
+drop was fine, everything after it was not - so the 2,540 affected samples were deleted (they
+had no band entries either, never having been hashed) and the validated 2,016-sample corpus was
+re-verified against its earlier numbers before anything else was done to it.
+
+The underlying defect was in the harness, not the impulse. Two-phase indexing (add everything,
+then hash everything) exists because per-sample hashing spawns a process pool per sample and
+measured 3.1 s a sample; but it also holds the disassembly of *every* sample in the run at once,
+and `xcfg` is ~70% of the stored bytes - 4.28 GB for 3.3M functions on a host with 8 GB free.
+`benchmarks/bench_matching.py` now adds, hashes and drops **per chunk**, which keeps the pool
+amortised while bounding peak disk to one chunk's disassembly. MCRIT's own
+`updateMinHashesForSample` already had the right shape; the harness had optimised it away.
+
+Two general lessons, both cheap to state and expensive to learn:
+
+- *"The query path never reads it"* is not the same as *"nothing needs it"*. Ask what **writes**
+  depend on it too.
+- Reclaiming disk under pressure is exactly when a destructive shortcut looks reasonable. The
+  same pressure is what makes it a bad time to reason about what is safe to delete.
+
 ## 6. Operational notes (things that cost real time here)
 
 - **mongod aborts rather than degrades when it runs out of file descriptors.** The container's

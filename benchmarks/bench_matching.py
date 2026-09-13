@@ -82,6 +82,8 @@ def iter_report_paths(reports_dir, limit=0):
 
 
 def cmd_index(args):
+    from smda.SmdaConfig import SmdaConfig
+
     from mcrit.index.MinHashIndex import MinHashIndex
 
     config = make_config(args.db, args.mongo_host, args.mongo_port)
@@ -112,53 +114,55 @@ def cmd_index(args):
         return
 
     paths = iter_report_paths(args.reports, args.limit)
-    print("indexing %d reports into db '%s'" % (len(paths), args.db), flush=True)
+    print("indexing %d reports into db '%s' in chunks of %d" % (len(paths), args.db, args.chunk_size), flush=True)
     started = time.time()
     num_functions = 0
     num_indexed = 0
-    indexed_sample_ids = []
-    # Two phases on purpose. updateMinHashesForSample() per sample spawns a process pool per
-    # sample (MINHASH_POOL_INDEXING), which for ~500-function samples costs more than the
-    # hashing: measured 3.1 s/sample. Adding every report first and then hashing the whole
-    # backlog in MINHASH_GENERATION_WORKPACK_SIZE batches pays for the pool once.
-    for position, path in enumerate(paths, start=1):
-        try:
-            report = load_report(path)
-            # SMDA writes a report even when it recovered no functions (packed, .NET, or a
-            # format it cannot read). Such a report has no statistics for addSmdaReport to
-            # count, and indexing it would only add an empty sample to the corpus.
-            if not report.num_functions:
-                continue
-            sample_entry = storage.addSmdaReport(report)
-            if sample_entry is None:  # already present
-                continue
-            indexed_sample_ids.append(sample_entry.sample_id)
-            num_functions += sample_entry.statistics.get("num_functions", 0)
-            num_indexed += 1
-        except Exception as error:
-            print("FAIL %s: %s: %s" % (path, type(error).__name__, error), file=sys.stderr, flush=True)
-        if position % 100 == 0:
-            elapsed = time.time() - started
-            print("added %d/%d  %d functions  %.2f samples/s" % (position, len(paths), num_functions, position / max(1e-9, elapsed)), flush=True)
-    added_seconds = time.time() - started
-    print("added %d samples / %d functions in %.1f s; now hashing" % (num_indexed, num_functions, added_seconds), flush=True)
-    hashing_started = time.time()
-    worker.updateMinHashes(None)
-    from smda.SmdaConfig import SmdaConfig
 
-    if indexed_sample_ids:
-        storage.setMinHashVersionForSamples(SmdaConfig().VERSION, indexed_sample_ids)
-    if getattr(args, "drop_disassembly", False):
-        # updateMinHashesForSample would do this per sample; the two-phase path above hashes in
-        # bulk and never calls it, so the drop has to happen here or it silently does not happen
-        for sample_id in indexed_sample_ids:
-            storage.deleteXcfgForSampleId(sample_id)
-        print("dropped disassembly for %d samples" % len(indexed_sample_ids), flush=True)
-    elapsed = time.time() - started
-    print(
-        "indexed %d samples / %d functions in %.1f s (add %.1f s, hash %.1f s)" % (num_indexed, num_functions, elapsed, added_seconds, time.time() - hashing_started),
-        flush=True,
-    )
+    # Add, hash, then drop disassembly - per chunk, not once for the whole corpus.
+    #
+    # Two phases (add everything, then hash everything) amortises the hashing process pool,
+    # which is why it exists: per-sample hashing spawns a pool per sample and measured 3.1 s a
+    # sample. But it also means the xcfg of every sample in the run is resident at once, and
+    # xcfg is ~70% of the stored bytes - measured 4.28 GB for 3.3M functions here, on a host
+    # with 8 GB free. Chunking keeps the pool amortised over the chunk while bounding peak disk
+    # to one chunk's disassembly.
+    #
+    # The disassembly cannot simply be skipped: it is the *input* to minhash computation
+    # (Worker.calculateMinHashes reads FunctionEntry.xcfg), not merely retrievable detail.
+    # Dropping it before hashing silently leaves functions unhashable - which is exactly what
+    # happened on this corpus, leaving 3.97M of 5.2M functions with neither xcfg nor a minhash.
+    for chunk_start in range(0, len(paths), args.chunk_size):
+        chunk_paths = paths[chunk_start : chunk_start + args.chunk_size]
+        chunk_sample_ids = []
+        for path in chunk_paths:
+            try:
+                report = load_report(path)
+                # SMDA writes a report even when it recovered no functions (packed, .NET, or a
+                # format it cannot read); such a report has no statistics to count.
+                if not report.num_functions:
+                    continue
+                sample_entry = storage.addSmdaReport(report)
+                if sample_entry is None:  # already present
+                    continue
+                chunk_sample_ids.append(sample_entry.sample_id)
+                num_functions += sample_entry.statistics.get("num_functions", 0)
+                num_indexed += 1
+            except Exception as error:
+                print("FAIL %s: %s: %s" % (path, type(error).__name__, error), file=sys.stderr, flush=True)
+        if chunk_sample_ids:
+            worker.updateMinHashes(None)
+            storage.setMinHashVersionForSamples(SmdaConfig().VERSION, chunk_sample_ids)
+            if args.drop_disassembly:
+                for sample_id in chunk_sample_ids:
+                    storage.deleteXcfgForSampleId(sample_id)
+        elapsed = time.time() - started
+        print(
+            "%d/%d reports  %d samples  %d functions  %.2f samples/s"
+            % (min(chunk_start + args.chunk_size, len(paths)), len(paths), num_indexed, num_functions, num_indexed / max(1e-9, elapsed)),
+            flush=True,
+        )
+    print("indexed %d samples / %d functions in %.1f s" % (num_indexed, num_functions, time.time() - started), flush=True)
     print(json.dumps(index.getStatus(), indent=2), flush=True)
 
 
@@ -331,6 +335,9 @@ def main():
     index_parser.add_argument("--reports", required=True)
     index_parser.add_argument("--db", required=True)
     index_parser.add_argument("--limit", type=int, default=0)
+    index_parser.add_argument(
+        "--chunk-size", type=int, default=500, help="samples added and hashed per chunk; bounds peak disk, since disassembly is only dropped after a chunk is hashed"
+    )
     index_parser.add_argument("--hash-only", action="store_true", help="skip adding reports and just hash what is already stored (resume an interrupted index)")
     index_parser.add_argument(
         "--drop-disassembly",
