@@ -201,8 +201,21 @@ def cmd_match(args):
     num_samples = status["status"]["num_samples"]
     print("corpus: %d samples, %d functions, %d families" % (num_samples, status["status"]["num_functions"], status["status"]["num_families"]), flush=True)
 
-    sample_ids = sorted(sample.sample_id for sample in storage.getSamples(start_index=0, limit=0))
-    if args.query_sample_ids:
+    all_samples = storage.getSamples(start_index=0, limit=0)
+    sample_ids = sorted(sample.sample_id for sample in all_samples)
+    if args.query_sha256:
+        # Sample ids are assigned per corpus, so the *same* sample has different ids in two
+        # differently-sized corpora. Selecting by sha256 is what makes a scaling comparison
+        # controlled across separately built databases rather than only within one.
+        by_sha256 = {sample.sha256: sample.sample_id for sample in all_samples}
+        queries = []
+        for sha256 in args.query_sha256.split(","):
+            sha256 = sha256.strip()
+            if sha256 not in by_sha256:
+                raise KeyError("sha256 %s is not in corpus '%s'" % (sha256, args.db))
+            queries.append(by_sha256[sha256])
+        print("resolved %d query sha256 to sample ids %s" % (len(queries), queries), flush=True)
+    elif args.query_sample_ids:
         queries = [int(value) for value in args.query_sample_ids.split(",")]
     else:
         rng = random.Random(args.seed)
@@ -228,6 +241,7 @@ def cmd_match(args):
             sample_info = report["info"]["sample"]
             record: Dict[str, Any] = {
                 "sample_id": query_id,
+                "sha256": sample_info.get("sha256"),
                 "family": sample_info.get("family"),
                 "num_query_functions": sample_info.get("statistics", {}).get("num_functions", 0),
                 "total_seconds": total,
@@ -289,6 +303,7 @@ def main():
     match_parser.add_argument("--db", required=True)
     match_parser.add_argument("--queries", type=int, default=5)
     match_parser.add_argument("--query-sample-ids", default="", help="comma-separated ids, overrides --queries")
+    match_parser.add_argument("--query-sha256", default="", help="comma-separated sha256, overrides both - the way to query the same samples across differently sized corpora")
     match_parser.add_argument("--seed", type=int, default=23)
     match_parser.add_argument("--json", default="")
     match_parser.add_argument("--config-overrides", default="", help="JSON of config field -> value")
