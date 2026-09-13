@@ -464,10 +464,17 @@ its private address (`GH007`). Everything here is authored as
   `"pytest==9.1.1" "pytest-cov==7.1.0"` after the editable install, while the older variant
   installs an unpinned `pytest` before it, and both edit the same region of the same file.
   Git merges them anyway. 56 of the 63 already carry #9's exact change, so for them the
-  merge is a no-op; the other 7 (#36, #42, #48, #63, #64, #65, #66) end up with **both**
-  install lines. Harmless - the pinned install runs last and wins - but it is duplicated
-  cruft with two contradictory comments, and worth removing the next time each of those
-  branches is touched for another reason.
+  merge is a no-op; the other 7 (#36, #42, #48, #63, #64, #65, #66) ended up with **both**
+  install lines - harmless, since the pinned install runs last and wins, but duplicated
+  cruft carrying two contradictory comments about why the line is there.
+
+  **Tidied the same day.** master was merged into the three standalone branches of the
+  seven (#66, #65, #63) and the unpinned lines removed; the four stacked on #66 (#64, #48,
+  #42, #36) took both through their base, which is why their merge needed no edit of its
+  own. The result is asserted rather than eyeballed - each branch's `Install dependencies`
+  block is compared byte-for-byte against master's before the push, and the file is checked
+  to contain exactly one pinned install and no unpinned one. All **62/62** open PR heads
+  now match master's block exactly, and all seven are 0 commits behind master.
 - **The eight stale branches holding the cookie blob** are the last tree references to it.
   None has an open PR; deleting them is the complete cleanup and needs the owner's
   go-ahead (section 5).
