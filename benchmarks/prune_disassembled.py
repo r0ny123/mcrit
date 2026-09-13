@@ -10,6 +10,11 @@ already has.
 Reports are named by the sha256 of the file *content*, which is what this re-computes - a
 sample is only deleted when its own content hashes to a report that exists.
 
+**Run it occasionally, not on a timer.** Hashing every sample file is gigabytes of reads, and
+on a small host that is enough I/O to starve the fetch and the disassembly it is supposed to be
+helping: running this every ten minutes took the load average from 4 to 26 and stalled the
+Malpedia fetch completely, with no error anywhere to say why. Run it when disk gets tight.
+
 Usage:
     python benchmarks/prune_disassembled.py --samples data/malpedia_api --reports data/reports [--apply]
 """

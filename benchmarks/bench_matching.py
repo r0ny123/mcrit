@@ -84,6 +84,8 @@ def cmd_index(args):
     from mcrit.index.MinHashIndex import MinHashIndex
 
     config = make_config(args.db, args.mongo_host, args.mongo_port)
+    if getattr(args, "drop_disassembly", False):
+        config.STORAGE_CONFIG.STORAGE_DROP_DISASSEMBLY = True
     index = MinHashIndex(config=config)
     worker = index.queue._worker
     storage = index._storage
@@ -120,6 +122,12 @@ def cmd_index(args):
 
     if indexed_sample_ids:
         storage.setMinHashVersionForSamples(SmdaConfig().VERSION, indexed_sample_ids)
+    if getattr(args, "drop_disassembly", False):
+        # updateMinHashesForSample would do this per sample; the two-phase path above hashes in
+        # bulk and never calls it, so the drop has to happen here or it silently does not happen
+        for sample_id in indexed_sample_ids:
+            storage.deleteXcfgForSampleId(sample_id)
+        print("dropped disassembly for %d samples" % len(indexed_sample_ids), flush=True)
     elapsed = time.time() - started
     print(
         "indexed %d samples / %d functions in %.1f s (add %.1f s, hash %.1f s)" % (num_indexed, num_functions, elapsed, added_seconds, time.time() - hashing_started),
@@ -265,6 +273,11 @@ def main():
     index_parser.add_argument("--reports", required=True)
     index_parser.add_argument("--db", required=True)
     index_parser.add_argument("--limit", type=int, default=0)
+    index_parser.add_argument(
+        "--drop-disassembly",
+        action="store_true",
+        help="discard xcfg once minhashes exist (STORAGE_DROP_DISASSEMBLY). Matching never reads it, and it is ~66%% of the stored bytes",
+    )
     index_parser.set_defaults(func=cmd_index)
 
     match_parser = subparsers.add_parser("match")
