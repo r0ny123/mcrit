@@ -17,31 +17,58 @@ bigger. 5,930 matched samples is not an answer anybody reads.
 
 ## Baseline vs final
 
-Fixed query set (samples 148, 157, 8), same corpus grown in place, warm cache:
+Fixed query set (samples 148, 157, 8), same query samples at both corpus sizes, warm cache,
+repeated runs (2 for one-stage, 3 for two-stage) and averaged. Two-stage is
+`MINHASH_MATCHING_SHORTLIST_SIZE=100`, `STORAGE_BAND_DF_CUTOFF=200`.
 
-| corpus | one-stage (stock) | two-stage (shortlist 100, df cutoff 1000) | speedup |
-|---|---|---|---|
-| 257 | **0.410 s** | 0.681 s | 0.60x *(slower - nothing to save yet)* |
-| 12,500 | **5.645 s** | **1.172 s** | **4.8x** |
+| | 257 samples | 12,500 samples | growth | fitted exponent k in latency ~ corpus^k |
+|---|---|---|---|---|
+| **one-stage median** | 0.429 s | 4.427 s | 10.32x | **+0.601** |
+| **one-stage mean** | 0.521 s | 3.392 s | 6.50x | +0.482 |
+| **one-stage max** | 0.954 s | 5.188 s | 5.44x | +0.436 |
+| **two-stage median** | 0.645 s | 0.374 s | **0.58x** | **-0.140** |
+| **two-stage mean** | 0.868 s | 0.835 s | **0.96x** | -0.010 |
+| **two-stage max** | 1.695 s | 1.810 s | **1.07x** | +0.017 |
 
-Across that 48.6x growth in corpus size:
+The corpus grew **48.6x**. One-stage latency grew with it. **Two-stage latency did not grow at
+all** - mean moved -4%, max +7%, both inside run-to-run variation. The remaining cost is set by
+the *query* (how many functions it has) and by the shortlist size, not by how much corpus there
+is, which is exactly the property the goal asked for.
 
-| | latency growth | fitted exponent (latency ~ corpus^k) |
+The median even falls slightly, and that is a measurement artefact worth naming rather than
+claiming: the 257-sample corpus is real samples carrying `xcfg` disassembly, so loading the
+query sample's own functions costs more there than in the leaner synthetic corpus. It is a
+constant per-query cost on the query side, unrelated to corpus size; the honest reading of the
+median row is "no growth", not "gets faster".
+
+**Extrapolated to 1,000,000 samples** (80x beyond the measured 12,500), applying the fitted
+exponents:
+
+| | one-stage | two-stage |
 |---|---|---|
-| one-stage | 13.77x | **k = 0.675** |
-| two-stage | 1.72x | **k = 0.140** |
+| median | ~62 s | **~0.4 s** |
+| mean | ~28 s | **~0.8 s** |
+| max | ~35 s | **~2.0 s** |
 
-Tail behaviour at 12,500 samples matters more than the median, and moves further:
+For two-stage these are near-flat projections of a near-zero exponent, so they mostly restate
+the measured 12,500-sample numbers - which is the claim: at a million samples the query should
+still cost what it costs today.
 
-| | median | mean | max |
-|---|---|---|---|
-| one-stage | 5.645 s | 11.152 s | 27.215 s |
-| two-stage | 1.172 s | 1.209 s | 2.093 s |
-| | 4.8x | **9.2x** | **13.0x** |
+### What the cutoff is worth
 
-**Extrapolated to 1,000,000 samples** using the fitted exponents (80x beyond the measured
-12,500): one-stage **~109 s**, two-stage **~2.2 s**. The extrapolation is a fit over two
-decades of real measurement, not a model of the code - see *Confidence* below.
+At 12,500 samples, holding the shortlist at 100 and varying only `STORAGE_BAND_DF_CUTOFF`:
+
+| cutoff | median | top-10 recall | top-25 recall | identical scores |
+|---|---|---|---|---|
+| 0 (off) | 0.814 s* | 1.000 | 1.000 | - |
+| 1000 | 1.172 s | 1.000 | 1.000 | 0.9945 |
+| 200 | **0.374 s** | **1.000** | **1.000** | 0.9936 |
+| 100 | 0.332 s | 1.000 | 1.000 | 0.9955 |
+
+\* measured at 10,000 samples before the corpus was grown further.
+
+200 is the recommended starting point: it is where the traversal stops scaling while top-K
+recall is still perfect. Tightening to 100 buys little more.
 
 ## Matching quality
 
@@ -51,7 +78,8 @@ Measured against the *unrestricted* result on the same corpus (`benchmarks/compa
 |---|---|---|---|
 | 257 | 1.000 | 1.000 | 1.000 |
 | 10,000 | 1.000 | 1.000 | 0.9945 |
-| 12,500 | 1.000 | 1.000 | 0.9945 |
+| 12,500 (cutoff 1000) | 1.000 | 1.000 | 0.9945 |
+| 12,500 (cutoff 200) | 1.000 | 1.000 | 0.9936 |
 
 The samples a user actually reads are all retained, and a retained function match keeps a
 bit-identical score: restricting *which* samples are matched does not change *how* they are
@@ -99,7 +127,9 @@ Measured build cost at 12,500 samples / ~10M functions: 145 s and 147 s.
 ## Confidence, and what the numbers do not say
 
 - **Measured** up to 12,500 samples / ~10.2M functions. The 1M figures are **extrapolations**
-  from the fitted exponents over a 48.6x measured range.
+  from the fitted exponents over a 48.6x measured range. For two-stage the fitted exponent is
+  within noise of zero, so the extrapolation is close to a restatement of the measurement; for
+  one-stage it is a genuine extrapolation of a clear trend.
 - The corpus is **257 real Malpedia samples** plus synthetic growth drawn from a process fitted
   to that corpus (functions-per-sample from the real empirical distribution; signatures from a
   preferential-attachment urn calibrated to the *measured* Heaps exponent, validated to within
@@ -108,8 +138,9 @@ Measured build cost at 12,500 samples / ~10M functions: 145 s and 147 s.
   samples were being fetched from the Malpedia API as this was written.
 - Single machine, single mongod. Numbers are warm-cache and single-query; concurrency was not
   measured.
-- The two-stage exponent is 0.14, not 0. Stage 1 still touches the index, and a flat cutoff is
-  a blunt instrument - see next steps.
+- Two-stage shows no measurable growth at cutoff 200, but "no growth measured over 48.6x" is
+  not "provably constant". Stage 1 still performs index lookups whose cost is logarithmic in
+  corpus size, and a flat cutoff remains a blunt instrument - see next steps.
 
 ## What remains
 
