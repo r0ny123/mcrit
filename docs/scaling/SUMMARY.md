@@ -93,8 +93,13 @@ share of the corpus returns one tuple per holder, so on a real million-sample co
 containing a common library function would pull a very large exact-match set. It did not bind in
 these measurements (0.02-0.07 s per query throughout, because synthetic pichashes derive from
 signatures and so are more diverse than real library code), which means this design is *not*
-validated for pichash behaviour at a million real samples. The same two remedies apply as for
-bands - a document-frequency cutoff and a top-K bound - and neither is implemented.
+validated for pichash behaviour at a million real samples. The document-frequency remedy is now
+implemented as `MINHASH_PICHASH_MAX_MATCHES` (default 0, off), which drops a PicHash held by
+more than N corpus functions. The holder count is taken from the `_pichash` index rather than
+by reading the documents, so an over-common hash costs an index probe instead of a fetch -
+the same trick that made the band cutoff worth having. It is **not** yet measured against a
+real corpus large enough for PicHash lookup to bind, which is why the recommended value stays
+0; a top-K bound on the exact-match path is still unimplemented.
 
 ## End-to-end validation on a real instance
 
@@ -183,10 +188,11 @@ Measured build cost at 12,500 samples / ~10M functions: 145 s and 147 s.
 4. **Adaptive shortlist size.** A fixed N is wrong in both directions - the right N depends on
    how sharply the vote distribution falls off. Stopping where the votes flatten would keep more
    of the tail on ambiguous queries and less on clear ones.
-5. **Bound the PicHash stage.** It is the one stage still linear in corpus size, and the one
-   whose behaviour the synthetic corpus is least able to predict, because synthetic pichashes
-   are more diverse than real library code. It needs the same df cutoff and top-K treatment the
-   band path got, measured on a real corpus.
+5. **Measure the PicHash cutoff on a real corpus.** The df cutoff for it now exists
+   (`MINHASH_PICHASH_MAX_MATCHES`), but the corpus this was built on cannot exercise it:
+   synthetic pichashes derive from signatures and so are more diverse than real library code,
+   so the stage never binds here. It needs a real corpus large enough to make it bind, and a
+   top-K bound on the exact-match path is still unimplemented.
 6. **Validate on a real corpus beyond 10k.** The Malpedia fetch was still running; re-running
    `benchmarks/scaling_sweep.py` over a fully real corpus would replace the synthetic points at
    the sizes it can reach.

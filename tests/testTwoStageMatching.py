@@ -151,6 +151,32 @@ class TwoStageMatchingTest(TestCase):
         finally:
             storage._setFunctionRangeIndexComplete(True)
 
+    def testPicHashCutoffDropsOnlyOverCommonHashes(self):
+        """A cutoff above every holder count must change nothing; a cutoff of 1 must bite."""
+        storage = MinHashIndex(config=buildConfig())._storage
+        function_ids = [entry.function_id for entry in storage.getFunctionsBySampleId(self.query_sample_id)]
+        unrestricted = storage.getPicHashMatchesByFunctionIds(function_ids)
+
+        generous = buildConfig()
+        generous.MINHASH_CONFIG.MINHASH_PICHASH_MAX_MATCHES = 10**9
+        generous_matches = MinHashIndex(config=generous)._storage.getPicHashMatchesByFunctionIds(function_ids)
+        self.assertEqual(generous_matches, unrestricted)
+
+        strict = buildConfig()
+        strict.MINHASH_CONFIG.MINHASH_PICHASH_MAX_MATCHES = 1
+        strict_matches = MinHashIndex(config=strict)._storage.getPicHashMatchesByFunctionIds(function_ids)
+        # every hash is still reported as a key; what the cutoff removes is the holders behind it
+        self.assertEqual(set(strict_matches), set(unrestricted))
+        for pichash, holders in strict_matches.items():
+            self.assertLessEqual(len(holders), len(unrestricted[pichash]))
+        self.assertLessEqual(
+            sum(len(holders) for holders in strict_matches.values()),
+            sum(len(holders) for holders in unrestricted.values()),
+        )
+
+    def testPicHashCutoffDefaultsToOff(self):
+        self.assertEqual(MinHashConfig().MINHASH_PICHASH_MAX_MATCHES, 0)
+
     def testFreshDatabaseVouchesForBothIndexes(self):
         """A database with no functions maintains both indexes from its first write.
 

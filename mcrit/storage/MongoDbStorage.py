@@ -1169,11 +1169,33 @@ class MongoDbStorage(StorageInterface):
         # one $in over all distinct pichashes instead of one query per pichash (N+1, #111);
         # grouping client-side by the returned _pichash reproduces the per-query sets exactly
         if encoded_to_decoded:
+            wanted = self._filterPicHashesByMatchCount(list(encoded_to_decoded))
             fields_to_fetch = {"_pichash": 1, "family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0}
-            for hit in self._getDb().functions.find({"_pichash": {"$in": list(encoded_to_decoded)}}, fields_to_fetch):
+            for hit in self._getDb().functions.find({"_pichash": {"$in": wanted}}, fields_to_fetch):
                 decoded_pichash = encoded_to_decoded[hit.get("_pichash")]
                 pichashes[decoded_pichash].add((hit["family_id"], hit["sample_id"], hit["function_id"]))
         return pichashes
+
+    def _filterPicHashesByMatchCount(self, encoded_pichashes: List[Any]) -> List[Any]:
+        """Drop pichashes held by more than MINHASH_PICHASH_MAX_MATCHES functions.
+
+        The counting pass groups on `_pichash`, which is indexed, so mongod answers it from the
+        index instead of reading the documents - the expensive half is fetching family, sample
+        and function id per hit, and that is what the cutoff avoids. Returns every hash
+        unchanged when the knob is off, so the default path pays nothing for this.
+        """
+        cutoff = getattr(self._minhash_config, "MINHASH_PICHASH_MAX_MATCHES", 0)
+        if cutoff <= 0 or not encoded_pichashes:
+            return encoded_pichashes
+        pipeline = [
+            {"$match": {"_pichash": {"$in": encoded_pichashes}}},
+            {"$group": {"_id": "$_pichash", "num_holders": {"$sum": 1}}},
+            {"$match": {"num_holders": {"$lte": cutoff}}},
+        ]
+        kept = [group["_id"] for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True)]
+        if len(kept) != len(encoded_pichashes):
+            LOGGER.info("PicHash cutoff %d dropped %d of %d hashes as too common", cutoff, len(encoded_pichashes) - len(kept), len(encoded_pichashes))
+        return kept
 
     def isFunctionId(self, function_id: int) -> bool:
         is_function_id = None

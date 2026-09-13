@@ -89,6 +89,7 @@ stage of a 1-vs-N query - and the result set itself - otherwise grows with the c
 |---|---|---|
 | `MINHASH_MATCHING_SHORTLIST_SIZE` | `0` (off) | how many corpus samples the exact matching stage may look at. A cheap stage ranks candidate samples first; only the best N are matched exactly |
 | `STORAGE_BAND_DF_CUTOFF` | `0` (off) | skip band hashes whose posting list is longer than this. A band hash held by much of the corpus is a stopword: expensive to read, uninformative about *which* samples match |
+| `MINHASH_PICHASH_MAX_MATCHES` | `0` (off) | skip PicHashes held by more than this many corpus functions. Same argument for the exact-match path, which the shortlist does not bound: a hash covering a common library function returns one tuple per holder |
 
 **Both default to off, so an upgrade changes nothing until you opt in.** Two indexes need one
 build each before they take effect, and neither is read until a completeness flag vouches for
@@ -106,6 +107,7 @@ Measured at 12,500 samples / ~10.2M functions: 145 s and 147 s respectively.
 ```
 MINHASH_MATCHING_SHORTLIST_SIZE = 100
 STORAGE_BAND_DF_CUTOFF = 200
+MINHASH_PICHASH_MAX_MATCHES = 0      # raise from 0 only once PicHash lookup shows up in timings
 ```
 
 Measured on a fixed query set at 257 and 12,500 samples — a **48.6x** growth in corpus size,

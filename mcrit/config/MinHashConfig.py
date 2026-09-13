@@ -80,6 +80,21 @@ class MinHashConfig(ConfigInterface):
     # in the answer not being ranked into it; benchmarks/compare_quality.py measures that recall
     # against the unbounded result.
     MINHASH_MATCHING_SHORTLIST_SIZE: int = 0
+    # Skip PicHashes held by more than this many corpus functions. 0 (the default) reports
+    # every exact match, i.e. the behaviour this knob was added to.
+    #
+    # PicHash lookup is the one stage two-stage matching does not bound, and it is linear in
+    # corpus size for the same reason banding was: a position-independent hash covering a common
+    # library function returns one tuple per holder. Measured on 257 real Malpedia samples the
+    # longest pichash posting list already held 16,976 functions, and that list grows with the
+    # corpus while the median (1) does not. At a million samples such a hash would return
+    # millions of tuples describing a function every sample contains - which is not an answer
+    # anyone reads, and is expensive to assemble.
+    #
+    # The count is taken from the _pichash index rather than by reading the documents, so a hash
+    # over the cutoff costs an index probe instead of a fetch. Like the band cutoff this trades
+    # recall for bounded work: exact matches through a hash that common stop being reported.
+    MINHASH_PICHASH_MAX_MATCHES: int = 0
     # when rebuilding minhash bands, work in packs of this size
     MINHASH_BAND_REBUILD_WORK_PACKAGE_SIZE: int = 100000
 
