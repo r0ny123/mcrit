@@ -61,10 +61,22 @@ $ pip install -r requirements.txt && python -c "import pytest"
 ModuleNotFoundError: No module named 'pytest'
 ```
 
-`master`'s CI workflow still runs `python -m pytest` without installing it. The green
-runs on every mcritweb PR date from 2026-09-06, before 1.9.0 shipped; the next run on
-any branch without the fix is red for a reason unrelated to its own change. PR #9 is
-the fix and it should land first.
+`master`'s CI workflow still runs `python -m pytest` without installing it, and PR #9 is
+the fix that should land first.
+
+**Correction, made on 2026-09-13 after checking rather than assuming.** This audit first
+said the next CI run on any of the 62 open PRs would be red for a reason unrelated to its
+own change. That was wrong. All **62/62** open PR heads already carry the four-line
+workflow fix in their own `.github/workflows/test.yml`, so each installs pytest itself and
+is immune. Only `master` lacks it.
+
+The exposure is therefore not "every open PR" but "every branch cut from `master` from now
+on", which is exactly how it was found: `feat/schedule-maintenance-jobs`, opened as #67 on
+2026-09-13, was cut from `master` and its first CI run failed on all four Python versions
+with `No module named pytest`, against a diff that has nothing to do with pytest. Proved
+from the job logs rather than inferred - the passing job's install step runs five commands
+including `python -m pip install pytest`, the failing one runs three without it, and
+neither restored a pip cache.
 
 ## 2. Cross-repo dependency graph
 
@@ -442,13 +454,12 @@ its private address (`GH007`). Everything here is authored as
 ## 8. What remains
 
 - **`mcritweb#9` should merge first.** `master`'s workflow runs `python -m pytest` without
-  ever installing it, which worked only while mcrit brought pytest along. mcrit 1.9.0 moved
-  it into the `dev` extra, and this is no longer theoretical: the CI run on `mcritweb#67`
-  failed on all four Python versions with `No module named pytest`, against a diff that has
-  nothing to do with it. Verified in a clean venv - installing `requirements.txt` resolves
-  mcrit 1.9.0 and `import pytest` fails. #9's four lines are ported into #67 so it can be
-  green while #9 waits, and they no-op the moment #9 lands. Every branch cut from `master`
-  after that inherits the problem again until it does.
+  ever installing it, which worked only while mcrit brought pytest along; mcrit 1.9.0 moved
+  it into the `dev` extra. The 62 open PRs are **not** at risk - every one of them already
+  carries the fix in its own workflow - but **every branch cut from `master` is**, which is
+  how it surfaced: #67 was cut from `master` and its first run failed on all four Python
+  versions. #9's four lines are ported into #67 so it can be green while #9 waits, and they
+  no-op the moment #9 lands. Until then this recurs for each new branch.
 - **The eight stale branches holding the cookie blob** are the last tree references to it.
   None has an open PR; deleting them is the complete cleanup and needs the owner's
   go-ahead (section 5).
