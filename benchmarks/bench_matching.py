@@ -100,6 +100,14 @@ def cmd_index(args):
         started = time.time()
         worker.updateMinHashes(None)
         print("hashed backlog in %.1f s" % (time.time() - started), flush=True)
+        if getattr(args, "drop_disassembly", False):
+            # the resume path has to drop disassembly too, or an index interrupted before its
+            # drop keeps the xcfg forever - measured at 2.5 GB of a 3.55 GB corpus, 71% of it,
+            # for data the matching path never reads
+            sample_ids = [sample.sample_id for sample in storage.getSamples(start_index=0, limit=0)]
+            for sample_id in sample_ids:
+                storage.deleteXcfgForSampleId(sample_id)
+            print("dropped disassembly for %d samples" % len(sample_ids), flush=True)
         print(json.dumps(index.getStatus(), indent=2), flush=True)
         return
 
