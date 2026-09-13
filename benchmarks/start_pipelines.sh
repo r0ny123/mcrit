@@ -42,7 +42,10 @@ if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${MONGO_CONTAINER}$
 fi
 
 cd "$REPO_DIR" || exit 1
-start_if_absent "fetch_malpedia.py" "$PYTHON" benchmarks/fetch_malpedia.py --out "$DATA_DIR/malpedia_api" --threads 2 --rate 0.8
+# The watchdog is started, never the fetcher directly: the watchdog owns the fetcher's
+# lifecycle and restarts it by pkill'ing every fetch_malpedia.py it finds, so a second one
+# started by hand is simply killed - and while both are alive they double the request rate
+# against an API that answers concurrency with a cumulative quota.
 start_if_absent "fetch_watchdog.sh" ./benchmarks/fetch_watchdog.sh "$DATA_DIR/malpedia_api" "$DATA_DIR"
 start_if_absent "disassemble_corpus.py" "$PYTHON" benchmarks/disassemble_corpus.py --in "$DATA_DIR/malpedia_api" --out "$DATA_DIR/reports" --workers 3
 
