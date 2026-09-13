@@ -103,6 +103,11 @@ def cmd_index(args):
     for position, path in enumerate(paths, start=1):
         try:
             report = load_report(path)
+            # SMDA writes a report even when it recovered no functions (packed, .NET, or a
+            # format it cannot read). Such a report has no statistics for addSmdaReport to
+            # count, and indexing it would only add an empty sample to the corpus.
+            if not report.num_functions:
+                continue
             sample_entry = storage.addSmdaReport(report)
             if sample_entry is None:  # already present
                 continue
