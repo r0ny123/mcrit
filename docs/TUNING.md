@@ -80,6 +80,71 @@ Notes on the individual knobs:
   removed 62 % of the scoring work at a cost of 9.5 % of matches on the sample tested. Choose
   it for analysis quality, then tune around it.
 
+## Two-stage matching: making 1-vs-N stop scaling with the corpus
+
+Everything above lowers the *slope* of 1-vs-N cost. Two knobs change its *shape*, because every
+stage of a 1-vs-N query - and the result set itself - otherwise grows with the corpus.
+
+| knob | default | what it does |
+|---|---|---|
+| `MINHASH_MATCHING_SHORTLIST_SIZE` | `0` (off) | how many corpus samples the exact matching stage may look at. A cheap stage ranks candidate samples first; only the best N are matched exactly |
+| `STORAGE_BAND_DF_CUTOFF` | `0` (off) | skip band hashes whose posting list is longer than this. A band hash held by much of the corpus is a stopword: expensive to read, uninformative about *which* samples match |
+
+**Both default to off, so an upgrade changes nothing until you opt in.** Two indexes need one
+build each before they take effect, and neither is read until a completeness flag vouches for
+it — so the old behaviour holds until they exist:
+
+```python
+storage.rebuildFunctionRangeIndex()   # required for shortlisting
+storage.rebuildBandDfIndex()          # makes the df cutoff skip from the index, not after it
+```
+
+Measured at 12,500 samples / ~10.2M functions: 145 s and 147 s respectively.
+
+### Suggested starting point
+
+```
+MINHASH_MATCHING_SHORTLIST_SIZE = 100
+STORAGE_BAND_DF_CUTOFF = 200
+```
+
+Measured on a fixed query set at 257 and 12,500 samples — a **48.6x** growth in corpus size,
+warm cache, repeated runs:
+
+| | 257 samples | 12,500 samples | growth |
+|---|---|---|---|
+| one-stage median | 0.429 s | 4.427 s | 10.32x (latency ~ corpus^0.60) |
+| two-stage median | 0.645 s | 0.374 s | 0.58x |
+| two-stage mean | 0.868 s | 0.835 s | 0.96x |
+| two-stage max | 1.695 s | 1.810 s | 1.07x |
+
+One-stage latency grows with the corpus; two-stage does not. Note the first row of the
+two-stage column: **on a small corpus two-stage is slower**, because the ranking stage costs
+something and there is nothing yet to save. It is worth enabling when queries have started to
+hurt, not before.
+
+### What it costs
+
+Unlike everything else in this document, these two knobs are **not** result-preserving, so they
+are quoted against the unrestricted result rather than a digest:
+
+| corpus | top-10 sample recall | top-25 sample recall | surviving function matches with identical score |
+|---|---|---|---|
+| 257 | 1.000 | 1.000 | 1.000 |
+| 10,000 | 1.000 | 1.000 | 0.9945 |
+| 12,500 | 1.000 | 1.000 | 0.9936 |
+
+Matching *within* a shortlisted sample is unchanged — same candidates, same scores. What a
+shortlist can cost is a sample not being ranked into it: overall sample recall at 12,500 samples
+is 0.67, because a query whose unrestricted answer names 5,930 matched samples gets 99. Raise
+`MINHASH_MATCHING_SHORTLIST_SIZE` if you need more of the tail; cost grows with it roughly
+linearly. PicHash matching is unaffected and stays exact, so exact matches are still reported
+whether or not their sample made the shortlist.
+
+Tuning the cutoff at 12,500 samples, shortlist held at 100: cutoff 1000 gives a 1.172 s median,
+200 gives 0.374 s, 100 gives 0.332 s — all three at top-10 and top-25 recall of 1.000. 200 is
+where the traversal stops scaling; below that there is little left to win.
+
 ## Caveats
 
 * Constants are measured on one corpus and one host. The relationships generalise; the specific
@@ -92,3 +157,9 @@ Notes on the individual knobs:
   earlier only the batch size, `BAND_MATCHES_REQUIRED` and the mongod cache size apply.
 * All measurements used single-process matching; comparisons against a pooled configuration
   will differ.
+* The two-stage numbers come from a different, smaller campaign than the rest of this document:
+  257 real Malpedia samples grown to 12,500 with synthetic samples drawn from a process fitted
+  to that corpus (functions-per-sample from its empirical distribution, signatures from a
+  preferential-attachment urn calibrated to its measured Heaps exponent). They were measured on
+  a 4-core / 16 GiB host with mongod 7.0. The shape of the result - one-stage grows with the
+  corpus, two-stage does not - is the finding; the absolute seconds are host-specific.
