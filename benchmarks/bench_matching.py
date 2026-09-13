@@ -90,6 +90,18 @@ def cmd_index(args):
     worker = index.queue._worker
     storage = index._storage
 
+    if getattr(args, "hash_only", False):
+        # Resume path. An interrupted index leaves every report added but only some functions
+        # hashed; re-running the whole command re-parses thousands of gzipped reports purely to
+        # rediscover that they are already present, which costs far more than the hashing left
+        # to do. updateMinHashes(None) picks up exactly the unhashed backlog.
+        print("hashing the unhashed backlog in db '%s'" % args.db, flush=True)
+        started = time.time()
+        worker.updateMinHashes(None)
+        print("hashed backlog in %.1f s" % (time.time() - started), flush=True)
+        print(json.dumps(index.getStatus(), indent=2), flush=True)
+        return
+
     paths = iter_report_paths(args.reports, args.limit)
     print("indexing %d reports into db '%s'" % (len(paths), args.db), flush=True)
     started = time.time()
@@ -292,6 +304,7 @@ def main():
     index_parser.add_argument("--reports", required=True)
     index_parser.add_argument("--db", required=True)
     index_parser.add_argument("--limit", type=int, default=0)
+    index_parser.add_argument("--hash-only", action="store_true", help="skip adding reports and just hash what is already stored (resume an interrupted index)")
     index_parser.add_argument(
         "--drop-disassembly",
         action="store_true",
