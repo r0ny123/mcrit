@@ -453,13 +453,21 @@ its private address (`GH007`). Everything here is authored as
 
 ## 8. What remains
 
-- **`mcritweb#9` should merge first.** `master`'s workflow runs `python -m pytest` without
-  ever installing it, which worked only while mcrit brought pytest along; mcrit 1.9.0 moved
-  it into the `dev` extra. The 62 open PRs are **not** at risk - every one of them already
-  carries the fix in its own workflow - but **every branch cut from `master` is**, which is
-  how it surfaced: #67 was cut from `master` and its first run failed on all four Python
-  versions. #9's four lines are ported into #67 so it can be green while #9 waits, and they
-  no-op the moment #9 lands. Until then this recurs for each new branch.
+- ~~**`mcritweb#9` should merge first.**~~ **Merged 2026-09-13** (`75c09b0`), at the owner's
+  instruction, which closes this. `master` now installs `pytest==9.1.1` and
+  `pytest-cov==7.1.0` in CI, so a branch cut from it no longer inherits a workflow that
+  runs `python -m pytest` without ever installing it.
+
+  Checked before merging rather than after: a simulated merge of #9 into `master`, then of
+  that `master` into all 63 open PR heads, produced **0 conflicts**. Worth simulating
+  because #9's version of the fix is *not* the one most branches carry - #9 installs
+  `"pytest==9.1.1" "pytest-cov==7.1.0"` after the editable install, while the older variant
+  installs an unpinned `pytest` before it, and both edit the same region of the same file.
+  Git merges them anyway. 56 of the 63 already carry #9's exact change, so for them the
+  merge is a no-op; the other 7 (#36, #42, #48, #63, #64, #65, #66) end up with **both**
+  install lines. Harmless - the pinned install runs last and wins - but it is duplicated
+  cruft with two contradictory comments, and worth removing the next time each of those
+  branches is touched for another reason.
 - **The eight stale branches holding the cookie blob** are the last tree references to it.
   None has an open PR; deleting them is the complete cleanup and needs the owner's
   go-ahead (section 5).
