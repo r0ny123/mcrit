@@ -155,6 +155,44 @@ carries a slightly lower hashed fraction (59.6% against 65.9%) because measureme
 in-flight indexing chunk; unhashed functions are cheaper, not dearer, so if anything that
 *understates* the baseline's growth.
 
+### The PicHash stage: measured, found still scaling, fixed, re-measured
+
+Per-stage timings across the real 2,016 -> 2,996 growth showed every stage the shortlist bounds
+staying flat, and one that did not:
+
+| stage | 2,016 | 2,996 | |
+|---|---|---|---|
+| matching-cache fetch | 0.183 s | 0.182 s | flat |
+| minhash scoring | 0.103 s | 0.095 s | flat |
+| shortlist restriction | 0.093 s | 0.083 s | flat |
+| result assembly | 0.849 s | 0.356 s | falls |
+| **pichash lookup** | 0.598 s | **1.078 s** | **1.80x, with the cutoff on** |
+
+The cutoff was not bounding anything, because of how it counted: a `$group` over the functions
+collection touches one index entry per holder *including for every hash it then rejects* - the
+exact cost the cutoff exists to avoid. This is the same mistake already found and fixed on the
+band path, where filtering on `$size` measured no better than no filter at all, repeated in the
+exact-match path.
+
+A `pichash_counts` collection (one document per distinct hash, `(_pichash, df)` indexed) makes
+the filter one indexed probe per *queried* hash instead of one entry per *holder*. Measured A/B
+on the same 3,653-sample real corpus, same queries, index paused so nothing competed:
+
+| | pichash lookup (3 queries) | total mean |
+|---|---|---|
+| counting fallback | 1.318 s | 1.55 s |
+| indexed counts | **0.387 s** | 1.43 s |
+
+**3.4x on the stage.** The point is not the constant: it replaces an O(holders) term with an
+O(queried hashes) one, so it removes the growth rather than shrinking it.
+
+Two smaller defects surfaced while building it, both recorded in the research log because both
+fail *silently*: the rebuilds set their completeness flag only on success, so an interrupted
+rebuild advertised a complete index over an empty one; and they created their index *after* the
+upserts, making each upsert scan the collection - the pichash rebuild ran at ~35 upserts/s and
+was 42 minutes into an expected ~1.5M hashes. Indexed first, the same rebuild completes in
+**148 s** for 1,398,282 hashes.
+
 ### What the real corpus changed
 
 **1. The PicHash cutoff matters, and only real data shows it.** The synthetic corpus could not
