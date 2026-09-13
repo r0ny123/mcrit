@@ -741,6 +741,39 @@ class StorageInterface:
         """
         raise NotImplementedError
 
+    def rebuildFunctionRangeIndex(self, progress_reporter=None) -> int:
+        """Rebuild the index mapping function ids back to the sample that holds them.
+
+        Required before two-stage matching (MINHASH_MATCHING_SHORTLIST_SIZE) can run: the
+        shortlist has to turn candidate function ids into samples without reading one function
+        per candidate.
+        Args:
+            progress_reporter: optional callable invoked with progress updates
+        Returns:
+            the number of samples covered
+        """
+        raise NotImplementedError
+
+    def isFunctionRangeIndexComplete(self) -> bool:
+        """Whether the function range index may be trusted; readers fall back when it is not."""
+        raise NotImplementedError
+
+    def rebuildBandDfIndex(self, progress_reporter=None) -> int:
+        """Set the posting-list length on every band document and index it.
+
+        Makes STORAGE_BAND_DF_CUTOFF skip an over-long posting list from the index entry rather
+        than reading the document to measure it.
+        Args:
+            progress_reporter: optional callable invoked with progress updates
+        Returns:
+            the number of band documents updated
+        """
+        raise NotImplementedError
+
+    def isBandDfIndexComplete(self) -> bool:
+        """Whether band documents carry a trustworthy df; the cutoff falls back when they do not."""
+        raise NotImplementedError
+
     def rebuildMinhashBandIndex(self, progress_reporter=None) -> int:
         """Drop the current band index and rebuild it from scratch
         Args:

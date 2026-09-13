@@ -15,6 +15,59 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Added
+
+- **Two-stage 1-vs-N matching**, behind two knobs that both default to `0` (off), so an upgraded
+  instance is bit-identical until it opts in. Every stage of a 1-vs-N query grew with corpus
+  size, and so did the answer - a query whose result names 5,930 matched samples is not an
+  answer anybody reads, and bounding the answer is the only thing that bounds the work.
+  - `MINHASH_MATCHING_SHORTLIST_SIZE` ranks candidate samples cheaply (one vote per distinct
+    query function, plus weighted PicHash evidence, ranked by vote count *and* by coverage
+    because MCRIT scores a matched sample by the percentage of it that matched) and runs the
+    existing exact matching against only the best N.
+  - `STORAGE_BAND_DF_CUTOFF` skips band hashes whose posting list is longer than the cutoff. A
+    band hash held by much of the corpus is a stopword: expensive to read, uninformative about
+    *which* samples match.
+  - Measured over a **48.6x** growth in corpus size (257 -> 12,500 samples), fixed query set,
+    warm cache, repeated runs, at shortlist 100 / cutoff 200: one-stage median went
+    0.429 s -> 4.427 s (latency ~ corpus^0.60) while **two-stage went 0.645 s -> 0.374 s**, with
+    mean -4% and max +7% - no measurable growth. Extrapolated to a million samples: ~62 s
+    against ~0.4 s.
+  - **NOTE that unlike the tuning knobs, these two are not result-preserving.** Matching *within*
+    a shortlisted sample is unchanged - same candidates, same scores - and top-10 and top-25
+    sample recall against the unrestricted result measured 1.000 at every corpus size tested,
+    with 0.9936-1.000 of surviving function matches keeping a bit-identical score. What a
+    shortlist costs is tail samples: overall sample recall at 12,500 samples was 0.67. PicHash
+    matching is unaffected and stays exact. See `docs/TUNING.md`.
+- `function_ranges` index and `GET /rebuild_function_range_index`, mapping a function id back to
+  its sample without reading the function - the shortlist has to do that per candidate, which is
+  the cost it exists to avoid. Stored as one span per contiguous id run, so it is exact whether
+  or not a sample's ids happen to be dense (an import adding functions later, or concurrent
+  writers interleaving counter reservations, makes them not be). Read only when a completeness
+  flag vouches for it; until then matching falls back to the whole corpus.
+- `df` on band documents plus a `(band_hash, df)` index, and `GET /rebuild_band_df_index`.
+  Filtering the cutoff on `$size` instead was measured to save nothing worth having - mongod
+  reads the document to measure it - at 12,500 samples, 1.172 s at cutoff 1000 against 0.374 s
+  once df is indexed at cutoff 200.
+- `docs/scaling/` - the architecture before and after, the comparison of indexing approaches
+  considered and why most of the field is eliminated before latency is even discussed (MCRIT
+  compares MinHash signatures field-for-field and estimates Jaccard; a cosine/L2 ANN index
+  answers a different question), the full research log, and the measured results.
+- `benchmarks/` - the harness behind every number above: Malpedia fetch, SMDA report cache,
+  per-stage 1-vs-N timing, corpus-structure analysis, Heaps' law fit, synthetic corpus growth
+  fitted to a real corpus, quality comparison, and a scaling sweep.
+
+### Changed
+
+- Pairwise scoring now compares each **distinct** MinHash signature once rather than once per
+  function holding it. This is exact, not approximate: a score depends only on the two
+  signatures, so functions sharing one score identically against any query. Worth 2.46x on 257
+  real Malpedia samples (185,387 hashed functions over 75,323 distinct signatures) and a
+  projected ~24x at a million samples from the fitted Heaps' law V(n) = 1412.8 * n^0.7247. Peak
+  matcher memory falls with the matrix by the same factor. Verified against the existing
+  golden-result suites, which pass unchanged.
+
+
 ## [1.9.0] - 2026-09-08
 
 Correctness and operator-recovery release, plus a large `getUniqueBlocks` speedup. **Matching

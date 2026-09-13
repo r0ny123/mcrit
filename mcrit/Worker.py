@@ -269,6 +269,16 @@ class Worker(QueueRemoteCallee):
 
     # Reports PROGRESS
     @Remote(progress=True)
+    def rebuildFunctionRangeIndex(self, progress_reporter=NoProgressReporter()):
+        return self._storage.rebuildFunctionRangeIndex(progress_reporter=progress_reporter)
+
+    # Reports PROGRESS
+    @Remote(progress=True)
+    def rebuildBandDfIndex(self, progress_reporter=NoProgressReporter()):
+        return self._storage.rebuildBandDfIndex(progress_reporter=progress_reporter)
+
+    # Reports PROGRESS
+    @Remote(progress=True)
     def recalculatePicHashes(self, progress_reporter=NoProgressReporter()):
         return self._storage.recalculateAllPicHashes(progress_reporter=progress_reporter)
 

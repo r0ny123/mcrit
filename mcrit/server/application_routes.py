@@ -110,6 +110,8 @@ def get_app():
     # An instance upgrading into this feature has no index and keeps using the old full scan until
     # this runs, so it is the one operator action the feature needs.
     _app.add_route("/rebuild_picblockhash_index", status_resource, suffix="rebuild_picblockhash_index")  # get
+    _app.add_route("/rebuild_function_range_index", status_resource, suffix="rebuild_function_range_index")  # get
+    _app.add_route("/rebuild_band_df_index", status_resource, suffix="rebuild_band_df_index")  # get
     _app.add_route("/recalculate_pichashes", status_resource, suffix="recalculate_pichashes")  # get
     # schedule a job that rehashes only the samples whose minhashes an older smda escaper produced (#142)
     _app.add_route("/repair_minhashes", status_resource, suffix="repair_minhashes")  # post
