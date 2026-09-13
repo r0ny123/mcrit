@@ -215,6 +215,45 @@ Two general lessons, both cheap to state and expensive to learn:
 - Reclaiming disk under pressure is exactly when a destructive shortcut looks reasonable. The
   same pressure is what makes it a bad time to reason about what is safe to delete.
 
+## 5c. The pattern behind the mistakes, and the checks that would have caught them
+
+Six defects were introduced and fixed during this work. Listing them separately undersells what
+they have in common, which is more useful than any one of them:
+
+| What was assumed | What was true | How it failed |
+|---|---|---|
+| Disassembly is retrievable detail the query path never reads | It is the *input* to minhash computation | 3.97M functions silently unhashable |
+| The PicHash cutoff bounds the work | It counted holders with `$group`, touching one index entry per holder including for rejected hashes | the stage kept growing, 1.80x per 1.49x corpus |
+| A rebuild is complete when it finishes | The flag said complete from the moment the collection was emptied | an interrupted rebuild left a trusted, empty index |
+| Upserts are fast | No index existed yet, so each one scanned the collection | ~35 upserts/s against ~9,400/s once indexed |
+| The counts disagree, so maintenance is broken | The verification was reading while the indexer wrote | a real bug reported where none existed |
+| The test passes, so the code is right | pymongo returns a fresh `Collection` per attribute access, so the patch did nothing | two tests that passed against code with the bug |
+
+**The common cause is one thing: trusting a plausible model of the system instead of checking
+it.** Every entry above is a reasonable belief that happened to be false, and in every case the
+check that would have settled it was cheap.
+
+**The sharpest sub-pattern is silence.** A dropped xcfg, a half-built index behind a complete
+flag, a missing pichash count - none of these raise. They under-report matches and leave a
+database that looks healthy. In a system whose job is to *find* things, the dangerous failure is
+not the crash, it is the quiet absence. So the question to ask of any new index or filter here
+is not "does this work" but "if this were wrong, would anything say so".
+
+**The most expensive one was a repeat.** The PicHash `$group` is the same defect as the band
+`$size` filter, which had already been diagnosed, fixed and written down in this very document -
+and then not looked for in the analogous path. Fixing a bug without asking where else its shape
+occurs costs more than the original bug.
+
+The cheap checks, in the order they pay off:
+
+1. **Ask what *writes* depend on it**, not only what reads it, before deleting anything.
+2. **Check whether anything is writing** before trusting a verification.
+3. **Verify the test can fail** - against the unfixed code, or by proving the mechanism bites.
+4. **Grep for the shape of a bug you just fixed** before closing it out.
+5. **Run it small first.** Both the chunked indexer and the pichash count index were smoke-tested
+   on a throwaway database before being run against the real corpus; both times that was the
+   step that confirmed the invariant rather than assuming it.
+
 ## 6. Operational notes (things that cost real time here)
 
 - **mongod aborts rather than degrades when it runs out of file descriptors.** The container's
