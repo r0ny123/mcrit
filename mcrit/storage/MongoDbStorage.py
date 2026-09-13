@@ -1519,6 +1519,10 @@ class MongoDbStorage(StorageInterface):
         # silently attribute functions to no sample at all.
         self._setFunctionRangeIndexComplete(False)
         collection.delete_many({})
+        # indexed before the upserts for the same reason as the pichash counts: each upsert
+        # matches on (sample_id, first_function_id), and an unindexed match scans the collection
+        collection.create_index("sample_id")
+        collection.create_index("first_function_id")
         operations = []
         num_spans = 0
         samples_seen = set()
@@ -1554,8 +1558,6 @@ class MongoDbStorage(StorageInterface):
         flush_span()
         if operations:
             collection.bulk_write(operations, ordered=False)
-        collection.create_index("sample_id")
-        collection.create_index("first_function_id")
         self._setFunctionRangeIndexComplete(True)
         LOGGER.info("Function range index rebuilt: %d spans over %d samples.", num_spans, len(samples_seen))
         return len(samples_seen)
@@ -1661,6 +1663,10 @@ class MongoDbStorage(StorageInterface):
         # every hash it had not yet counted
         self._setPicHashCountIndexComplete(False)
         collection.delete_many({})
+        # Create the index *before* the upserts, not after. Every upsert matches on _pichash, so
+        # without it each one is a collection scan against everything written so far - quadratic,
+        # and measured at ~35 upserts/s where an indexed rebuild does thousands.
+        collection.create_index([("_pichash", 1), ("df", 1)])
         pipeline = [{"$match": {"_pichash": {"$ne": None}}}, {"$group": {"_id": "$_pichash", "df": {"$sum": 1}}}]
         operations = []
         num_hashes = 0
@@ -1674,7 +1680,6 @@ class MongoDbStorage(StorageInterface):
                     progress_reporter.step()
         if operations:
             collection.bulk_write(operations, ordered=False)
-        collection.create_index([("_pichash", 1), ("df", 1)])
         self._setPicHashCountIndexComplete(True)
         LOGGER.info("PicHash count index rebuilt over %d distinct hashes.", num_hashes)
         return num_hashes
