@@ -1,0 +1,167 @@
+{
+  "db": "scale",
+  "num_corpus_samples": 993,
+  "num_corpus_functions": 830159,
+  "queries": [
+    {
+      "sample_id": 148,
+      "family": "win.zloader",
+      "num_query_functions": 754,
+      "total_seconds": 27.21453640499999,
+      "num_matched_samples": 5930,
+      "num_matched_functions": 754,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 22.236432046999994,
+          "observed": {
+            "query_functions_with_candidates": 620,
+            "candidate_pairs": 361325,
+            "widest_group": 16261
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.039278270000068005,
+          "observed": {
+            "pichashes_with_matches": 671,
+            "pichash_match_tuples": 3075
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 1.9629595500000505,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.5538759380000329,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 1.7291638860000376,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 8.934999982557201e-06,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 3.278000008322124e-06,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 157,
+      "family": "win.konni",
+      "num_query_functions": 236,
+      "total_seconds": 5.645259082000052,
+      "num_matched_samples": 6886,
+      "num_matched_functions": 236,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 1.0721910339999567,
+          "observed": {
+            "query_functions_with_candidates": 164,
+            "candidate_pairs": 225208,
+            "widest_group": 8837
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.15499659199997495,
+          "observed": {
+            "pichashes_with_matches": 220,
+            "pichash_match_tuples": 20932
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 1.9483758669999816,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.41444353800000044,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 1.7939054890000534,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 1.2705000017376733e-05,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 1.6559999949095072e-06,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 8,
+      "family": "win.vawtrak",
+      "num_query_functions": 126,
+      "total_seconds": 0.5956290209999224,
+      "num_matched_samples": 749,
+      "num_matched_functions": 126,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.0889329929999576,
+          "observed": {
+            "query_functions_with_candidates": 46,
+            "candidate_pairs": 11775,
+            "widest_group": 1392
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.1812379460000102,
+          "observed": {
+            "pichashes_with_matches": 55,
+            "pichash_match_tuples": 26936
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.21589032700001098,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.012597797000012179,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.04193684899996697,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 1.1491000009300478e-05,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 1.5540000504188356e-06,
+          "observed": {}
+        }
+      }
+    }
+  ],
+  "median_total_seconds": 5.645259082000052,
+  "mean_total_seconds": 11.151808169333322,
+  "max_total_seconds": 27.21453640499999,
+  "config_overrides": {}
+}

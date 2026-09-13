@@ -1,0 +1,221 @@
+{
+  "db": "bench_250",
+  "num_corpus_samples": 250,
+  "num_corpus_functions": 280804,
+  "queries": [
+    {
+      "sample_id": 148,
+      "family": "win.zloader",
+      "num_query_functions": 754,
+      "total_seconds": 0.6200445770000442,
+      "num_matched_samples": 35,
+      "num_matched_functions": 754,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.13699485100005404,
+          "observed": {
+            "query_functions_with_candidates": 620,
+            "candidate_pairs": 20744,
+            "widest_group": 946
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.020992813000248134,
+          "observed": {
+            "pichashes_with_matches": 671,
+            "pichash_match_tuples": 3075
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.03646681400005036,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.02904761099989628,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.23019396599966058,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 42,
+      "family": "win.konni",
+      "num_query_functions": 16,
+      "total_seconds": 0.04112290600005508,
+      "num_matched_samples": 0,
+      "num_matched_functions": 16,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.022409384999718895,
+          "observed": {
+            "query_functions_with_candidates": 11,
+            "candidate_pairs": 21,
+            "widest_group": 5
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.0038142040002639988,
+          "observed": {
+            "pichashes_with_matches": 16,
+            "pichash_match_tuples": 18
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.0017650390000198968,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.0009548729999551142,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.004027588000099058,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 8,
+      "family": "win.vawtrak",
+      "num_query_functions": 126,
+      "total_seconds": 0.133956458999819,
+      "num_matched_samples": 8,
+      "num_matched_functions": 126,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.030535295999925438,
+          "observed": {
+            "query_functions_with_candidates": 46,
+            "candidate_pairs": 669,
+            "widest_group": 77
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.06757287199980055,
+          "observed": {
+            "pichashes_with_matches": 55,
+            "pichash_match_tuples": 26936
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.004843080999762606,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.002099269999689568,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.00958912300029624,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 157,
+      "family": "win.konni",
+      "num_query_functions": 236,
+      "total_seconds": 0.3483819839998432,
+      "num_matched_samples": 124,
+      "num_matched_functions": 236,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.0826839100000143,
+          "observed": {
+            "query_functions_with_candidates": 164,
+            "candidate_pairs": 12419,
+            "widest_group": 469
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.06598846999986563,
+          "observed": {
+            "pichashes_with_matches": 220,
+            "pichash_match_tuples": 20932
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.05360571399978653,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.008997769999950833,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.08521686900030545,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 216,
+      "family": "win.konni",
+      "num_query_functions": 131,
+      "total_seconds": 0.2684150250001949,
+      "num_matched_samples": 92,
+      "num_matched_functions": 131,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.04731322299994645,
+          "observed": {
+            "query_functions_with_candidates": 90,
+            "candidate_pairs": 5201,
+            "widest_group": 222
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.11788880299991433,
+          "observed": {
+            "pichashes_with_matches": 122,
+            "pichash_match_tuples": 6263
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.02796503199988365,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.004468988000098761,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.04068366000001333,
+          "observed": {}
+        }
+      }
+    }
+  ],
+  "median_total_seconds": 0.2684150250001949,
+  "mean_total_seconds": 0.2823841901999913,
+  "max_total_seconds": 0.6200445770000442,
+  "config_overrides": {}
+}

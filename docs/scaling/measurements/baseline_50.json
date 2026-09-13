@@ -1,0 +1,137 @@
+{
+  "db": "bench_50",
+  "num_corpus_samples": 48,
+  "num_corpus_functions": 44584,
+  "queries": [
+    {
+      "sample_id": 49,
+      "family": "win.konni",
+      "num_query_functions": 436,
+      "total_seconds": 0.3110238740000568,
+      "num_matched_samples": 9,
+      "num_matched_functions": 436,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.0891815279999264,
+          "observed": {
+            "query_functions_with_candidates": 316,
+            "candidate_pairs": 1129,
+            "widest_group": 24
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.021617024999841306,
+          "observed": {
+            "pichashes_with_matches": 401,
+            "pichash_match_tuples": 3980
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.0068092730000444135,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.009474787000044671,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.04847042900019005,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 18,
+      "family": "win.vidar",
+      "num_query_functions": 540,
+      "total_seconds": 0.29440094400001726,
+      "num_matched_samples": 21,
+      "num_matched_functions": 540,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.08240818499984925,
+          "observed": {
+            "query_functions_with_candidates": 375,
+            "candidate_pairs": 2768,
+            "widest_group": 90
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.0170621449999544,
+          "observed": {
+            "pichashes_with_matches": 441,
+            "pichash_match_tuples": 3100
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.010173876999942877,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.009610825999970984,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.04438247500002035,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 5,
+      "family": "win.photoloader",
+      "num_query_functions": 168,
+      "total_seconds": 0.20040748099995653,
+      "num_matched_samples": 0,
+      "num_matched_functions": 168,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.032403066000142644,
+          "observed": {
+            "query_functions_with_candidates": 68,
+            "candidate_pairs": 69,
+            "widest_group": 2
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.021162617000072714,
+          "observed": {
+            "pichashes_with_matches": 96,
+            "pichash_match_tuples": 3592
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.0016962489999059471,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.0007840260000193666,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.12302316199998131,
+          "observed": {}
+        }
+      }
+    }
+  ],
+  "median_total_seconds": 0.29440094400001726,
+  "mean_total_seconds": 0.2686107663333435,
+  "max_total_seconds": 0.3110238740000568,
+  "config_overrides": {}
+}

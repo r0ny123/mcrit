@@ -1,0 +1,140 @@
+{
+  "db": "bench_250",
+  "num_samples": 257,
+  "num_functions": 280804,
+  "bands": {
+    "band_0": {
+      "count": 38172,
+      "total_entries": 185387,
+      "max": 1556
+    },
+    "band_1": {
+      "count": 46212,
+      "total_entries": 185387,
+      "max": 1048
+    },
+    "band_2": {
+      "count": 45229,
+      "total_entries": 185387,
+      "max": 848
+    },
+    "band_3": {
+      "count": 44251,
+      "total_entries": 185387,
+      "max": 3111
+    },
+    "band_4": {
+      "count": 49733,
+      "total_entries": 185387,
+      "max": 2756
+    },
+    "band_5": {
+      "count": 47328,
+      "total_entries": 185387,
+      "max": 1525
+    },
+    "band_6": {
+      "count": 35085,
+      "total_entries": 185387,
+      "max": 3598
+    },
+    "band_7": {
+      "count": 41623,
+      "total_entries": 185387,
+      "max": 2131
+    },
+    "band_8": {
+      "count": 47100,
+      "total_entries": 185387,
+      "max": 2206
+    },
+    "band_9": {
+      "count": 45258,
+      "total_entries": 185387,
+      "max": 1696
+    },
+    "band_10": {
+      "count": 42011,
+      "total_entries": 185387,
+      "max": 1535
+    },
+    "band_11": {
+      "count": 44401,
+      "total_entries": 185387,
+      "max": 693
+    },
+    "band_12": {
+      "count": 30716,
+      "total_entries": 185387,
+      "max": 1329
+    },
+    "band_13": {
+      "count": 45195,
+      "total_entries": 185387,
+      "max": 990
+    },
+    "band_14": {
+      "count": 46496,
+      "total_entries": 185387,
+      "max": 3185
+    },
+    "band_15": {
+      "count": 39602,
+      "total_entries": 185387,
+      "max": 1058
+    },
+    "band_16": {
+      "count": 42943,
+      "total_entries": 185387,
+      "max": 1147
+    },
+    "band_17": {
+      "count": 33928,
+      "total_entries": 185387,
+      "max": 1577
+    },
+    "band_18": {
+      "count": 42242,
+      "total_entries": 185387,
+      "max": 799
+    },
+    "band_19": {
+      "count": 48280,
+      "total_entries": 185387,
+      "max": 981
+    }
+  },
+  "band_posting_lists": {
+    "count": 855805,
+    "total_entries": 3707740,
+    "mean": 4.332458912953301,
+    "p50": 1.0,
+    "p90": 9.0,
+    "p99": 42.0,
+    "p99.9": 181.0,
+    "p100": 3598.0
+  },
+  "pichash_posting_lists": {
+    "count": 108349,
+    "total_entries": 280804,
+    "mean": 2.5916621288613646,
+    "p50": 1.0,
+    "p90": 4.0,
+    "p99": 20.0,
+    "p99.9": 96.0,
+    "p100": 16976.0
+  },
+  "num_hashed_functions": 185387,
+  "num_distinct_signatures": 75323,
+  "signature_multiplicity": {
+    "count": 75323,
+    "total_entries": 185387,
+    "mean": 2.461226982462196,
+    "p50": 1.0,
+    "p90": 5.0,
+    "p99": 22.0,
+    "p99.9": 69.67800000001444,
+    "p100": 458.0
+  },
+  "dedup_factor": 2.461226982462196
+}
