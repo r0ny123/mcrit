@@ -119,6 +119,42 @@ Fixed queries, warm cache, three repeats averaged. "two-stage full" is shortlist
 
 Quality against the unrestricted result: **top-10 sample recall 1.000**, top-25 0.973.
 
+### Real-corpus scaling: two points, and they are worse for the baseline than synthetic
+
+The corpus was then grown in place to **2,996 real samples / 3,228,833 functions** and the same
+queries re-run (growing in place keeps the sample ids valid, so this is a controlled
+comparison). Index paused during measurement so nothing competed for CPU; three repeats each:
+
+| | one-stage 2,016 -> 2,996 | k | two-stage 2,016 -> 2,996 | k |
+|---|---|---|---|---|
+| median | 1.57 s -> 2.76 s (1.76x) | **+1.43** | 1.65 s -> 1.89 s (1.15x) | **+0.35** |
+| mean | 1.95 s -> 3.53 s (1.81x) | **+1.49** | 1.43 s -> 1.55 s (1.09x) | **+0.22** |
+| max | 3.57 s -> 6.87 s (1.92x) | **+1.65** | 2.12 s -> 2.21 s (1.04x) | **+0.11** |
+| peak RSS | 367 MB -> 401 MB (1.09x) | +0.22 | 276 MB -> 251 MB (0.91x) | **-0.24** |
+
+For a 1.49x corpus increase. Three things are worth stating plainly:
+
+1. **On real data the baseline grows *superlinearly*** - k between +1.43 and +1.65, against
+   +0.44 to +0.60 measured on the synthetic series. The synthetic corpus, fitted to the real
+   one's Heaps growth and signature skew, was *kinder* to the baseline than reality. That is the
+   opposite of the usual worry about synthetic benchmarks, and it means the earlier ~62 s
+   projection at a million samples is a floor rather than a ceiling.
+2. **Two-stage is nearly flat on real data too** (k = +0.11 to +0.35), and its peak memory
+   *falls* as the corpus grows (k = -0.24) - the shortlist bounds what is fetched, so a larger
+   corpus does not mean a larger working set.
+3. **The crossover is now behind us.** At 2,016 samples two-stage lost on the median (1.65 s
+   against 1.57 s); at 2,996 it wins (1.89 s against 2.76 s), and by 3.1x on the tail. The
+   cost of ranking is fixed, the cost of not ranking is not.
+
+Quality at 2,996: **top-10 sample recall 1.000**, top-25 0.987, 0.978 of surviving function
+matches bit-identical - unchanged from 2,016.
+
+**Caveats.** This is a two-point fit over 1.49x, far weaker evidence than the 48.6x synthetic
+series, and a two-point exponent is sensitive to both endpoints. The 2,996-sample corpus also
+carries a slightly lower hashed fraction (59.6% against 65.9%) because measurement paused an
+in-flight indexing chunk; unhashed functions are cheaper, not dearer, so if anything that
+*understates* the baseline's growth.
+
 ### What the real corpus changed
 
 **1. The PicHash cutoff matters, and only real data shows it.** The synthetic corpus could not
