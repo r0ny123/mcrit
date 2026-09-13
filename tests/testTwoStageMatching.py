@@ -174,6 +174,35 @@ class TwoStageMatchingTest(TestCase):
             sum(len(holders) for holders in unrestricted.values()),
         )
 
+    def testPicHashCountsMatchTheFunctionsCollection(self):
+        """Every stored count must equal the number of functions actually holding that hash.
+
+        The cutoff's correctness rests on this: a count that is too low hides a hash that should
+        have been searched, and one that is too high wastes the fetch the cutoff exists to avoid.
+        """
+        storage = MinHashIndex(config=buildConfig())._storage
+        storage.rebuildPicHashCountIndex()
+        database = storage._getDb()
+        truth = {group["_id"]: group["n"] for group in database.functions.aggregate([{"$match": {"_pichash": {"$ne": None}}}, {"$group": {"_id": "$_pichash", "n": {"$sum": 1}}}])}
+        stored = {document["_pichash"]: document["df"] for document in database[storage._PICHASH_COUNT_COLLECTION].find({}, {"_pichash": 1, "df": 1, "_id": 0})}
+        self.assertEqual(stored, truth)
+
+    def testPicHashFilterAgreesWithCounting(self):
+        """The indexed filter must select exactly the hashes the counting fallback would."""
+        index = MinHashIndex(config=buildConfig())
+        storage = index._storage
+        storage.rebuildPicHashCountIndex()
+        hashes = list(dict.fromkeys(document["_pichash"] for document in storage._getDb().functions.find({"_pichash": {"$ne": None}}, {"_pichash": 1, "_id": 0}).limit(300)))
+        for cutoff in (1, 3, 1000):
+            storage._minhash_config.MINHASH_PICHASH_MAX_MATCHES = cutoff
+            with_index = set(storage._filterPicHashesByMatchCount(list(hashes)))
+            storage._setPicHashCountIndexComplete(False)
+            try:
+                counted = set(storage._filterPicHashesByMatchCount(list(hashes)))
+            finally:
+                storage._setPicHashCountIndexComplete(True)
+            self.assertEqual(with_index, counted, "cutoff %d selected different hashes" % cutoff)
+
     def testPicHashCutoffDefaultsToOff(self):
         self.assertEqual(MinHashConfig().MINHASH_PICHASH_MAX_MATCHES, 0)
 
