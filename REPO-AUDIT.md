@@ -300,47 +300,74 @@ open PRs, for an artifact with no live exposure, is the wrong trade and not an
 unattended decision; deleting those eight stale branches is the cheap complete cleanup
 and is flagged for the owner rather than done.
 
-## 6. Open findings, not fixed here
+## 6. Findings carried out of the merges - now resolved
 
-Carried out of the merges and the sweep. None is a regression introduced by this work;
-each is recorded where it was found rather than folded into an unrelated PR.
+Six were recorded on 2026-09-12 as unowned. One was withdrawn after measurement
+(see section 7). The other five were worked on 2026-09-13 and are fixed, each on the
+branch that owns the code.
 
-1. **`deleteOrphanedQueryData` can never collect orphaned `query_xcfg` when
-   `query_functions` is empty** (`MongoDbStorage.py`, on `fix/68-cleanup-orphans`).
-   The boundary comes from the newest `query_functions` document and the method returns
-   early when there is none. But xcfg rows are inserted *before* the function rows, so
-   an interrupted insert is exactly what leaves xcfg with no function — and if that
-   drains the collection to zero query functions, the residue becomes permanent. A
-   `query_xcfg`-derived fallback boundary closes it.
+**1 and 2 - `mcrit` PR #33, `fix/68-cleanup-orphans` (pushed, CI green 7/7).**
+`deleteOrphanedQueryData` took its boundary from the newest query function and returned
+early when there was none, so with `query_functions` empty the orphaned `query_xcfg`
+documents were never collected - permanently. Reachable rather than theoretical:
+`addSmdaReport` writes the disassembly (`_insertXcfgDocuments`) before the functions
+(`_dbInsertMany`), so an insert interrupted between the two leaves exactly that residue,
+and deleting the queries around it empties the collection the boundary came from.
+Reproduced against mongo before fixing: two blobs, cleanup answers `query_xcfg: 0`, and
+answers 0 again forever after.
 
-2. **Two `distinct` calls contradict their own docstring and have a hard 16 MB ceiling**
-   (same file). The docstring promises "no single command carries the whole
-   collection", but `distinct("sample_id")` on `query_samples` and `query_functions`
-   each return one BSON document capped at 16 MB, failing past roughly 1.3M distinct
-   ids. Everything around them is correctly batched; these two are the exception and
-   would be the first to break on a Malpedia-sized instance.
+With no function id to bound by, an existing query *sample* is what proves an insert may
+be in flight - the sample is written first of the three - so the collection is only
+emptied when `query_samples` is empty too. The second fix removed the two `distinct()`
+calls the docstring's "no single command carries the whole collection" was already
+contradicted by: they answer with one document and fail past MongoDB's 16 MiB cap at
+roughly 1.3M distinct ids. Now one `$group` read through a cursor, batched, with the
+sample lookup done per batch. Three tests; the first two fail on the previous
+implementation. 290 pass against mongo, up from 287.
 
-3. **`getSampleBinary` buffers whole files twice** (`feat/95-keep-submitted-binaries`).
-   The GridFS read loads the entire file into memory and `SampleResource.on_get_binary`
-   assigns it to `resp.data`. Falcon's `resp.stream` with the `GridOut` handle avoids
-   it. Not a correctness problem at typical sample sizes.
+**3 and 4 - `mcrit` PR #35, `feat/95-keep-submitted-binaries` (pushed, CI green 7/7).**
+Two memory problems and a missing changelog entry.
 
-4. **`feat/95` adds a config knob and a REST endpoint with no CHANGELOG entry.** main
-   adopted Keep a Changelog mid-flight (`b938196`) and `[Unreleased]` is empty. The PR
-   should add one before it merges.
+`Worker.addBinarySample` decided whether a resubmitted sample already had its binary with
+`getSampleBinary(...) is None` - streaming the entire file out of GridFS to answer a
+yes/no question, on the ingestion path. And the binary route buffered the whole sample
+into `resp.data`. `hasSampleBinary()` and `openSampleBinary()` fix both; measured with
+`tracemalloc`:
 
-5. **MCRITweb offers no way to start the three maintenance jobs mcrit 1.9.0 added.**
-   `repairMinHashes`, `recomputeFamilyStats` and `rebuildPicBlockHashIndex` are
-   reachable only from the backend; the server page starts `rebuildIndex` and
-   `recalculateMinHashes` and nothing else. `mcrit#40` has already given the client
-   typed methods for all three, so the front-end half is a small, well-defined feature:
-   three buttons on the admin maintenance page. Recorded in the comment above the
-   empty-state map so the next reader does not re-derive it.
+| | before | after |
+|---|---|---|
+| resubmission check, 64 MiB sample | 128.1 MiB peak | **0.0 MiB** |
+| serving a 32 MiB sample | 64.1 MiB peak | **33.9 MiB** |
+| serving a 128 MiB sample | 256.2 MiB peak | **33.9 MiB** |
+| serving a 256 MiB sample | 512.4 MiB peak | **33.9 MiB** |
 
-6. ~~**`get_cached_job_id` sorts with no index to match.**~~ **Withdrawn — measured and
-   wrong.** See the benchmark in section 7; the existing `payload.descriptor` index
-   already serves this query and a compound index is not worth adding.
+Buffered costs twice the file, because `GridOut.read()` joins the chunks it has
+collected. Streamed is flat - bounded by the driver's cursor batch, not the sample - so
+this is the difference between constant and linear, which is why it matters on large
+corpora rather than in a test. The return type is a small `BinaryStream` Protocol, not
+`typing.IO`: `ty` rejects a `GridOut` as one, and it named the exact fix (`size` had to
+be positional-only to match `BytesIO.read`). The changelog entry the branch was missing
+now carries these numbers and the caveat that the corpus grows by the size of its
+submissions. 293 pass, up from 289.
 
+**5 - `mcritweb` PR #67, new branch `feat/schedule-maintenance-jobs`.**
+`/status` reports three things a corpus can have wrong and mcrit 1.9.0 added the repair
+for each; MCRITweb could report all three and start none of them. Three places had to
+agree, and two of them were traps: `data.result()` dispatches to
+`result_maintenance.html` from a hand-written list of job parameters, so without adding
+the new types the result of a job MCRITweb had itself just scheduled would have been
+reported as an invalid job id; and the template would have said "Unhandled maintenance
+job type".
+
+Two further bugs fell out of writing the tests rather than being looked for. A backend
+answering no job id took `url_for` into a `BuildError` - a 500 where a message belongs -
+and **the three pre-existing scheduling routes had the same hole**, saved only by the
+backend answering; all six go through one guard now. And `tests/conftest`'s permissive
+fake mints a job id only for names starting with one of its queueing prefixes, which did
+not include `repair` or `recompute` - exactly the gap its own docstring describes, and
+why two of the three new routes failed the policy test while the third quietly did not.
+16 tests; reverting the dispatch list fails 4, removing the guard fails 6. 258 pass, up
+from 239.
 
 ## 7. Dead ends and mistakes, recorded
 
@@ -414,12 +441,24 @@ its private address (`GH007`). Everything here is authored as
 
 ## 8. What remains
 
-- **`mcritweb#9` should merge first.** Until it does, `master` has a CI workflow that
-  never installs pytest and mcrit 1.9.0 no longer supplies it. Every branch cut from
-  `master` inherits the problem, and the eight-branch port above is a workaround.
-- **The eight stale branches holding the cookie blob** are the last tree references to
-  it. None has an open PR; deleting them is the complete cleanup and needs the owner's
+- **`mcritweb#9` should merge first.** `master`'s workflow runs `python -m pytest` without
+  ever installing it, which worked only while mcrit brought pytest along. mcrit 1.9.0 moved
+  it into the `dev` extra, and this is no longer theoretical: the CI run on `mcritweb#67`
+  failed on all four Python versions with `No module named pytest`, against a diff that has
+  nothing to do with it. Verified in a clean venv - installing `requirements.txt` resolves
+  mcrit 1.9.0 and `import pytest` fails. #9's four lines are ported into #67 so it can be
+  green while #9 waits, and they no-op the moment #9 lands. Every branch cut from `master`
+  after that inherits the problem again until it does.
+- **The eight stale branches holding the cookie blob** are the last tree references to it.
+  None has an open PR; deleting them is the complete cleanup and needs the owner's
   go-ahead (section 5).
-- **Findings 1-6 above** are unowned.
-- **Nothing here was merged.** Every PR is left reviewed, current and green, for its
-  author to merge — that was the scope.
+- **Nothing here was merged.** Every PR is left reviewed, current and green, for its author
+  to merge - that was the scope.
+
+### Smaller things noticed and deliberately left
+
+- `getSampleBinary()` still buffers, by design: it is the bytes API and its callers want
+  bytes. Only the two paths that did not need them were moved off it.
+- MCRITweb's user manual (`docs/manual/README.md`) documents no maintenance action at all,
+  so the three new buttons are not described there either. Worth a pass over the admin
+  page as a whole rather than a paragraph bolted on for these three.
