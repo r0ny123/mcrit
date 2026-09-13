@@ -1513,6 +1513,11 @@ class MongoDbStorage(StorageInterface):
         which is a worse outcome than a slower rebuild.
         """
         collection = self._getDb()[self._FUNCTION_RANGE_COLLECTION]
+        # Mark incomplete *before* emptying it. The flag is what readers consult to decide
+        # whether the index may be trusted, so leaving it true across a rebuild advertises a
+        # complete index over a half-filled collection - and a shortlist built on that would
+        # silently attribute functions to no sample at all.
+        self._setFunctionRangeIndexComplete(False)
         collection.delete_many({})
         operations = []
         num_spans = 0
@@ -1651,6 +1656,10 @@ class MongoDbStorage(StorageInterface):
     def rebuildPicHashCountIndex(self, progress_reporter=None) -> int:
         """Count holders per pichash from the functions collection; returns distinct hashes."""
         collection = self._getDb()[self._PICHASH_COUNT_COLLECTION]
+        # same reasoning as the range index: a hash with no count document is *excluded* by the
+        # indexed filter, so a rebuild that left the flag true would drop exact matches for
+        # every hash it had not yet counted
+        self._setPicHashCountIndexComplete(False)
         collection.delete_many({})
         pipeline = [{"$match": {"_pichash": {"$ne": None}}}, {"$group": {"_id": "$_pichash", "df": {"$sum": 1}}}]
         operations = []

@@ -203,6 +203,61 @@ class TwoStageMatchingTest(TestCase):
                 storage._setPicHashCountIndexComplete(True)
             self.assertEqual(with_index, counted, "cutoff %d selected different hashes" % cutoff)
 
+    def testAnInterruptedRebuildLeavesTheIndexMarkedIncomplete(self):
+        """A rebuild that dies part-way must not leave the flag claiming a complete index.
+
+        Both indexes fail *silently* when read while half-built: a missing function range
+        attributes a function to no sample, and a missing pichash count excludes that hash from
+        the filter entirely. So the flag has to drop before the collection is emptied rather
+        than only be restored after it is refilled - otherwise a crashed or killed rebuild
+        leaves a database that looks trustworthy and is not.
+        """
+        storage = MinHashIndex(config=buildConfig())._storage
+
+        class Boom(Exception):
+            pass
+
+        class FailingFunctions:
+            """Stands in for db.functions and fails the moment the rebuild reads it."""
+
+            def __getattr__(self, name):
+                def fail(*args, **kwargs):
+                    raise Boom("rebuild interrupted while reading functions.%s" % name)
+
+                return fail
+
+        class DatabaseWithFailingFunctions:
+            """Proxies the real database; pymongo builds a fresh Collection per attribute
+            access, so patching db.functions directly does not stick."""
+
+            def __init__(self, database):
+                self._database = database
+
+            def __getattr__(self, name):
+                if name == "functions":
+                    return FailingFunctions()
+                return getattr(self._database, name)
+
+            def __getitem__(self, name):
+                return self._database[name]
+
+        real_database = storage._getDb()
+        for rebuild, is_complete, setter in (
+            (storage.rebuildFunctionRangeIndex, storage.isFunctionRangeIndexComplete, storage._setFunctionRangeIndexComplete),
+            (storage.rebuildPicHashCountIndex, storage.isPicHashCountIndexComplete, storage._setPicHashCountIndexComplete),
+        ):
+            setter(True)
+            self.assertTrue(is_complete())
+            storage._getDb = lambda database=real_database: DatabaseWithFailingFunctions(database)
+            try:
+                with self.assertRaises(Boom):
+                    rebuild()
+            finally:
+                del storage._getDb
+            self.assertFalse(is_complete(), "%s left the flag claiming complete after being interrupted" % rebuild.__name__)
+            rebuild()
+            self.assertTrue(is_complete(), "%s did not restore its flag on a clean run" % rebuild.__name__)
+
     def testPicHashCutoffDefaultsToOff(self):
         self.assertEqual(MinHashConfig().MINHASH_PICHASH_MAX_MATCHES, 0)
 
