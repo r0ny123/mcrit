@@ -101,6 +101,57 @@ the same trick that made the band cutoff worth having. It is **not** yet measure
 real corpus large enough for PicHash lookup to bind, which is why the recommended value stays
 0; a top-K bound on the exact-match path is still unimplemented.
 
+## Validation on a real corpus (no synthetic samples)
+
+Everything above grows a 257-sample real corpus with synthetic samples. This section is
+**2,016 real Malpedia samples** - 1,866,128 functions, 757 families, nothing synthetic - and it
+changes two of the conclusions, which is why it was worth building.
+
+Fixed queries, warm cache, three repeats averaged. "two-stage full" is shortlist 100,
+`STORAGE_BAND_DF_CUTOFF=200`, `MINHASH_PICHASH_MAX_MATCHES=200`:
+
+| | one-stage | two-stage full | |
+|---|---|---|---|
+| median | 1.568 s | 1.647 s | **no win** |
+| mean | 1.953 s | 1.425 s | 1.37x |
+| max | 3.570 s | 2.120 s | **1.68x** |
+| peak RSS | 367 MB | 276 MB | **-25%** |
+
+Quality against the unrestricted result: **top-10 sample recall 1.000**, top-25 0.973.
+
+### What the real corpus changed
+
+**1. The PicHash cutoff matters, and only real data shows it.** The synthetic corpus could not
+exercise `MINHASH_PICHASH_MAX_MATCHES` at all - that limitation was written down before this
+measurement, because synthetic pichashes derive from signatures and are therefore more diverse
+than real library code. On real data it binds immediately: one query pulled **51,488 pichash
+match tuples**, and turning the cutoff on took the median from 2.594 s to 1.606 s. The same
+knob on the synthetic corpus did nothing measurable. A synthetic corpus fitted to real *fuzzy*
+statistics is not automatically faithful in its *exact*-match statistics.
+
+**2. At 2,016 samples the median is not yet better** - the shortlist's ranking cost is not yet
+repaid, exactly as the crossover in the synthetic series predicts, and as `docs/TUNING.md`
+already warns. The tail and the memory are better well before the median is, and the tail is
+what makes a corpus unusable.
+
+### Memory, and upstream issue #69
+
+The **-25% peak RSS** is the first direct evidence for
+[#69](https://github.com/danielplohmann/mcrit/issues/69) ("workers consume a lot of ram on
+query": tens of GB, sometimes over 60 GB, on a 20M-function instance). It is a modest
+proportion at this corpus size for the same reason the median is - the bound has little to bite
+on yet - but it moves in the right direction for the right reason: peak RSS tracks bytes
+fetched, bytes fetched tracks candidate volume, and candidate volume is what the shortlist
+bounds. See `UPSTREAM-REVIEW.md`.
+
+### A quality cost that is not recall
+
+The PicHash cutoff changes some **scores**, not only which samples are reported: on one query
+0.903 of surviving function matches kept a bit-identical score, against 1.000 for the other
+two. The cause is not a lost match but a changed one - `PICHASH_IMPLIES_MINHASH_MATCH` reports
+an exact match as 100, and when the cutoff drops that exact match the pair falls back to its
+MinHash score. Folding this into a recall number would hide it, so it is stated separately.
+
 ## End-to-end validation on a real instance
 
 The numbers above come from the benchmark harness driving the matcher in-process. The same
