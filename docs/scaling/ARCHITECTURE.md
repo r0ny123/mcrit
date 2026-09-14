@@ -77,8 +77,8 @@ in. Two indexes want a one-time build on an existing database - neither is read 
 completeness flag vouches for it, so the old behaviour holds until they are built:
 
 ```python
-storage.rebuildFunctionRangeIndex()  # required for shortlisting
-storage.rebuildBandDfIndex()  # makes the df cutoff skip from the index
+storage.rebuildFunctionRangeIndex()   # required for shortlisting
+storage.rebuildBandDfIndex()          # makes the df cutoff skip from the index
 ```
 
 Measured build cost on 10,000 samples / 8.15M functions: 12.3 s and 131 s respectively.

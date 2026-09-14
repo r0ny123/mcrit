@@ -1,0 +1,180 @@
+{
+  "db": "real",
+  "num_corpus_samples": 7244,
+  "num_corpus_samples_reported_by_status": 7244,
+  "num_corpus_functions": 8657357,
+  "queries": [
+    {
+      "sample_id": 15,
+      "sha256": "009363ee2a5f123ea22f1bdfd8db2193a78cff07674a2852c55f41cbe699e168",
+      "family": "win.zloader",
+      "num_query_functions": 557,
+      "total_seconds": 2.31450865899933,
+      "peak_rss_mb": 244.40234375,
+      "num_matched_samples": 48,
+      "num_matched_functions": 557,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 1.125590692001424,
+          "observed": {
+            "query_functions_with_candidates": 501,
+            "candidate_pairs": 5518,
+            "widest_group": 171
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.14901875899886363,
+          "observed": {
+            "pichashes_with_matches": 532,
+            "pichash_match_tuples": 1278
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.12123373400027049,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.043482033999680425,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.031195018000289565,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 1.895818937000513,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 0.040936280998721486,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 20,
+      "sha256": "00c6e653558e41a9f0c83eb506195c72b46bce24c5458e58c33bc25b4566d468",
+      "family": "win.blackpos",
+      "num_query_functions": 650,
+      "total_seconds": 2.195732770000177,
+      "peak_rss_mb": 253.90234375,
+      "num_matched_samples": 756,
+      "num_matched_functions": 650,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.8177772509989154,
+          "observed": {
+            "query_functions_with_candidates": 221,
+            "candidate_pairs": 23795,
+            "widest_group": 293
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.45406797299983737,
+          "observed": {
+            "pichashes_with_matches": 567,
+            "pichash_match_tuples": 19523
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.1326408969998738,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.021419017000880558,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.257024252001429,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 1.2076379070003895,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 0.02138306599954376,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 6,
+      "sha256": "003669761229d3e1db0f5a5b333ef62b3dffcc8e27c821ce9018362e0a2df7e9",
+      "family": "win.acidbox",
+      "num_query_functions": 158,
+      "total_seconds": 0.6263793869984511,
+      "peak_rss_mb": 254.02734375,
+      "num_matched_samples": 236,
+      "num_matched_functions": 158,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.1486502150000888,
+          "observed": {
+            "query_functions_with_candidates": 137,
+            "candidate_pairs": 3767,
+            "widest_group": 200
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.1070236979994661,
+          "observed": {
+            "pichashes_with_matches": 150,
+            "pichash_match_tuples": 1826
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.045186845998614444,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.009684220998678938,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.048359581000113394,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 0.3818605470005423,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 0.012028357001327095,
+          "observed": {}
+        }
+      }
+    }
+  ],
+  "median_total_seconds": 2.195732770000177,
+  "mean_total_seconds": 1.712206938665986,
+  "max_total_seconds": 2.31450865899933,
+  "peak_rss_mb": 254.02734375,
+  "config_overrides": {
+    "MINHASH_MATCHING_SHORTLIST_SIZE": 100,
+    "STORAGE_BAND_DF_CUTOFF": 200,
+    "MINHASH_PICHASH_MAX_MATCHES": 200,
+    "QUEUE_MONGODB_DBNAME": "wt_dedup_queue"
+  }
+}

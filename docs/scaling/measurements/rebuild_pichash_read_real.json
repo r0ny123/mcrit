@@ -1,0 +1,12 @@
+{
+  "source_db": "real",
+  "partition_size": 500000,
+  "read_phases": {
+    "grouped_read_seconds": 33.76210618019104,
+    "partitioned_read_seconds": 13.689314126968384,
+    "grouped_read_hashes": 2337173,
+    "partitioned_read_hashes": 2337173,
+    "partitioned_read_holders": 8657357
+  },
+  "unchanged": true
+}

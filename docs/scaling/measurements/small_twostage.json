@@ -1,0 +1,170 @@
+{
+  "db": "bench_250",
+  "num_corpus_samples": 250,
+  "num_corpus_functions": 280804,
+  "queries": [
+    {
+      "sample_id": 148,
+      "family": "win.zloader",
+      "num_query_functions": 754,
+      "total_seconds": 1.9673902240000416,
+      "num_matched_samples": 34,
+      "num_matched_functions": 754,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.22546148599997196,
+          "observed": {
+            "query_functions_with_candidates": 620,
+            "candidate_pairs": 19416,
+            "widest_group": 354
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.03261300100001563,
+          "observed": {
+            "pichashes_with_matches": 671,
+            "pichash_match_tuples": 3075
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.04899613300000283,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.0744110460000229,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.3847516760000076,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 1.0923640620000015,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 0.019763331000035578,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 157,
+      "family": "win.konni",
+      "num_query_functions": 236,
+      "total_seconds": 0.6807925730000193,
+      "num_matched_samples": 111,
+      "num_matched_functions": 236,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.12222122299999683,
+          "observed": {
+            "query_functions_with_candidates": 164,
+            "candidate_pairs": 12215,
+            "widest_group": 469
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.09195747799998344,
+          "observed": {
+            "pichashes_with_matches": 220,
+            "pichash_match_tuples": 20932
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.06781835100002809,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.020535274999986086,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.08154172999996945,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 0.3490502999999876,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 0.005825185999981386,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 8,
+      "family": "win.vawtrak",
+      "num_query_functions": 126,
+      "total_seconds": 0.2638746809999475,
+      "num_matched_samples": 8,
+      "num_matched_functions": 126,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.04621095400000286,
+          "observed": {
+            "query_functions_with_candidates": 46,
+            "candidate_pairs": 669,
+            "widest_group": 77
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.10239862899999252,
+          "observed": {
+            "pichashes_with_matches": 55,
+            "pichash_match_tuples": 26936
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.005835036999997101,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.004789464999987558,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.012355370000022958,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 0.1069158610000045,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 0.0014934079999875394,
+          "observed": {}
+        }
+      }
+    }
+  ],
+  "median_total_seconds": 0.6807925730000193,
+  "mean_total_seconds": 0.9706858260000027,
+  "max_total_seconds": 1.9673902240000416,
+  "config_overrides": {
+    "MINHASH_MATCHING_SHORTLIST_SIZE": 100,
+    "STORAGE_BAND_DF_CUTOFF": 1000
+  }
+}

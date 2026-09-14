@@ -29,7 +29,6 @@ Usage:
 import argparse
 import json
 import os
-from typing import Any, Dict, List
 
 
 def shards_consulted(explain):
@@ -57,19 +56,17 @@ def main():
     client = MongoClient(args.mongo_host, int(args.mongo_port))
     db = client[args.db]
     num_shards = len(client["admin"].command("listShards")["shards"])
-    # kept apart rather than as one heterogeneous dict: a {"num_shards": int, "checks": list}
-    # literal makes the value type int | list, and appending to it is then not well typed
-    checks: List[Dict[str, Any]] = []
+    findings = {"num_shards": num_shards, "checks": []}
 
     def record(label, collection, query, expectation):
         try:
             explain = db.command("explain", {"find": collection, "filter": query}, verbosity="queryPlanner")
         except Exception as error:
-            checks.append({"label": label, "error": str(error)[:120]})
+            findings["checks"].append({"label": label, "error": str(error)[:120]})
             print("%-34s ERROR %s" % (label, str(error)[:70]))
             return
         consulted = shards_consulted(explain)
-        checks.append({"label": label, "shards": consulted, "expectation": expectation})
+        findings["checks"].append({"label": label, "shards": consulted, "expectation": expectation})
         print("%-34s %d/%d shards  %s" % (label, len(consulted), num_shards, ",".join(consulted) or "(unsharded: primary)"))
 
     # a real band hash and function id from the corpus, so the plans are the ones MCRIT produces
@@ -90,7 +87,7 @@ def main():
     record("sample by id (unsharded)", "samples", {"sample_id": 0}, "primary only")
 
     print()
-    single = [c for c in checks if c.get("expectation") == "targeted" and "shards" in c]
+    single = [c for c in findings["checks"] if c.get("expectation") == "targeted" and "shards" in c]
     if single and all(len(c["shards"]) == 1 for c in single):
         print("point queries are targeted to a single shard - the shard key matches the access pattern")
     elif single:
@@ -98,7 +95,7 @@ def main():
 
     if args.json:
         with open(args.json, "w") as handle:
-            json.dump({"num_shards": num_shards, "checks": checks}, handle, indent=2)
+            json.dump(findings, handle, indent=2)
         print("wrote %s" % args.json)
 
 

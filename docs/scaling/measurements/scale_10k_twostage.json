@@ -1,0 +1,157 @@
+{
+  "db": "scale",
+  "num_corpus_samples": 993,
+  "num_corpus_functions": 830159,
+  "queries": [
+    {
+      "sample_id": 148,
+      "family": "win.zloader",
+      "num_query_functions": 754,
+      "total_seconds": 1.630914755000049,
+      "num_matched_samples": 96,
+      "num_matched_functions": 754,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 0,
+          "seconds": 0.0,
+          "observed": {}
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.021982577000017045,
+          "observed": {
+            "pichashes_with_matches": 671,
+            "pichash_match_tuples": 3075
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.08038652899995213,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.05924513500008288,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.0593491439999525,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 1.351464854000028,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 0.02864969300003395,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 157,
+      "family": "win.konni",
+      "num_query_functions": 236,
+      "total_seconds": 0.8140512460000764,
+      "num_matched_samples": 151,
+      "num_matched_functions": 236,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 0,
+          "seconds": 0.0,
+          "observed": {}
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.06701930700000958,
+          "observed": {
+            "pichashes_with_matches": 220,
+            "pichash_match_tuples": 20932
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.05860073100006957,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.018544011000017235,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.052374032999978226,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 0.5635001470000134,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 0.00865578100001585,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 8,
+      "family": "win.vawtrak",
+      "num_query_functions": 126,
+      "total_seconds": 0.2196706949999907,
+      "num_matched_samples": 51,
+      "num_matched_functions": 126,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 0,
+          "seconds": 0.0,
+          "observed": {}
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 0.06516374000000269,
+          "observed": {
+            "pichashes_with_matches": 55,
+            "pichash_match_tuples": 26936
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 0.008394949000035012,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.0034888669999872945,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.008222089000014421,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 0.11616007999998601,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 0.002252924999993411,
+          "observed": {}
+        }
+      }
+    }
+  ],
+  "median_total_seconds": 0.8140512460000764,
+  "mean_total_seconds": 0.8882122320000386,
+  "max_total_seconds": 1.630914755000049,
+  "config_overrides": {
+    "MINHASH_MATCHING_SHORTLIST_SIZE": 100
+  }
+}

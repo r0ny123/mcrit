@@ -5,7 +5,6 @@ Reads the per-repeat harness output for each corpus size and fits cost ~ corpus*
 least squares on log(corpus) vs log(cost), so the exponent quoted in SUMMARY.md is derived
 from the files in the repository rather than typed in by hand.
 """
-
 import json
 import math
 import os
@@ -38,11 +37,7 @@ def load(prefix, kind):
             runs.append(json.load(open(path)))
     if not runs:
         return None
-
-    def pick(key):
-        """Median across repeats, so one cold run cannot set the point."""
-        return sorted(r[key] for r in runs)[len(runs) // 2]
-
+    pick = lambda key: sorted(r[key] for r in runs)[len(runs) // 2]
     # a run from the fixed harness records the true count; an older one needs the correction
     reported = runs[0]["num_corpus_samples"]
     n = reported if "num_corpus_samples_reported_by_status" in runs[0] else CORRECTED_SIZE.get(prefix, reported)
@@ -82,9 +77,8 @@ for a, b in zip(rows["one"], rows["full"]):
     print("%-8d %10.3f %10.3f %10.3f %10.3f %9.1fx" % (a["n"], a["median"], b["median"], a["max"], b["max"], a["median"] / b["median"]))
 
 print()
-print(
-    "fitted cost ~ corpus**k over %d points (%d -> %d samples, %.2fx)" % (len(rows["one"]), rows["one"][0]["n"], rows["one"][-1]["n"], rows["one"][-1]["n"] / rows["one"][0]["n"])
-)
+print("fitted cost ~ corpus**k over %d points (%d -> %d samples, %.2fx)"
+      % (len(rows["one"]), rows["one"][0]["n"], rows["one"][-1]["n"], rows["one"][-1]["n"] / rows["one"][0]["n"]))
 for stat in ("median", "mean", "max", "rss"):
     ko = fit([r["n"] for r in rows["one"]], [r[stat] for r in rows["one"]])
     kt = fit([r["n"] for r in rows["full"]], [r[stat] for r in rows["full"]])

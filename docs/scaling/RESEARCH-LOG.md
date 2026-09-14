@@ -343,3 +343,283 @@ benchmarking.
   8 threads produced 1,378 rate-limit failures against 136 successes. One or two threads under
   a global pace, with the sample listing cached so a restart during a cooldown does not die on
   its first call, fetches reliably.
+
+## 7. Concurrency, and three ways the harness lied before it told the truth
+
+Every earlier number in this log is one query at a time. That was a deliberate simplification
+and it stopped being defensible once the result was going into a pull request: the first thing a
+maintainer asks about a change to the matching path is what happens when ten people query at
+once, and "we never measured that" is not an answer. `benchmarks/bench_concurrency.py` closes it.
+
+### Deciding what "concurrent" means before measuring it
+
+The choice that mattered was not the tooling but reading how MCRIT actually runs a job.
+`SpawningWorker._executeJobPayload` spawns `python -m mcrit singlejobworker`, then *blocks on
+`console_handle.wait()`* before its poll loop claims the next job. One worker is therefore one
+job at a time, in a dedicated OS process, and concurrency in a real deployment means running
+several worker processes. That settles a question that would otherwise have been guessed:
+threads would have measured GIL contention that production never experiences, and a thread pool
+would have been the wrong shape rather than merely a different one.
+
+So each level is C independent processes started with the "spawn" method, each building its own
+`MinHashIndex`. What that model leaves out is the REST hop, the queue round trip, and the
+per-job interpreter start-up - all constants that fall equally on both configurations. The
+start-up constant was measured rather than waved at, at **1.65 s**, and it turned out to be the
+most surprising number in the exercise: a two-stage query is 1.27 s, so a production
+single-job worker spends more time starting Python than matching. That is an argument for a
+resident worker pool, and nothing in a serial latency measurement would have suggested it.
+
+### The result
+
+Peak on this 4-core, 15.7 GB box: **3.19 req/s two-stage against 0.259 one-stage, 12.3x**. Both
+saturate the same four cores (3.99 of 4 busy at concurrency 16), so the design does not raise the
+ceiling; it lowers the price of a query, from **16.32 CPU-seconds to 1.36**, and throughput
+follows that ratio almost exactly. Full tables in `SUMMARY.md`.
+
+Two things are worth extracting beyond the headline.
+
+**The baseline saturates mongod as well as the CPU; two-stage does not.** WiredTiger's read
+tickets queued for 332 seconds across the one-stage runs at concurrency 16, and for **0.02
+seconds** across two-stage's. The CPU split says the same thing from the other side: one-stage
+spends half its per-request CPU inside mongod, two-stage a fifth of a far smaller number. The
+baseline has two walls; bounding the work removed one of them entirely.
+
+**The advantage widens, then narrows, and the narrowing is the same effect the cold-cache runs
+found.** 13.7x at one query, 18.5x at two, 11.1x at sixteen. Past saturation two-stage's
+per-request CPU inflates 30% while the baseline's does not, because two-stage's win comes from
+touching very little and is therefore the configuration with the most locality to lose when
+sixteen workers evict each other. The measurement that reads as a weakness under load is the
+same property that reads as a strength when the cache is warm.
+
+### Three defects in the harness, found before they became results
+
+Worth recording because all three produced plausible output rather than an error, which is the
+failure mode this log keeps collecting.
+
+**A read-only check that was too slow to run.** The first proof of read-only-ness counted every
+collection with `count_documents({})`. On this corpus that scans 28.7 million `_id` entries
+across 35 collections, and the run simply sat there - I had it diagnosed as a deadlock in the
+worker pool, and went looking in the wrong place, before noticing the last line printed was the
+snapshot. The fix is not "count faster" but noticing that counting was the wrong witness anyway:
+`dbstats.objects` is an exact total for free, and mongod's per-namespace `top` counters catch the
+in-place update that no count would have shown.
+
+**`self._stop` on a `threading.Thread` subclass.** The resource sampler stored its stop flag as
+`self._stop`, which is a name `threading.Thread` already owns - `join()` calls it. The thread
+ran correctly, sampled correctly, and then made the process unjoinable, so the failure surfaced
+at the *end* of a level as `TypeError: 'Event' object is not callable` rather than where the
+mistake was.
+
+**The query mix depended on the concurrency level.** Requests were handed out round-robin over
+three query samples whose costs span 5x, with a fixed count per worker. With four requests per
+worker, concurrency 1 ran six `win.zloader` against three each of the others - 50/25/25 - while
+concurrency 16 ran even thirds. Each level was internally consistent and the throughput curve
+looked entirely reasonable; it was partly a curve of *which queries ran*, and the worst-skewed
+level was concurrency 1, the baseline every speedup on the level is divided by. The harness now
+rounds each level up to whole passes over the query set, and the one-stage run was redone.
+
+None of the three would have announced itself in the output. The one that would have survived
+into the pull request is the third, because its symptom was a plausible number.
+
+### Measuring on a shared box, and admitting it in the data
+
+The first attempt produced a two-stage p50 of **93.95 s** against a published serial median of
+1.60 s. Nothing was wrong with the harness: other work on the same host was churning the same
+3 GB WiredTiger cache, and `currentOp` showed a 75-second `getmore` on `real.functions` under an
+`IXSCAN` that normally costs milliseconds. Rather than trusting a quiet-looking box, the harness
+now records machine-wide busy CPU minus the workers' own minus mongod's, and reports it per
+level as `foreign_cpu_fraction`. In the runs that were kept it is **0.0% for two-stage and at
+most 2.0% for one-stage**, which is the difference between a measurement and an anecdote.
+
+### Read-only, proven rather than promised
+
+The corpus is shared and must not change. The matching path was audited for writes first - every
+storage method it reaches only reads, and the matching cache lives in the matcher's memory rather
+than being persisted - but the audit also predicted one thing the code does write:
+`_ensureIndexAndUnknownFamily` runs on every storage construction and sends `$max` and
+`$setOnInsert` upserts at `counters` and `families`. On a populated database those match existing
+documents and modify nothing, but mongod counts the command, so the first honest run came back
+**VIOLATED** with 8 updates against `real.counters` and 4 against `real.families`.
+
+Excusing that as idempotent would have been an argument, not a proof, so the three small
+collections involved are now hashed whole at each end of the run. Both published runs end with
+counts, `dbstats` and every other namespace's write counters identical, and the digests of
+`counters`, `families` and `settings` unchanged - 282 no-op write commands that moved no byte.
+The check is in the JSON, and the harness exits non-zero if it ever fails.
+
+## 8. Partitioning the PicHash count rebuild, and a diagnosis that was half wrong
+
+The query path had been bounded; offline maintenance had not. The PicHash count rebuild was the
+one operation with a measured superlinear exponent - k ~ +2.2, 211.9 s at 5,243 samples against
+437.1 s at 7,244 - so it is where the same treatment was owed. What follows is worth recording
+mostly for how the diagnosis went, because the obvious answer was wrong, the interesting answer
+was only 11% of the cost, and the measurement at the end disagreed with the measurement that
+started the work.
+
+### Reading the code before touching it
+
+The rebuild was one `$group` over every pichash followed by one upsert per distinct hash. Three
+candidate causes, in the order they occurred to me:
+
+1. **"It scans the whole functions collection."** This is the intuitive answer and it is false.
+   `explain` on the 7,244-sample corpus shows the pipeline's cursor stage as `PROJECTION_COVERED`
+   over `IXSCAN _pichash_1`: mongod pushes the projection into the index and never fetches a
+   document. It reads a 184 MB index, not 6.0 GB of records. Had I optimised from taste I would
+   have "fixed" the scan and measured nothing.
+2. **The `$group` accumulator.** Blocking, and one entry per *distinct* hash - 2,337,173 of them
+   over 8,657,357 functions. `internalDocumentSourceGroupMaxMemoryBytes` is 104,857,600 here, so
+   it spills. Vocabulary follows the corpus, so this only gets worse.
+3. **The upserts.** They arrive in the group's output order, which is not key order, so each one
+   matches and inserts at a random position in an index that is itself growing.
+
+The fix came from what (1) left lying around rather than from (2) or (3) directly: a covered
+index scan arrives **sorted**, and the old code discarded that. Sorted means equal hashes are
+adjacent, which means counting them is a run length in two local variables rather than a hash
+table the size of the vocabulary - and it means the output is ascending, so the writes can be
+plain inserts that fill the new index at its right edge instead of dirtying it at random.
+
+Partitioning then falls out: the scan is cut into bounded `find`s of `STORAGE_REBUILD_PARTITION_SIZE`
+index keys, each resumed by a keyset bound on the last key seen, so nothing accumulates and no
+cursor has to live for the length of a multi-hour rebuild.
+
+### Two edges that only exist because of partitioning
+
+A partition boundary can land inside a run. Emitting the trailing run would undercount it, so it
+is not emitted: the next partition restarts *inclusively* at its key and counts it from the
+beginning. That re-reads at most one run per partition, which is what keeps the scan linear -
+the unit test asserts `keys read <= keys + partitions * longest run`, so an implementation that
+was correct but quadratic would fail rather than merely be slow.
+
+Inclusive restart has its own failure: a hash held by more functions than a partition holds keys
+would make every partition identical and the loop would never advance. That case is counted with
+an indexed `count_documents` over the hash's own contiguous index range instead. It needs a hash
+with more than 500,000 holders to occur, so it is covered by the fake-collection tests and not by
+anything running against a real corpus.
+
+The subtler hazard is not in the arithmetic. Keyset paging uses `$gte`/`$gt`, and **MongoDB
+brackets comparisons by BSON type**: pointed at a corpus holding a pichash that is not a string,
+the scan would stop at the end of the string bracket and silently produce a short index, and a
+missing count document is *excluded* by the cutoff's filter - so exact matches would quietly stop
+being found. `_encodePichash` only ever writes `hex()`, and all 8,657,357 non-null values in the
+real corpus are strings, but "only ever" is a property of today's code. So the rebuild checks
+itself: the holders it counted must equal an independent count of the functions carrying a
+pichash, and if they disagree it discards its work and runs the grouped implementation. A
+violated precondition costs time, not correctness.
+
+### What the measurement said, including the part that disagrees
+
+`benchmarks/bench_index_rebuild.py`, four corpus sizes projected out of the real corpus, three
+repeats, both implementations back to back, indexes compared entry by entry:
+
+| samples | distinct hashes | grouped | partitioned | speedup | spills | spilled |
+|---|---|---|---|---|---|---|
+| 1,000 | 393,858 | 51.9 s | 10.8 s | 4.81x | 0 | - |
+| 2,000 | 722,815 | 91.2 s | 20.8 s | 4.38x | 2 | 11.5 MB |
+| 4,000 | 1,486,935 | 188.8 s | 43.6 s | 4.33x | 3 | 23.4 MB |
+| 7,244 | 2,337,173 | 301.6 s | 73.1 s | 4.12x | 4 | 36.7 MB |
+
+Three things came out of splitting the total into its read and write halves, which is the one
+analysis that made the result legible:
+
+- **The spill is real and it is minor.** It starts between 1,000 and 2,000 samples and grows
+  monotonically, exactly as the diagnosis predicted. It also sits inside a 32.6 s read phase
+  inside a 301.6 s rebuild. Candidate (2) was correct and accounted for about 11% of the cost.
+- **The upsert loop was the expensive half**: 269.0 s of 301.6 s at the largest size. Upserts run
+  at 8,106-8,762/s across the whole range; ascending inserts at 38,765-42,878/s. Candidate (3)
+  was the answer, and it is the one I ranked last.
+- **Neither rate degrades with size.** Fitted against distinct hashes - the quantity both
+  implementations produce one document for - grouped is +0.99 and partitioned +1.08. Both linear.
+
+So **the k ~ +2.2 did not reproduce**, and the result of this work is a 4.1x constant factor and
+a bounded memory shape, not a repaired exponent. Writing it up the other way round would have
+been easy and wrong.
+
+### Why the instrument is the likeliest explanation, and the half of it I could check
+
+The scratch corpora are projections holding only `_pichash` - 209 MB at the largest size against
+2,317 MB for the real functions collection, with an 87 MB index against 184 MB (`$out` builds an
+index in one sorted pass, so it is denser than one grown by incremental insertion). They fit
+inside a 3 GB WiredTiger cache; the real corpus does not. A cost that appears only when the
+working set stops being resident cannot show up here.
+
+Half of that is checkable without a second full corpus. Both read phases were run against `real`
+itself, read-only - a raw client rather than a `MongoDbStorage`, because `_getDb` ensures indexes
+on first use and a corpus that must not be modified must not be handed to code that writes on
+construction - with every collection's document count recorded before and after and asserted
+equal. Result: 33.76 s grouped and 13.69 s partitioned against 32.62 s and 12.83 s on the
+projection, both reporting exactly 2,337,173 hashes. The projection is faithful for the read
+phase, which is what the covered-scan argument predicts. Whatever it hides is in the write phase,
+where the real database's other 4.9 GB compete for the same cache - and confirming that needs two
+full-fidelity corpora, about 5 GB of disk the machine did not have.
+
+### The general lesson, which is not the one I expected
+
+The log already has "a benchmark can only find costs that are already visible at the size you can
+afford to run" (5e). This is the mirror image: **a benchmark can also fail to reproduce a cost
+that was real, when the corpus you can afford to run has a different shape from the one that
+produced it.** The earlier number was not wrong; it was taken on a database that no longer fits
+twice on this disk. The defensible move is to publish both, say which one the fix is entitled to
+claim, and name the experiment that would settle it - rather than quietly keeping the exponent
+that makes the change look better.
+
+## 9. Deduplicating the matching-cache fetch, and a measurement that nearly lied
+
+Scoring had been deduplicated by signature; the fetch feeding it had not. The open question was
+whether the fetch could also read *fewer documents*, not merely decode fewer signatures.
+
+**It cannot, without a schema change.** Each document the fetch reads carries `sample_id` as well
+as the signature, and `sample_id` is per-function attribution - it is what a match is reported
+with, and `sample_id_to_func_ids` is what the PicHash filter subtracts from. Asking storage for
+"the distinct signatures of these function ids" needs a signature-keyed index that does not
+exist. So what was left to deduplicate is the hex decode and the retained bytes: one
+`bytes.fromhex` per candidate function became one per distinct signature, and every function
+carrying a signature now shares one object.
+
+### The dedup factor on a candidate set is not the corpus dedup factor
+
+The corpus-wide figure at 257 samples was 2.46x. On the 7,244-sample real corpus, the *candidate
+sets* of the three standing query samples deduplicate **3.99x to 29.59x**. That is not a
+surprise once stated: a candidate set is assembled by band collision, and band collision is the
+thing that correlates with holding the same signature. It does mean the corpus figure understates
+what the fetch stood to gain, and that the right number to quote for a fetch is the one measured
+on a candidate set. The fetch now logs its own.
+
+### Measuring the wrong two things
+
+The first version of `bench_cache_fetch.py` compared the production fetch against a hand-written
+per-function loop, and reported the deduplicated path **2x faster** at 126k ids. That number was
+wrong and flattering: the production path slices the id set and fetches the slices from a thread
+pool, and the hand-written baseline did neither. It measured threading, not deduplication.
+Rewriting the baseline as *the production fetch with only the slice decode swapped* dropped the
+same comparison to 1.19x. The lesson is the ordinary one and it keeps recurring here: a baseline
+that is not the code being replaced measures the difference between two implementations, not the
+change.
+
+A second version of the same mistake was avoided rather than made: `tracemalloc` taxes every
+allocation, so timing under it would have flattered the strategy that allocates least - which is
+precisely the strategy under test. Time and memory are measured in separate passes.
+
+### The honest end-to-end result: nothing measurable
+
+Isolated, the deduplicated fetch is 7%-50% faster and allocates 0%-24% less, never slower, with
+the gain scaling with the candidate set. End to end, over the same three queries, three repeats,
+both configurations, **the matching-cache fetch stage and the total do not move**: 10.193 s ->
+10.487 s (knobs at 0) and 0.269 s -> 0.270 s (two-stage), summed over the three queries, against
+a run-to-run spread several times larger than the effect. The stage also contains per-function
+cache-object construction that this change does not touch and that dominates it.
+
+That is worth recording as a result, not hiding as a disappointment. The change removes work that
+is proportional to the candidate set, and the candidate set is what grows with the corpus; the
+cost it adds is a dict lookup per distinct signature, which grows far more slowly. It is a
+reduction in corpus-shaped work whose absolute size at 7,244 samples is below the noise floor of
+the instrument - which is the same category as the shortlist-ranking defect in 5e, found by
+asking what is shaped like the corpus rather than by reading a profile.
+
+### `$group` in mongod: measured, rejected
+
+Grouping by signature server-side would take the repeated signature off the wire too. Measured as
+the `aggregated` strategy: **slower** (2.807 s against 1.538 s at 126k ids; 6.269 s against
+3.793 s at 397k), though it does allocate less on the widest set (124.8 MB against 136.8 MB), so
+the wire saving is real and simply smaller than what the aggregation costs. The comparison is
+also not clean - the aggregation runs as one unsliced cursor against a sliced, threaded find - so
+what is rejected is this implementation of the idea, not the idea. The find path stays.

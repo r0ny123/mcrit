@@ -68,14 +68,15 @@ def main():
     seeks = query_functions * max(1, bands["count"])
 
     projected_band_bytes = band_bytes * growth  # postings are linear in functions, functions in samples
-    projected_distinct = bands["docs"] * (growth**args.heaps_beta)  # vocabulary grows sublinearly
+    projected_distinct = bands["docs"] * (growth ** args.heaps_beta)  # vocabulary grows sublinearly
 
     print("corpus today")
     print("  samples                 %12d" % num_samples)
     print("  functions               %12d" % num_functions)
     print("  band collections        %12d" % bands["count"])
     print("  distinct band hashes    %12d" % bands["docs"])
-    print("  band index size         %12.2f GB  (storage %.2f + indexes %.2f)" % (band_bytes / 1e9, bands["storage_bytes"] / 1e9, bands["index_bytes"] / 1e9))
+    print("  band index size         %12.2f GB  (storage %.2f + indexes %.2f)"
+          % (band_bytes / 1e9, bands["storage_bytes"] / 1e9, bands["index_bytes"] / 1e9))
     print()
     print("projected to %d samples (%.0fx)" % (args.target, growth))
     print("  functions               %12.3e" % (num_functions * growth))

@@ -119,7 +119,8 @@ def main():
     total_found = len(samples)
     samples = select_undone(samples, args.out_dir, args.limit)
     print(
-        "disassembling %d samples with %d workers (%d found, already-done skipped)" % (len(samples), args.workers, total_found),
+        "disassembling %d samples with %d workers (%d found, already-done skipped)"
+        % (len(samples), args.workers, total_found),
         flush=True,
     )
 

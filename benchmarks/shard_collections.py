@@ -37,7 +37,6 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, Dict
 
 # collection -> shard key. Hashed everywhere: the values are already well distributed, and hashed
 # keys avoid the monotonically-increasing-key hotspot that ranged keys have on ids handed out by a
@@ -92,10 +91,7 @@ def main():
             # A hashed key needs its index first. shardCollection makes one for an empty
             # collection, but not for a populated one.
             handle.create_index([(key, "hashed")])
-            # built as one command document rather than passed as keyword arguments: pymongo's
-            # Database.command overloads do not cover arbitrary **kwargs, and the dict form is the
-            # canonical spelling of the same call
-            command: Dict[str, Any] = {"shardCollection": namespace, "key": {key: "hashed"}}
+            command = {"key": {key: "hashed"}}
             # numInitialChunks only applies to an empty collection, and without it a hashed key
             # starts life as ONE chunk sitting on one shard - every document lands there until the
             # balancer notices and migrates, which on a fresh cluster means the first bulk load
@@ -103,7 +99,7 @@ def main():
             if is_empty:
                 command["numInitialChunks"] = chunks_wanted
             try:
-                admin.command(command)
+                admin.command("shardCollection", namespace, **command)
                 print("  sharded %-18s on %-12s %s" % (collection, key, "pre-split into %d chunks" % chunks_wanted if is_empty else "(populated: one chunk, balancer will split)"))
             except Exception as error:
                 if "already sharded" in str(error):

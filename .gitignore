@@ -82,3 +82,6 @@ profiler
 # devcontainer / local dev environment artifacts
 .devcontainer/
 .dockerignore
+
+# local benchmark working data (corpora, reports, measurement json)
+/data/

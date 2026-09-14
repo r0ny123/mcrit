@@ -1,0 +1,42 @@
+{
+  "num_shards": 2,
+  "checks": [
+    {
+      "label": "band lookup, one hash",
+      "shards": [
+        "shard0rs"
+      ],
+      "expectation": "targeted"
+    },
+    {
+      "label": "band lookup, 15 hashes",
+      "shards": [
+        "shard0rs",
+        "shard1rs"
+      ],
+      "expectation": "spread"
+    },
+    {
+      "label": "function fetch, one id",
+      "shards": [
+        "shard0rs"
+      ],
+      "expectation": "targeted"
+    },
+    {
+      "label": "function fetch, 19 ids",
+      "shards": [
+        "shard0rs",
+        "shard1rs"
+      ],
+      "expectation": "spread"
+    },
+    {
+      "label": "sample by id (unsharded)",
+      "shards": [
+        "shard0rs"
+      ],
+      "expectation": "primary only"
+    }
+  ]
+}

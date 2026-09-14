@@ -1,0 +1,175 @@
+{
+  "db": "real",
+  "num_corpus_samples": 7244,
+  "num_corpus_samples_reported_by_status": 7244,
+  "num_corpus_functions": 8657357,
+  "queries": [
+    {
+      "sample_id": 15,
+      "sha256": "009363ee2a5f123ea22f1bdfd8db2193a78cff07674a2852c55f41cbe699e168",
+      "family": "win.zloader",
+      "num_query_functions": 557,
+      "total_seconds": 9.858894425000472,
+      "peak_rss_mb": 417.390625,
+      "num_matched_samples": 2443,
+      "num_matched_functions": 557,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 1.0747048369994445,
+          "observed": {
+            "query_functions_with_candidates": 502,
+            "candidate_pairs": 183621,
+            "widest_group": 9332
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 5.186240159999215,
+          "observed": {
+            "pichashes_with_matches": 532,
+            "pichash_match_tuples": 474366
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 2.464462795000145,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.19902079500025138,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.22277102900079626,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 1.1555001037777402e-05,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 2.3030006559565663e-06,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 20,
+      "sha256": "00c6e653558e41a9f0c83eb506195c72b46bce24c5458e58c33bc25b4566d468",
+      "family": "win.blackpos",
+      "num_query_functions": 650,
+      "total_seconds": 25.38963834399874,
+      "peak_rss_mb": 766.14453125,
+      "num_matched_samples": 3613,
+      "num_matched_functions": 650,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 2.128244794999773,
+          "observed": {
+            "query_functions_with_candidates": 482,
+            "candidate_pairs": 865854,
+            "widest_group": 19353
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 9.090031351999642,
+          "observed": {
+            "pichashes_with_matches": 567,
+            "pichash_match_tuples": 981104
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 5.449199344999215,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.8482248790005542,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 4.520642515000873,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 1.2598000466823578e-05,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 2.3520005925092846e-06,
+          "observed": {}
+        }
+      }
+    },
+    {
+      "sample_id": 6,
+      "sha256": "003669761229d3e1db0f5a5b333ef62b3dffcc8e27c821ce9018362e0a2df7e9",
+      "family": "win.acidbox",
+      "num_query_functions": 158,
+      "total_seconds": 3.8466828580003494,
+      "peak_rss_mb": 766.14453125,
+      "num_matched_samples": 700,
+      "num_matched_functions": 158,
+      "stages": {
+        "band_candidate_lookup": {
+          "calls": 1,
+          "seconds": 0.45550541000011435,
+          "observed": {
+            "query_functions_with_candidates": 140,
+            "candidate_pairs": 129307,
+            "widest_group": 10653
+          }
+        },
+        "pichash_lookup": {
+          "calls": 1,
+          "seconds": 1.3386110459996416,
+          "observed": {
+            "pichashes_with_matches": 150,
+            "pichash_match_tuples": 241015
+          }
+        },
+        "matching_cache_fetch": {
+          "calls": 1,
+          "seconds": 1.4360279079992324,
+          "observed": {}
+        },
+        "minhash_scoring": {
+          "calls": 1,
+          "seconds": 0.08114972300063528,
+          "observed": {}
+        },
+        "result_assembly": {
+          "calls": 1,
+          "seconds": 0.10571885399986058,
+          "observed": {}
+        },
+        "shortlist_stage1": {
+          "calls": 1,
+          "seconds": 1.4203000318957493e-05,
+          "observed": {}
+        },
+        "shortlist_restrict": {
+          "calls": 1,
+          "seconds": 2.139000571332872e-06,
+          "observed": {}
+        }
+      }
+    }
+  ],
+  "median_total_seconds": 9.858894425000472,
+  "mean_total_seconds": 13.031738542333187,
+  "max_total_seconds": 25.38963834399874,
+  "peak_rss_mb": 766.14453125,
+  "config_overrides": {}
+}

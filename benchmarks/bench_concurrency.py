@@ -19,9 +19,6 @@ measured while something else was running is not a measurement of this software.
 records that share as `foreign_cpu_fraction`, so a contaminated level is visible in the JSON
 rather than merely suspected afterwards.
 
-The results this harness produced, the raw JSON it wrote and the write-up of both live on the
-`research/scaling-notes` branch, under `docs/scaling/`.
-
 How concurrency is realised, and why
 ------------------------------------
 A production MCRIT worker is `SpawningWorker`: it polls the queue, and for each job it spawns
