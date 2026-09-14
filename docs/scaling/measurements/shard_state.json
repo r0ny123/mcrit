@@ -1,0 +1,269 @@
+{
+  "shards": [
+    "shard0rs",
+    "shard1rs"
+  ],
+  "collections": {
+    "band_0": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_1": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_10": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_11": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_12": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_13": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_14": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_15": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_16": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_17": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_18": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_19": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_2": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_3": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_4": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_5": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_6": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_7": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_8": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "band_9": {
+      "sharded": true,
+      "key": {
+        "band_hash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "candidates": {
+      "sharded": false
+    },
+    "counters": {
+      "sharded": false
+    },
+    "families": {
+      "sharded": false
+    },
+    "function_ranges": {
+      "sharded": true,
+      "key": {
+        "sample_id": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "functions": {
+      "sharded": true,
+      "key": {
+        "function_id": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "matches": {
+      "sharded": false
+    },
+    "pichash_counts": {
+      "sharded": true,
+      "key": {
+        "_pichash": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    },
+    "query_functions": {
+      "sharded": false
+    },
+    "query_samples": {
+      "sharded": false
+    },
+    "samples": {
+      "sharded": false
+    },
+    "xcfg": {
+      "sharded": true,
+      "key": {
+        "_id": "hashed"
+      },
+      "chunks_per_shard": {
+        "shard0rs": 2,
+        "shard1rs": 2
+      }
+    }
+  }
+}
