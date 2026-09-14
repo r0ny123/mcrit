@@ -67,6 +67,37 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   matcher memory falls with the matrix by the same factor. Verified against the existing
   golden-result suites, which pass unchanged.
 
+- `getSampleFunctionCounts` takes the sample ids to answer for. The shortlist ranking needs a
+  function count per *candidate*, and asked for every sample in the corpus - once per matching
+  job. At a few thousand samples that map is free, which is why four benchmark points across
+  3.59x of corpus growth show no trace of it; at 10^9 samples it is a 10^9-entry dict per query.
+  It is now an indexed lookup of the samples that received a vote (a few thousand at most).
+  Callers passing nothing still get the whole-corpus map, so no consumer breaks. **Ranking
+  behaviour is unchanged.**
+
+### Fixed
+
+- **`LogBucket` raised `KeyError` for any value past its precomputed table**, which aborts the
+  whole indexing job. The table covers `0..SHINGLER_LOGBUCKETS-1` (100,000 by default) and
+  `FuzzyStatPairShingler` buckets `max_block_size`, `num_ins_C`, `num_ins_S` and `num_calls`
+  through it without bounding any of them - only `stack_size` is clamped, at its own call site.
+  A single basic block of 108,837 bytes in a real corpus was enough to make that corpus
+  unindexable, and the failure gets *likelier* as corpora grow. Values outside the table are now
+  clamped to its bounds. **No MinHash changes**: only inputs that previously raised behave
+  differently, asserted across the whole table.
+- **`Worker.updateMinHashes` raised `UnboundLocalError` when there was nothing left to hash.**
+  `minhashes` was bound only inside the batch loop, so a run with an empty backlog failed exactly
+  like a crash - and that is the normal state of a *resumed* index, which is where it was hit.
+  The same statement also returned the size of the **last batch** rather than the total, silently
+  under-reporting any run longer than one workpack (a 238,991-function backlog across 24 batches
+  reported whatever the final batch held). Every caller reads it as a total, so it now
+  accumulates. **This changes the number returned**, toward what `recalculateMinHashes`,
+  `updateMinHashesForSample` and `/status` already meant by it.
+- `getSampleFunctionCounts` summed nothing when a sample owned several non-contiguous function-id
+  runs - it assigned each run's size in turn, keeping only the last. Such samples were
+  undercounted, distorting their coverage ranking in the shortlist. Both the whole-corpus and the
+  per-sample paths now sum.
+
 
 ## [1.9.0] - 2026-09-08
 

@@ -291,6 +291,47 @@ Three things are worth extracting:
   exponents were recomputed from files instead of being trusted, and that happened after the work
   was called finished. The result survived; the instrument did not.
 
+## 5e. Three more defects, and the one that measurement could never have found
+
+Growing the corpus from 5,236 to 7,244 samples for the fourth measurement point surfaced three
+further defects. The first two are ordinary scale bugs. The third is the interesting one.
+
+**`LogBucket` KeyError.** The table is precomputed for `0..99,999`; `FuzzyStatPairShingler` feeds
+it `max_block_size`, `num_ins_C`, `num_ins_S` and `num_calls`, none of them bounded - though
+`stack_size` *is* clamped at its call site, so the bound was known and applied in one place only.
+A basic block of 108,837 bytes raised, the exception propagated out of the hashing pool, and the
+indexing job died after 951 samples. One oversized function makes an entire corpus unindexable,
+and the odds of containing one rise with corpus size. Clamped at the single lookup; no value
+inside the table moves, so no existing MinHash changes.
+
+**`updateMinHashes` UnboundLocalError.** `minhashes` was bound only inside the batch loop, so
+`return len(minhashes)` raised whenever the loop did not run - that is, whenever there was
+nothing left to hash, which is the normal state of a resumed index. Finishing successfully failed
+exactly like crashing. Reading the callers before fixing turned up a second defect in the same
+statement: it returned the *last batch's* size rather than the total, under-reporting every
+multi-workpack run. A one-line `minhashes = []` would have fixed the crash and left that in
+place - the quieter and more dangerous of the two.
+
+**The shortlist ranking read the whole corpus, and no benchmark could have shown it.**
+`_rankShortlist` ranks candidates by coverage as well as by vote count, so it needs a function
+count per candidate - and it fetched the count of *every sample in the corpus*, once per matching
+job. At 7,244 samples that map is 5,034 entries and costs nothing. Four measurement points across
+3.59x of growth show no trace of it, because there is no trace to show: the cost is invisible
+until the corpus is large enough that it is fatal, and then it is a wall rather than a gradient.
+At 10^9 samples it is a 10^9-entry dict built per query.
+
+It was found by asking "what in this code is shaped like the corpus" instead of "what does the
+profile say". That is a different activity from benchmarking, and this project had been doing only
+the second. **A benchmark can only find costs that are already visible at the size you can
+afford to run.** Every other defect in this log was caught by measurement; this one was
+structurally out of measurement's reach, and it was the most consequential for the stated goal.
+
+The general form, worth keeping: *before claiming a design scales, enumerate every data structure
+whose size follows the corpus and check whether the request path touches it.* The five query
+stages had all been bounded deliberately. This one was introduced by the fix for the others, in
+support code nobody thought of as the query path, and it sat there through four rounds of
+benchmarking.
+
 ## 6. Operational notes (things that cost real time here)
 
 - **mongod aborts rather than degrades when it runs out of file descriptors.** The container's
