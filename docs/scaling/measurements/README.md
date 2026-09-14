@@ -14,6 +14,11 @@ JSON written by the harness, kept on this branch so the implementation branch st
 | `big_onestage.json`, `big_twostage.json` | `bench_matching.py` | the 12,500-sample end of the scaling fit |
 | `quality_250_cut100.json`, `quality_250_cut500.json`, `quality_250_sl25.json` | `compare_quality.py` | recall and score agreement at 257 samples for each knob |
 | `quality_10k.json`, `quality_12500.json` | `compare_quality.py` | recall and score agreement at 10,000 and 12,500 samples |
+| `rr_one_*.json`, `rr_full_*.json` | `bench_matching.py` | the 2,016-sample real-corpus point, three repeats per configuration |
+| `r3k_one_*.json`, `r3k_full_*.json` | `bench_matching.py` | the 2,996-sample real-corpus point, three repeats per configuration |
+| `r5k_one_*.json`, `r5k_full_*.json` | `bench_matching.py` | the 5,243-sample real-corpus point, three repeats per configuration |
+| `r3k_quality.json`, `r5k_quality.json` | `compare_quality.py` | recall and score agreement on the real corpus at 2,996 and 5,243 samples |
+| `pcA_*.json`, `pcB_*.json` | `bench_matching.py` | A/B of the PicHash count index: `$group` counting vs the indexed probe, same corpus |
 
 ## Caveats that apply to all of them
 
@@ -22,5 +27,10 @@ JSON written by the harness, kept on this branch so the implementation branch st
 - `quality_250_sl25.json` was produced *before* the sample-score reader was fixed; its
   `top10_sample_recall` of 0.90 is an artefact of comparing two arbitrary orderings, not a real
   recall loss. It is kept because the mistake is part of the record - see the research log.
+- The `rr_`, `r3k_` and `r5k_` files are the exception to the synthetic caveat below: those
+  corpora are real Malpedia samples throughout, grown in place, and are the three points the
+  headline result is fitted on. `_one_` is the one-stage baseline, `_full_` the two-stage
+  configuration; the same three query samples are used at every size, addressed by sha256 so
+  the comparison survives sample ids shifting.
 - Corpora above 257 samples are real samples plus synthetic growth fitted to them. The synthetic
   process is described in `synth_corpus.py`; it is not replicated samples.
