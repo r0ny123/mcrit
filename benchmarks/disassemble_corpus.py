@@ -75,6 +75,37 @@ def disassemble_one(task):
         return ("fail:%s" % type(error).__name__, path, 0.0, 0)
 
 
+def select_undone(samples, out_dir, limit):
+    """Drop samples that already have a report, then apply the limit.
+
+    The limit used to be applied first, which makes it useless for resuming: samples come back in
+    directory order, so on a corpus that is mostly disassembled the whole limit is spent on files
+    that immediately report "cached" and nothing new gets done. Filtering first makes --limit mean
+    "this many samples that still need work", which is what a caller resuming a run wants.
+
+    Reports are named for the sha256 of the sample's *contents*, so that is what has to be hashed -
+    the file name cannot be trusted for it (memory dumps are stored under the name of the sample
+    they came from, with different contents). Hashing is cheap next to disassembly, which runs at
+    about half a sample per second, and stopping as soon as the limit is filled keeps it off the
+    rest of the corpus entirely.
+    """
+    selected = []
+    for family, path in samples:
+        try:
+            digest = hashlib.sha256()
+            with open(path, "rb") as infile:
+                for chunk in iter(lambda: infile.read(1 << 20), b""):
+                    digest.update(chunk)
+        except OSError:
+            continue  # unreadable here is a failure the worker will report properly
+        if os.path.exists(os.path.join(out_dir, "%s.smda.gz" % digest.hexdigest())):
+            continue
+        selected.append((family, path))
+        if limit and len(selected) >= limit:
+            break
+    return selected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--in", dest="input_dir", required=True)
@@ -85,9 +116,13 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     samples = find_samples(args.input_dir)
-    if args.limit:
-        samples = samples[: args.limit]
-    print("disassembling %d samples with %d workers" % (len(samples), args.workers), flush=True)
+    total_found = len(samples)
+    samples = select_undone(samples, args.out_dir, args.limit)
+    print(
+        "disassembling %d samples with %d workers (%d found, already-done skipped)"
+        % (len(samples), args.workers, total_found),
+        flush=True,
+    )
 
     tasks = [(family, path, args.out_dir) for family, path in samples]
     counters = {"ok": 0, "cached": 0, "fail": 0, "functions": 0}
