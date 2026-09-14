@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import random
+import resource
 import statistics
 import sys
 import time
@@ -81,50 +82,95 @@ def iter_report_paths(reports_dir, limit=0):
 
 
 def cmd_index(args):
+    from smda.SmdaConfig import SmdaConfig
+
     from mcrit.index.MinHashIndex import MinHashIndex
 
     config = make_config(args.db, args.mongo_host, args.mongo_port)
+    if getattr(args, "drop_disassembly", False):
+        config.STORAGE_CONFIG.STORAGE_DROP_DISASSEMBLY = True
     index = MinHashIndex(config=config)
     worker = index.queue._worker
     storage = index._storage
 
+    if getattr(args, "hash_only", False):
+        # Resume path. An interrupted index leaves every report added but only some functions
+        # hashed; re-running the whole command re-parses thousands of gzipped reports purely to
+        # rediscover that they are already present, which costs far more than the hashing left
+        # to do. updateMinHashes(None) picks up exactly the unhashed backlog.
+        print("hashing the unhashed backlog in db '%s'" % args.db, flush=True)
+        started = time.time()
+        worker.updateMinHashes(None)
+        print("hashed backlog in %.1f s" % (time.time() - started), flush=True)
+        if getattr(args, "drop_disassembly", False):
+            # the resume path has to drop disassembly too, or an index interrupted before its
+            # drop keeps the xcfg forever - measured at 2.5 GB of a 3.55 GB corpus, 71% of it,
+            # for data the matching path never reads
+            sample_ids = [sample.sample_id for sample in storage.getSamples(start_index=0, limit=0)]
+            for sample_id in sample_ids:
+                storage.deleteXcfgForSampleId(sample_id)
+            print("dropped disassembly for %d samples" % len(sample_ids), flush=True)
+        print(json.dumps(index.getStatus(), indent=2), flush=True)
+        return
+
     paths = iter_report_paths(args.reports, args.limit)
-    print("indexing %d reports into db '%s'" % (len(paths), args.db), flush=True)
+    print("indexing %d reports into db '%s' in chunks of %d" % (len(paths), args.db, args.chunk_size), flush=True)
     started = time.time()
     num_functions = 0
     num_indexed = 0
-    indexed_sample_ids = []
-    # Two phases on purpose. updateMinHashesForSample() per sample spawns a process pool per
-    # sample (MINHASH_POOL_INDEXING), which for ~500-function samples costs more than the
-    # hashing: measured 3.1 s/sample. Adding every report first and then hashing the whole
-    # backlog in MINHASH_GENERATION_WORKPACK_SIZE batches pays for the pool once.
-    for position, path in enumerate(paths, start=1):
-        try:
-            report = load_report(path)
-            sample_entry = storage.addSmdaReport(report)
-            if sample_entry is None:  # already present
-                continue
-            indexed_sample_ids.append(sample_entry.sample_id)
-            num_functions += sample_entry.statistics.get("num_functions", 0)
-            num_indexed += 1
-        except Exception as error:
-            print("FAIL %s: %s: %s" % (path, type(error).__name__, error), file=sys.stderr, flush=True)
-        if position % 100 == 0:
-            elapsed = time.time() - started
-            print("added %d/%d  %d functions  %.2f samples/s" % (position, len(paths), num_functions, position / max(1e-9, elapsed)), flush=True)
-    added_seconds = time.time() - started
-    print("added %d samples / %d functions in %.1f s; now hashing" % (num_indexed, num_functions, added_seconds), flush=True)
-    hashing_started = time.time()
-    worker.updateMinHashes(None)
-    from smda.SmdaConfig import SmdaConfig
 
-    if indexed_sample_ids:
-        storage.setMinHashVersionForSamples(SmdaConfig().VERSION, indexed_sample_ids)
-    elapsed = time.time() - started
-    print(
-        "indexed %d samples / %d functions in %.1f s (add %.1f s, hash %.1f s)" % (num_indexed, num_functions, elapsed, added_seconds, time.time() - hashing_started),
-        flush=True,
-    )
+    # Add, hash, then drop disassembly - per chunk, not once for the whole corpus.
+    #
+    # Two phases (add everything, then hash everything) amortises the hashing process pool,
+    # which is why it exists: per-sample hashing spawns a pool per sample and measured 3.1 s a
+    # sample. But it also means the xcfg of every sample in the run is resident at once, and
+    # xcfg is ~70% of the stored bytes - measured 4.28 GB for 3.3M functions here, on a host
+    # with 8 GB free. Chunking keeps the pool amortised over the chunk while bounding peak disk
+    # to one chunk's disassembly.
+    #
+    # The disassembly cannot simply be skipped: it is the *input* to minhash computation
+    # (Worker.calculateMinHashes reads FunctionEntry.xcfg), not merely retrievable detail.
+    # Dropping it before hashing silently leaves functions unhashable - which is exactly what
+    # happened on this corpus, leaving 3.97M of 5.2M functions with neither xcfg nor a minhash.
+    for chunk_start in range(0, len(paths), args.chunk_size):
+        chunk_paths = paths[chunk_start : chunk_start + args.chunk_size]
+        chunk_sample_ids = []
+        for path in chunk_paths:
+            try:
+                # The report file is named for the sha256 of the sample it describes, and that
+                # is exactly what addSmdaReport dedupes on - so an already-indexed sample can be
+                # skipped without gunzipping and parsing a report only to throw it away. This is
+                # the whole cost of resuming: a restart part-way through a 7,803-report corpus
+                # otherwise re-parses every report it already has.
+                sha256 = os.path.basename(path).split(".")[0]
+                if len(sha256) == 64 and storage.getSampleBySha256(sha256) is not None:
+                    continue
+                report = load_report(path)
+                # SMDA writes a report even when it recovered no functions (packed, .NET, or a
+                # format it cannot read); such a report has no statistics to count.
+                if not report.num_functions:
+                    continue
+                sample_entry = storage.addSmdaReport(report)
+                if sample_entry is None:  # already present
+                    continue
+                chunk_sample_ids.append(sample_entry.sample_id)
+                num_functions += sample_entry.statistics.get("num_functions", 0)
+                num_indexed += 1
+            except Exception as error:
+                print("FAIL %s: %s: %s" % (path, type(error).__name__, error), file=sys.stderr, flush=True)
+        if chunk_sample_ids:
+            worker.updateMinHashes(None)
+            storage.setMinHashVersionForSamples(SmdaConfig().VERSION, chunk_sample_ids)
+            if args.drop_disassembly:
+                for sample_id in chunk_sample_ids:
+                    storage.deleteXcfgForSampleId(sample_id)
+        elapsed = time.time() - started
+        print(
+            "%d/%d reports  %d samples  %d functions  %.2f samples/s"
+            % (min(chunk_start + args.chunk_size, len(paths)), len(paths), num_indexed, num_functions, num_indexed / max(1e-9, elapsed)),
+            flush=True,
+        )
+    print("indexed %d samples / %d functions in %.1f s" % (num_indexed, num_functions, time.time() - started), flush=True)
     print(json.dumps(index.getStatus(), indent=2), flush=True)
 
 
@@ -185,11 +231,40 @@ def cmd_match(args):
     storage = index._storage
 
     status = index.getStatus()
-    num_samples = status["status"]["num_samples"]
-    print("corpus: %d samples, %d functions, %d families" % (num_samples, status["status"]["num_functions"], status["status"]["num_families"]), flush=True)
 
-    sample_ids = sorted(sample.sample_id for sample in storage.getSamples(start_index=0, limit=0))
-    if args.query_sample_ids:
+    all_samples = storage.getSamples(start_index=0, limit=0)
+    sample_ids = sorted(sample.sample_id for sample in all_samples)
+    # The corpus size on the x-axis of every scaling plot has to be the number of samples that
+    # actually exist, counted here, not the one /status reports. /status sums the denormalised
+    # per-family counters, and those drift: MongoDbStorage._updateFamilyStats skips its decrement
+    # when a family document is missing, so a bulk deletion leaves them over-reporting for good.
+    # Measured on this corpus, they claimed 7,414 samples and 9,451,566 functions against an
+    # actual 5,322 and 6,114,096 - a 2,092-sample overstatement that exactly matches an earlier
+    # deletion. Fitting an exponent against that axis is fitting against a bookkeeping error, so
+    # the reported figure is kept only to record the disagreement. recomputeFamilyStats() repairs
+    # it; this does not depend on having run it.
+    num_samples = len(sample_ids)
+    num_samples_reported = status["status"]["num_samples"]
+    print("corpus: %d samples, %d functions, %d families" % (num_samples, status["status"]["num_functions"], status["status"]["num_families"]), flush=True)
+    if num_samples_reported != num_samples:
+        print(
+            "WARNING: /status reports %d samples but %d exist; family counters have drifted by %+d. "
+            "Run storage.recomputeFamilyStats() to repair them." % (num_samples_reported, num_samples, num_samples_reported - num_samples),
+            flush=True,
+        )
+    if args.query_sha256:
+        # Sample ids are assigned per corpus, so the *same* sample has different ids in two
+        # differently-sized corpora. Selecting by sha256 is what makes a scaling comparison
+        # controlled across separately built databases rather than only within one.
+        by_sha256 = {sample.sha256: sample.sample_id for sample in all_samples}
+        queries = []
+        for sha256 in args.query_sha256.split(","):
+            sha256 = sha256.strip()
+            if sha256 not in by_sha256:
+                raise KeyError("sha256 %s is not in corpus '%s'" % (sha256, args.db))
+            queries.append(by_sha256[sha256])
+        print("resolved %d query sha256 to sample ids %s" % (len(queries), queries), flush=True)
+    elif args.query_sample_ids:
         queries = [int(value) for value in args.query_sample_ids.split(",")]
     else:
         rng = random.Random(args.seed)
@@ -208,16 +283,25 @@ def cmd_match(args):
         timer.wrap(MatcherSample, "_computeSampleShortlist", "shortlist_stage1")
         timer.wrap(MatcherSample, "_restrictToShortlist", "shortlist_restrict")
         matcher = MatcherSample(worker)
+        # Peak RSS, not just wall time. Upstream issue #69 is this same problem seen from the
+        # memory side - workers reaching tens of GB on a 20M-function instance - and this
+        # project's own tuning notes measured peak RSS correlating 0.98 with bytes fetched from
+        # MongoDB. Bounding candidates should bound the peak, and that claim needs a number.
+        # ru_maxrss is a process-wide high-water mark, so it is the peak observed up to and
+        # including this query, not this query's own allocation.
         started = time.perf_counter()
         try:
             report = matcher.getMatchesForSample(query_id)
             total = time.perf_counter() - started
+            peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
             sample_info = report["info"]["sample"]
             record: Dict[str, Any] = {
                 "sample_id": query_id,
+                "sha256": sample_info.get("sha256"),
                 "family": sample_info.get("family"),
                 "num_query_functions": sample_info.get("statistics", {}).get("num_functions", 0),
                 "total_seconds": total,
+                "peak_rss_mb": peak_rss_mb,
                 "num_matched_samples": len(report["matches"]["samples"]),
                 "num_matched_functions": len(report["matches"]["functions"]),
                 "stages": {label: dict(entry) for label, entry in timer.stages.items()},
@@ -226,8 +310,16 @@ def cmd_match(args):
             timer.restore()
         results.append(record)
         print(
-            "sample %d (%s): %.3f s  %d query functions -> %d matched samples, %d matched functions"
-            % (query_id, record["family"], record["total_seconds"], record["num_query_functions"], record["num_matched_samples"], record["num_matched_functions"]),
+            "sample %d (%s): %.3f s  peak RSS %.0f MB  %d query functions -> %d matched samples, %d matched functions"
+            % (
+                query_id,
+                record["family"],
+                record["total_seconds"],
+                record["peak_rss_mb"],
+                record["num_query_functions"],
+                record["num_matched_samples"],
+                record["num_matched_functions"],
+            ),
             flush=True,
         )
         for label, entry in record["stages"].items():
@@ -238,15 +330,18 @@ def cmd_match(args):
     summary = {
         "db": args.db,
         "num_corpus_samples": num_samples,
+        "num_corpus_samples_reported_by_status": num_samples_reported,
         "num_corpus_functions": status["status"]["num_functions"],
         "queries": results,
         "median_total_seconds": statistics.median(totals) if totals else 0.0,
         "mean_total_seconds": statistics.fmean(totals) if totals else 0.0,
         "max_total_seconds": max(totals) if totals else 0.0,
+        "peak_rss_mb": max((float(record["peak_rss_mb"]) for record in results), default=0.0),
         "config_overrides": overrides,
     }
     print(
-        "\nmedian %.3f s, mean %.3f s, max %.3f s over %d queries" % (summary["median_total_seconds"], summary["mean_total_seconds"], summary["max_total_seconds"], len(totals)),
+        "\nmedian %.3f s, mean %.3f s, max %.3f s over %d queries; peak RSS %.0f MB"
+        % (summary["median_total_seconds"], summary["mean_total_seconds"], summary["max_total_seconds"], len(totals), summary["peak_rss_mb"]),
         flush=True,
     )
     if args.json:
@@ -265,12 +360,22 @@ def main():
     index_parser.add_argument("--reports", required=True)
     index_parser.add_argument("--db", required=True)
     index_parser.add_argument("--limit", type=int, default=0)
+    index_parser.add_argument(
+        "--chunk-size", type=int, default=500, help="samples added and hashed per chunk; bounds peak disk, since disassembly is only dropped after a chunk is hashed"
+    )
+    index_parser.add_argument("--hash-only", action="store_true", help="skip adding reports and just hash what is already stored (resume an interrupted index)")
+    index_parser.add_argument(
+        "--drop-disassembly",
+        action="store_true",
+        help="discard xcfg once minhashes exist (STORAGE_DROP_DISASSEMBLY). Matching never reads it, and it is ~66%% of the stored bytes",
+    )
     index_parser.set_defaults(func=cmd_index)
 
     match_parser = subparsers.add_parser("match")
     match_parser.add_argument("--db", required=True)
     match_parser.add_argument("--queries", type=int, default=5)
     match_parser.add_argument("--query-sample-ids", default="", help="comma-separated ids, overrides --queries")
+    match_parser.add_argument("--query-sha256", default="", help="comma-separated sha256, overrides both - the way to query the same samples across differently sized corpora")
     match_parser.add_argument("--seed", type=int, default=23)
     match_parser.add_argument("--json", default="")
     match_parser.add_argument("--config-overrides", default="", help="JSON of config field -> value")

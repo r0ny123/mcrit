@@ -184,6 +184,113 @@ matching-cache fetch 0.923 s -> 0.069 s, scoring 0.411 s -> 0.048 s, result asse
   interleave counter reservations - which happened on this corpus and silently disabled the
   shortlist. Spans are now stored per run, exact for any layout.
 
+## 5b. A mistake worth recording: dropping disassembly before hashing
+
+While building the full real corpus, disk ran low and I dropped the `xcfg` collection mid-run
+to reclaim it, on the belief that disassembly is retrievable detail the matching path never
+reads. **That belief was wrong, and it cost the run.** `xcfg` is the *input* to minhash
+computation - `Worker.calculateMinHashes` reads `FunctionEntry.xcfg` through
+`_attachXcfgBlobs` - so removing it before a sample is hashed leaves that sample permanently
+unhashable. The damage was silent: no error, no failed job, just 3.97M of 5.2M functions
+carrying neither disassembly nor a minhash, and a corpus that would have quietly under-reported
+every match had it been measured.
+
+It was recoverable because the failure had a clean boundary - every sample hashed before the
+drop was fine, everything after it was not - so the 2,540 affected samples were deleted (they
+had no band entries either, never having been hashed) and the validated 2,016-sample corpus was
+re-verified against its earlier numbers before anything else was done to it.
+
+The underlying defect was in the harness, not the impulse. Two-phase indexing (add everything,
+then hash everything) exists because per-sample hashing spawns a process pool per sample and
+measured 3.1 s a sample; but it also holds the disassembly of *every* sample in the run at once,
+and `xcfg` is ~70% of the stored bytes - 4.28 GB for 3.3M functions on a host with 8 GB free.
+`benchmarks/bench_matching.py` now adds, hashes and drops **per chunk**, which keeps the pool
+amortised while bounding peak disk to one chunk's disassembly. MCRIT's own
+`updateMinHashesForSample` already had the right shape; the harness had optimised it away.
+
+Two general lessons, both cheap to state and expensive to learn:
+
+- *"The query path never reads it"* is not the same as *"nothing needs it"*. Ask what **writes**
+  depend on it too.
+- Reclaiming disk under pressure is exactly when a destructive shortcut looks reasonable. The
+  same pressure is what makes it a bad time to reason about what is safe to delete.
+
+## 5c. The pattern behind the mistakes, and the checks that would have caught them
+
+Six defects were introduced and fixed during this work. Listing them separately undersells what
+they have in common, which is more useful than any one of them:
+
+| What was assumed | What was true | How it failed |
+|---|---|---|
+| Disassembly is retrievable detail the query path never reads | It is the *input* to minhash computation | 3.97M functions silently unhashable |
+| The PicHash cutoff bounds the work | It counted holders with `$group`, touching one index entry per holder including for rejected hashes | the stage kept growing, 1.80x per 1.49x corpus |
+| A rebuild is complete when it finishes | The flag said complete from the moment the collection was emptied | an interrupted rebuild left a trusted, empty index |
+| Upserts are fast | No index existed yet, so each one scanned the collection | ~35 upserts/s against ~9,400/s once indexed |
+| The counts disagree, so maintenance is broken | The verification was reading while the indexer wrote | a real bug reported where none existed |
+| The test passes, so the code is right | pymongo returns a fresh `Collection` per attribute access, so the patch did nothing | two tests that passed against code with the bug |
+
+**The common cause is one thing: trusting a plausible model of the system instead of checking
+it.** Every entry above is a reasonable belief that happened to be false, and in every case the
+check that would have settled it was cheap.
+
+**The sharpest sub-pattern is silence.** A dropped xcfg, a half-built index behind a complete
+flag, a missing pichash count - none of these raise. They under-report matches and leave a
+database that looks healthy. In a system whose job is to *find* things, the dangerous failure is
+not the crash, it is the quiet absence. So the question to ask of any new index or filter here
+is not "does this work" but "if this were wrong, would anything say so".
+
+**The most expensive one was a repeat.** The PicHash `$group` is the same defect as the band
+`$size` filter, which had already been diagnosed, fixed and written down in this very document -
+and then not looked for in the analogous path. Fixing a bug without asking where else its shape
+occurs costs more than the original bug.
+
+The cheap checks, in the order they pay off:
+
+1. **Ask what *writes* depend on it**, not only what reads it, before deleting anything.
+2. **Check whether anything is writing** before trusting a verification.
+3. **Verify the test can fail** - against the unfixed code, or by proving the mechanism bites.
+4. **Grep for the shape of a bug you just fixed** before closing it out.
+5. **Run it small first.** Both the chunked indexer and the pichash count index were smoke-tested
+   on a throwaway database before being run against the real corpus; both times that was the
+   step that confirmed the invariant rather than assuming it.
+
+## 5d. A seventh defect, found after the results were published
+
+The three real-corpus points were reported, committed and pushed. Refitting them from the raw
+JSON afterwards - to derive the exponents rather than transcribe them - produced k = +0.68 on
+the median instead of the published +1.25. One of the two numbers was wrong.
+
+The JSON recorded corpus sizes of 1,571 / 5,089 / 7,328. The summary quoted 2,016 / 2,996 /
+5,243. The harness had been taking its x-axis from `index.getStatus()`, which sums the
+denormalised per-family counters - and `_updateFamilyStats` logs a warning and *skips its
+decrement* when a family document is missing, so the 2,540 samples deleted during the xcfg
+recovery were never subtracted from them.
+
+The drift is measurable today: the counters claim 7,414 samples against 5,322 that exist, an
+overstatement of 2,092. It is also constant, which is what made the published numbers
+recoverable rather than merely suspect. Subtracting it reproduces the quoted sizes: 5,089 ->
+2,997 against 2,996 quoted, 7,328 -> 5,236 against 5,243, and on the current corpus it lands
+exactly. An independent artefact agrees: the range rebuild at the third point covered 4,760
+samples, consistent with 5,236 of which 476 have no functions.
+
+So the published results stand - the quoted sizes were counted, not read from `/status` - but
+the JSON preserved the wrong one of the two numbers, and nothing in the pipeline noticed the two
+sources disagreeing by 40%.
+
+Three things are worth extracting:
+
+- **A derived number and a displayed number must come from the same place.** The summary counted;
+  the JSON asked `/status`. Both were written by the same run, and they disagreed for months of
+  wall-clock without complaint. The fix is not "use the right one" but to record both and warn
+  when they differ, which the harness now does.
+- **Denormalised counters are a silent-failure shape**, the same one as 5c: an incremental
+  counter with a skip path that only logs. `recomputeFamilyStats` (upstream, #151) exists
+  precisely because this drifts, which is evidence the failure is endemic rather than incidental
+  to this corpus.
+- **Re-deriving a published result is a check, not ceremony.** This surfaced only because the
+  exponents were recomputed from files instead of being trusted, and that happened after the work
+  was called finished. The result survived; the instrument did not.
+
 ## 6. Operational notes (things that cost real time here)
 
 - **mongod aborts rather than degrades when it runs out of file descriptors.** The container's

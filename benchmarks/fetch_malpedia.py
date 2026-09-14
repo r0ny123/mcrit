@@ -93,10 +93,16 @@ class RateLimiter:
             time.sleep(wait)
 
 
-def get_with_retry(session, url, limiter, attempts=9, timeout=90):
+def get_with_retry(session, url, limiter, attempts=4, timeout=60, deadline_seconds=240):
     """GET with the shared pacing and exponential backoff on 429/5xx."""
+    # A per-sample deadline, not just an attempt count. With a long backoff a single bad sample
+    # could hold its thread for half an hour while the fetch looked simply stalled - no output,
+    # no failures, nothing moving. Giving up on one sample is cheap; stalling the corpus is not.
+    started = time.monotonic()
     last_error = None
     for attempt in range(attempts):
+        if time.monotonic() - started > deadline_seconds:
+            raise RuntimeError("giving up on %s after %.0f s: %s" % (url, time.monotonic() - started, last_error))
         limiter.acquire()
         try:
             response = session.get(url, timeout=timeout)
@@ -104,13 +110,13 @@ def get_with_retry(session, url, limiter, attempts=9, timeout=90):
                 last_error = "HTTP %d" % response.status_code
                 # the server is telling us the global pace is still too high; backing off
                 # here (rather than failing the sample) is what keeps a long fetch intact
-                time.sleep(min(120.0, 3.0 * (2**attempt)))
+                time.sleep(min(30.0, 3.0 * (2**attempt)))
                 continue
             response.raise_for_status()
             return response
         except requests.RequestException as error:
             last_error = error
-            time.sleep(min(120.0, 3.0 * (2**attempt)))
+            time.sleep(min(30.0, 3.0 * (2**attempt)))
     raise RuntimeError("giving up on %s after %d attempts: %s" % (url, attempts, last_error))
 
 
@@ -178,7 +184,7 @@ def main():
             counters["ok"] += 1
             counters["files"] += written
             done = counters["ok"] + counters["fail"]
-            if done % 100 == 0:
+            if done % 25 == 0:
                 rate = done / max(1e-9, time.time() - started)
                 print("%d/%d  %d files  %d failed  %.1f samples/s" % (done, len(samples), counters["files"], counters["fail"], rate), flush=True)
 

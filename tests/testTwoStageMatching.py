@@ -151,6 +151,155 @@ class TwoStageMatchingTest(TestCase):
         finally:
             storage._setFunctionRangeIndexComplete(True)
 
+    def testPicHashCutoffDropsOnlyOverCommonHashes(self):
+        """A cutoff above every holder count must change nothing; a cutoff of 1 must bite."""
+        storage = MinHashIndex(config=buildConfig())._storage
+        function_ids = [entry.function_id for entry in storage.getFunctionsBySampleId(self.query_sample_id)]
+        unrestricted = storage.getPicHashMatchesByFunctionIds(function_ids)
+
+        generous = buildConfig()
+        generous.MINHASH_CONFIG.MINHASH_PICHASH_MAX_MATCHES = 10**9
+        generous_matches = MinHashIndex(config=generous)._storage.getPicHashMatchesByFunctionIds(function_ids)
+        self.assertEqual(generous_matches, unrestricted)
+
+        strict = buildConfig()
+        strict.MINHASH_CONFIG.MINHASH_PICHASH_MAX_MATCHES = 1
+        strict_matches = MinHashIndex(config=strict)._storage.getPicHashMatchesByFunctionIds(function_ids)
+        # every hash is still reported as a key; what the cutoff removes is the holders behind it
+        self.assertEqual(set(strict_matches), set(unrestricted))
+        for pichash, holders in strict_matches.items():
+            self.assertLessEqual(len(holders), len(unrestricted[pichash]))
+        self.assertLessEqual(
+            sum(len(holders) for holders in strict_matches.values()),
+            sum(len(holders) for holders in unrestricted.values()),
+        )
+
+    def testPicHashCountsMatchTheFunctionsCollection(self):
+        """Every stored count must equal the number of functions actually holding that hash.
+
+        The cutoff's correctness rests on this: a count that is too low hides a hash that should
+        have been searched, and one that is too high wastes the fetch the cutoff exists to avoid.
+        """
+        storage = MinHashIndex(config=buildConfig())._storage
+        storage.rebuildPicHashCountIndex()
+        database = storage._getDb()
+        truth = {group["_id"]: group["n"] for group in database.functions.aggregate([{"$match": {"_pichash": {"$ne": None}}}, {"$group": {"_id": "$_pichash", "n": {"$sum": 1}}}])}
+        stored = {document["_pichash"]: document["df"] for document in database[storage._PICHASH_COUNT_COLLECTION].find({}, {"_pichash": 1, "df": 1, "_id": 0})}
+        self.assertEqual(stored, truth)
+
+    def testPicHashFilterAgreesWithCounting(self):
+        """The indexed filter must select exactly the hashes the counting fallback would."""
+        index = MinHashIndex(config=buildConfig())
+        storage = index._storage
+        storage.rebuildPicHashCountIndex()
+        hashes = list(dict.fromkeys(document["_pichash"] for document in storage._getDb().functions.find({"_pichash": {"$ne": None}}, {"_pichash": 1, "_id": 0}).limit(300)))
+        for cutoff in (1, 3, 1000):
+            storage._minhash_config.MINHASH_PICHASH_MAX_MATCHES = cutoff
+            with_index = set(storage._filterPicHashesByMatchCount(list(hashes)))
+            storage._setPicHashCountIndexComplete(False)
+            try:
+                counted = set(storage._filterPicHashesByMatchCount(list(hashes)))
+            finally:
+                storage._setPicHashCountIndexComplete(True)
+            self.assertEqual(with_index, counted, "cutoff %d selected different hashes" % cutoff)
+
+    def testAnInterruptedRebuildLeavesTheIndexMarkedIncomplete(self):
+        """A rebuild that dies part-way must not leave the flag claiming a complete index.
+
+        Both indexes fail *silently* when read while half-built: a missing function range
+        attributes a function to no sample, and a missing pichash count excludes that hash from
+        the filter entirely. So the flag has to drop before the collection is emptied rather
+        than only be restored after it is refilled - otherwise a crashed or killed rebuild
+        leaves a database that looks trustworthy and is not.
+        """
+        storage = MinHashIndex(config=buildConfig())._storage
+
+        class Boom(Exception):
+            pass
+
+        class FailingFunctions:
+            """Stands in for db.functions and fails the moment the rebuild reads it."""
+
+            def __getattr__(self, name):
+                def fail(*args, **kwargs):
+                    raise Boom("rebuild interrupted while reading functions.%s" % name)
+
+                return fail
+
+        class DatabaseWithFailingFunctions:
+            """Proxies the real database; pymongo builds a fresh Collection per attribute
+            access, so patching db.functions directly does not stick."""
+
+            def __init__(self, database):
+                self._database = database
+
+            def __getattr__(self, name):
+                if name == "functions":
+                    return FailingFunctions()
+                return getattr(self._database, name)
+
+            def __getitem__(self, name):
+                return self._database[name]
+
+        real_database = storage._getDb()
+        for rebuild, is_complete, setter in (
+            (storage.rebuildFunctionRangeIndex, storage.isFunctionRangeIndexComplete, storage._setFunctionRangeIndexComplete),
+            (storage.rebuildPicHashCountIndex, storage.isPicHashCountIndexComplete, storage._setPicHashCountIndexComplete),
+        ):
+            setter(True)
+            self.assertTrue(is_complete())
+            storage._getDb = lambda database=real_database: DatabaseWithFailingFunctions(database)
+            try:
+                with self.assertRaises(Boom):
+                    rebuild()
+            finally:
+                del storage._getDb
+            self.assertFalse(is_complete(), "%s left the flag claiming complete after being interrupted" % rebuild.__name__)
+            rebuild()
+            self.assertTrue(is_complete(), "%s did not restore its flag on a clean run" % rebuild.__name__)
+
+    def testBandRebuildKeepsTheIndexTheCutoffNeeds(self):
+        """Rebuilding the bands must leave the (band_hash, df) index the cutoff reads.
+
+        _updateBands maintains df from the first write, so a rebuilt band collection has correct
+        counts either way - the failure is silent and performance-only: without the compound
+        index STORAGE_BAND_DF_CUTOFF falls back to scanning, which is the cost it exists to
+        avoid. Cheap to assert, invisible otherwise.
+        """
+        storage = MinHashIndex(config=buildConfig())._storage
+        storage.rebuildMinhashBandIndex()
+        for band_number in range(storage._storage_config.STORAGE_NUM_BANDS):
+            index_keys = [tuple(index["key"].items()) for index in storage._getDb()["band_%d" % band_number].list_indexes()]
+            self.assertIn(
+                (("band_hash", 1), ("df", 1)),
+                index_keys,
+                "band_%d lost the (band_hash, df) index the df cutoff reads" % band_number,
+            )
+
+    def testPicHashCutoffDefaultsToOff(self):
+        self.assertEqual(MinHashConfig().MINHASH_PICHASH_MAX_MATCHES, 0)
+
+    def testFreshDatabaseVouchesForBothIndexes(self):
+        """A database with no functions maintains both indexes from its first write.
+
+        Without this a new instance would keep both perfectly up to date and still take the
+        fallback path forever, because nothing had ever vouched for them.
+        """
+        config = buildConfig()
+        config.STORAGE_CONFIG.STORAGE_MONGODB_DBNAME = DB_NAME + "_fresh"
+        storage = MinHashIndex(config=config)._storage
+        storage.clearStorage()
+        self.assertTrue(storage.isFunctionRangeIndexComplete())
+        self.assertTrue(storage.isBandDfIndexComplete())
+
+    def testBandDfIsMaintainedOnInsert(self):
+        """df must equal the posting list it counts, or the cutoff hides lists that should match."""
+        storage = MinHashIndex(config=buildConfig())._storage
+        for band_number in range(storage._storage_config.STORAGE_NUM_BANDS):
+            collection = storage._getDb()["band_%d" % band_number]
+            mismatching = collection.count_documents({"$expr": {"$ne": ["$df", {"$size": {"$ifNull": ["$function_ids", []]}}]}})
+            self.assertEqual(mismatching, 0, "band_%d has %d documents whose df disagrees with its posting list" % (band_number, mismatching))
+
     def testBandDfCutoffKeepsMatchesItDoesNotFilter(self):
         """A cutoff above every posting list must leave results identical."""
         reference = self._match()

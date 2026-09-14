@@ -101,6 +101,10 @@ class StorageConfig(ConfigInterface):
     # max=3598, and that tail grows with the corpus while the median does not. Capping it
     # bounds candidate volume by (query functions x bands x cutoff) instead of by corpus size.
     #
+    # Measured starting point: 200. At 12,500 samples that is where the traversal stops scaling
+    # with the corpus while top-10 and top-25 sample recall against the uncapped result are still
+    # 1.000 (median 1.172 s at cutoff 1000 -> 0.374 s at 200; tightening to 100 buys little more).
+    #
     # This is a recall/latency trade: a match findable *only* through a band hash that common
     # is no longer found by the fuzzy path. It is not a silent one - PicHash matching is
     # unaffected, and benchmarks/compare_quality.py measures what a given cutoff costs against

@@ -970,6 +970,39 @@ class MemoryStorage(StorageInterface):
         # backends stay interchangeable for callers that offer the rebuild unconditionally.
         return 0
 
+    def rebuildFunctionRangeIndex(self, progress_reporter=None) -> int:
+        # MemoryStorage already holds every FunctionEntry, so a function's sample is one dict
+        # lookup away and there is nothing to index. Reported complete so the two-stage path is
+        # available here too, rather than silently falling back to whole-corpus matching.
+        self._function_range_index_complete = True
+        return len({function_entry.sample_id for function_entry in self._functions.values()})
+
+    def isFunctionRangeIndexComplete(self) -> bool:
+        return getattr(self, "_function_range_index_complete", True)
+
+    def getSampleIdsForFunctionIdArray(self, function_ids):
+        import numpy as np
+
+        return np.fromiter(
+            (self._functions[function_id].sample_id if function_id in self._functions else -1 for function_id in function_ids.tolist()),
+            dtype=np.int64,
+            count=len(function_ids),
+        )
+
+    def getSampleFunctionCounts(self):
+        counts: Dict[int, int] = {}
+        for function_entry in self._functions.values():
+            counts[function_entry.sample_id] = counts.get(function_entry.sample_id, 0) + 1
+        return counts
+
+    def rebuildBandDfIndex(self, progress_reporter=None) -> int:
+        # band posting lists are plain in-memory lists whose length is free to read, so the
+        # cutoff needs no stored df here
+        return 0
+
+    def isBandDfIndexComplete(self) -> bool:
+        return True
+
     def rebuildMinhashBandIndex(self, progress_reporter=None):
         # TODO while minhashes are considerably small, there is a still chance that the
         # sum of all minhashes will eventually exceed available memory on a given system.
