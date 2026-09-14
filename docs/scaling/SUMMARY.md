@@ -47,8 +47,44 @@ prediction: k > 1 cannot hold forever, since cost is ultimately bounded by scann
 The honest claim is that the baseline becomes unusable somewhere well before a million samples,
 and that two-stage does not.
 
-**This meets the target**: one sample against a million, with no meaningful wait, and with the
-matches a user reads unchanged.
+### What this does and does not establish
+
+The growth problem is solved across the range measured: the thing that made 1-vs-N unusable -
+cost rising faster than the corpus - is gone, and no quality was traded for it. Every number
+above is backed by a file in `measurements/`.
+
+It is **not** a demonstration at a million samples. These remain unmeasured:
+
+- **Scale.** The largest real corpus here is 5,243 samples, 191x short of the target, and the
+  exponents are fitted on three points across 2.60x of growth. A negative exponent means flat
+  across what was measured, not flat forever.
+- **Absolute latency.** 1.5 s that stays 1.5 s is *stable*, not *blazing*. Billion-scale
+  similarity search at Google or Meta targets tens of milliseconds; this is two orders of
+  magnitude off that, and the achievement here is the flatness, not the number.
+- **Concurrency.** Every measurement is one query at a time, on one machine, against one mongod,
+  warm cache. QPS under load was never measured; there is no sharding and no distribution.
+- **Cold cache and memory residency.** WiredTiger has 3 GB here. At a million samples the band
+  index alone would far exceed RAM, and every figure above is warm-cache.
+- **Whether the cutoff still preserves recall at scale.** `STORAGE_BAND_DF_CUTOFF=200` was tuned
+  at this corpus size. Posting lists grow with the corpus - Heaps' law fitted at
+  V(n) = 1412.8 * n^0.7247 on this data - so at 10^6 the same constant discards a different, and
+  possibly much larger, fraction of the index. Recall 1.000 is a result at 5,243 samples, not a
+  guarantee at 1,000,000.
+
+The defensible claim is that **the baseline becomes unusable well before a million samples and
+the two-stage design does not**, together with a measured, quality-preserving 3.5x-9.2x at the
+largest size tested. Closing the remaining gap means sharding the band index across machines,
+measuring under concurrent load, re-measuring recall and cutoff binding at 10^5-10^6 with a cold
+cache, and replacing the flat df cutoff with WAND/MaxScore so the bound adapts rather than being
+a tuned constant.
+
+### A note on the corpus sizes above
+
+They are counted from the samples that exist, not read from `/status`. `/status` sums the
+denormalised per-family counters, and those drift permanently once a family document goes
+missing during a deletion - on this corpus they over-report by 2,092 samples. The harness now
+counts directly and warns when the two disagree; `fit_real_points.py` refits this table from the
+raw JSON so the exponents are derived rather than transcribed.
 
 ## The problem, stated as a measurement
 
