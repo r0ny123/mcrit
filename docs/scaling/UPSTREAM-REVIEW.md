@@ -64,3 +64,30 @@ The open PRs above touch the client, the job queue, search, and storage *schema*
 one file with real overlap is `MongoDbStorage`, where #181 changes how pichashes are *stored*
 and this work changes how they are *counted* (`MINHASH_PICHASH_MAX_MATCHES` groups on
 `_pichash`) - compatible, since the cutoff counts holders of whatever encoding is stored.
+
+## Defects found here that are worth reporting upstream
+
+All three surfaced while growing a real Malpedia corpus to 7,244 samples, and all three are
+upstream behaviour rather than anything this work introduced. Two are fixed on this branch; the
+third is deliberately left alone and is the one most worth an upstream decision.
+
+**Fixed here.** `LogBucket.getLogBucketRange` raised `KeyError` for any value at or above
+`SHINGLER_LOGBUCKETS`, aborting the whole indexing job - a basic block of 108,837 bytes was
+enough, and the probability of a corpus containing one rises with its size.
+`Worker.updateMinHashes` raised `UnboundLocalError` when no functions needed hashing, so a
+resumed index failed exactly like a crash, and the same statement returned the last batch's size
+rather than the total.
+
+**Not fixed here, and the reason matters.** `LogBucket` caches its table to
+`mcrit/cache/logbuckets.json`, **a path carrying none of the parameters the table was built
+with**. `LogBucket(1024, 1)` is served a cached table built for `max_value=100000`; more
+seriously, an instance whose `SHINGLER_LOGBUCKETS` or `SHINGLER_LOGBUCKET_RANGE` changed would
+keep bucketing every value against the old table, silently, with no signal that the configuration
+it reports is not the configuration it is using. That changes MinHashes rather than crashing,
+which is the failure mode this codebase is least able to notice.
+
+The fix is to key the cache path on the parameters. It is not applied here because it forces a
+one-time recompute on upgrade for every deployment and touches hashing behaviour, which
+`AGENTS.md` puts off-limits without explicit instruction - a maintainer's call, not this work's.
+The clamp added here does not depend on it: it clamps to the bounds of whatever table actually
+loaded rather than to `max_value`, so it stays correct under a mismatched cache.
