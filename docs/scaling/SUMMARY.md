@@ -161,7 +161,7 @@ a prerequisite for the sharding work rather than a consequence of it.
 
 1. **The 16 MB posting-list cap - the one that binds first**, at ~615,000 samples, described
    above. Nothing else on this list matters until it is fixed, because ingestion stops there.
-2. **Index residency - fatal at billion scale.** The band index projects to **331 TB** at 10^9
+2. **Index residency - fatal at billion scale, and the piece sharding addresses.** The band index projects to **331 TB** at 10^9
    samples (1.20e12 functions, 4.50e10 distinct band hashes), against 2.40 GB at 7,244. No single
    machine holds that, and **sharding is not implemented**. This is the gap between the current
    design and billion-scale, and nothing else on this list matters until it is closed. The
@@ -293,6 +293,64 @@ a full rebuild is an offline operation run after a bulk import or a schema chang
 real operational cost that the headline numbers do not capture, and at a corpus where a rebuild
 matters it would need the same treatment the query path got - incremental or partitioned rebuilds
 rather than a single pass.
+
+### Sharding: verified on a real cluster, not designed on paper
+
+MongoDB shards natively, so nothing here routes queries itself - a bespoke router would duplicate
+mature machinery, be unmergeable upstream, and could not be validated at the size where it
+matters. What was needed was shard keys matching how MCRIT already queries, applied and then
+checked. `benchmarks/shard_cluster.sh` stands up a config replica set, two shards and a mongos;
+`shard_collections.py` applies the keys and reads the layout back out of the config metadata;
+`check_shard_routing.py` reports which shards mongos actually consulted.
+
+| collection | shard key | why |
+|---|---|---|
+| `band_N` | `band_hash` (hashed) | read `{band_hash: {$in: [...]}}`, upserted on `{band_hash, bucket}` |
+| `functions` | `function_id` (hashed) | the matching path fetches by `function_id`, and both writers filter on it |
+| `pichash_counts` | `_pichash` (hashed) | read and upserted by `_pichash` |
+| `xcfg` | `_id` (hashed) | fetched by function id |
+| `function_ranges` | `sample_id` (hashed) | queried by `sample_id` since the shortlist fix |
+| `samples`, `families`, `counters` | unsharded | small, and `counters` holds the only unique index |
+
+Hashed rather than ranged throughout: ids come from a counter, so a ranged key sends every new
+document to the same shard until the chunk splits - a hotspot by construction. `functions` is
+keyed on `function_id` rather than `sample_id` on purpose; `sample_id` would make ingest targeted
+and scatter the matching path, which is the wrong way round.
+
+**Two things only the cluster found**, both of which a code audit had got wrong:
+
+- `pichash_counts` had been reasoned to `_id` from the document shape. It is read and upserted by
+  `_pichash`, and MongoDB refuses an upsert whose filter lacks the whole shard key - *"Failed to
+  target upsert by query :: could not extract exact shard key"*. **Every ingest failed outright**,
+  not slowly, which is the good kind of wrong: it is impossible to miss.
+- A hashed key on a **populated** collection starts as one chunk on one shard, so the first bulk
+  load lands entirely on one machine until the balancer catches up. Sharding has to happen while
+  the collections are empty, with `numInitialChunks`. Doing it in that order gives 2 chunks per
+  shard on every sharded collection instead of 4 on one.
+
+Also operational: `clearStorage()` drops collections, and dropping a sharded collection discards
+its shard key. A cleared database is silently unsharded until it is sharded again.
+
+With the key corrected MCRIT ingests through mongos **unmodified**, worker pool included, and the
+routing is what the keys were chosen for:
+
+| query | shards consulted (of 2) | |
+|---|---|---|
+| band lookup, one hash | 1 | targeted |
+| band lookup, 15 hashes | 2 | spread |
+| function fetch, one id | 1 | targeted |
+| function fetch, 19 ids | 2 | spread |
+| sample by id (unsharded) | primary only | |
+
+Point reads reach exactly one shard; bulk reads divide across both. That is the property sharding
+is bought for, and it is what buys down the 2.39x cold-cache penalty measured above: each node
+holds a fraction of the index and does a fraction of the lookups in parallel, until its share is
+resident again.
+
+**What this does not show.** Two shards on one machine with a two-sample corpus proves the keys
+route correctly; it says nothing about latency, balancer behaviour under load, or what happens
+when a shard fails. Routing is a property of the key and the query shape, which is why it is
+worth verifying at this size - the rest is not.
 
 ### A note on the corpus sizes above
 
