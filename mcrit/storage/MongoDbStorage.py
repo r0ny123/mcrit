@@ -1582,13 +1582,39 @@ class MongoDbStorage(StorageInterface):
         self._function_range_cache = (db_state, (firsts, lasts), sample_ids)
         return (firsts, lasts), sample_ids
 
-    def getSampleFunctionCounts(self) -> Dict[int, int]:
-        """sample_id -> how many functions it owns, from the range index (no functions read)."""
-        (firsts, lasts), sample_ids = self._getFunctionRangeLookup()
-        if not firsts.size:
+    def getSampleFunctionCounts(self, sample_ids: Optional[Iterable[int]] = None) -> Dict[int, int]:
+        """sample_id -> how many functions it owns, from the range index (no functions read).
+
+        `sample_ids` restricts the answer to those samples, and matters more than it looks: the
+        caller in the matching path only needs counts for samples that received a vote - at most
+        a few thousand - and building the whole-corpus map for that is the one place the query
+        path still scaled with corpus size. At the sizes measured here it is invisible (5,034
+        entries), but the map is one entry per contiguous run of function ids, so at 10^9 samples
+        it is a 10^9-entry dict built per matching job. Passing the ids turns it into an indexed
+        lookup of what is actually needed.
+
+        A sample can own several runs when its function ids are not contiguous, so the sizes are
+        summed per sample rather than assigned.
+        """
+        if sample_ids is None:
+            (firsts, lasts), all_sample_ids = self._getFunctionRangeLookup()
+            if not firsts.size:
+                return {}
+            sizes = (lasts - firsts + 1).tolist()
+            counts: Dict[int, int] = {}
+            for sample_id, size in zip(all_sample_ids.tolist(), sizes):
+                counts[sample_id] = counts.get(sample_id, 0) + size
+            return counts
+        wanted = [int(sample_id) for sample_id in sample_ids]
+        if not wanted:
             return {}
-        sizes = (lasts - firsts + 1).tolist()
-        return dict(zip(sample_ids.tolist(), sizes))
+        counts = {}
+        for document in self._getDb()[self._FUNCTION_RANGE_COLLECTION].find(
+            {"sample_id": {"$in": wanted}}, {"_id": 0, "sample_id": 1, "first_function_id": 1, "last_function_id": 1}
+        ):
+            size = document["last_function_id"] - document["first_function_id"] + 1
+            counts[document["sample_id"]] = counts.get(document["sample_id"], 0) + size
+        return counts
 
     def getSampleIdsForFunctionIdArray(self, function_ids: "np.ndarray") -> "np.ndarray":
         """Sample id per function id, or -1 where the range index cannot answer.

@@ -236,7 +236,12 @@ class MatcherInterface:
         function_counts = {}
         counts_getter = getattr(self._storage, "getSampleFunctionCounts", None)
         if counts_getter is not None:
-            function_counts = counts_getter()
+            # only the samples that actually received a vote - at most a few thousand. Asking for
+            # the whole corpus was the last place per-query cost still grew with corpus size.
+            try:
+                function_counts = counts_getter(votes.keys())
+            except TypeError:  # a storage that predates the argument
+                function_counts = counts_getter()
         by_count = sorted(votes.items(), key=lambda item: (-item[1], item[0]))
         by_coverage = sorted(votes.items(), key=lambda item: (-(item[1] / max(1, function_counts.get(item[0], 1))), -item[1], item[0]))
         shortlist: Set[int] = set()
