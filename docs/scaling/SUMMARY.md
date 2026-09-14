@@ -292,10 +292,16 @@ a prerequisite for the sharding work rather than a consequence of it.
    because bounded work is dominated by random lookups with little compute to amortise them. At a
    corpus too large to be resident, every lookup pays that. Sharding buys this down too, by
    shrinking each node's share until it is resident again.
-4. **Maintenance is still superlinear.** The PicHash count rebuild measured k ~ +2.2 (437.1 s at
-   7,244 against 211.9 s at 5,243). It never touches query latency - the indexes are maintained
-   incrementally on write and a full rebuild is offline - but at 10^9 a single-pass rebuild is not
-   a thing that can run. It needs partitioning the same way queries got bounded.
+4. **Maintenance: partitioned for the PicHash counts, untouched for the rest.** That rebuild is
+   now a partitioned sorted index scan behind `STORAGE_REBUILD_PARTITION_SIZE`, producing a
+   bit-identical index 4.1-4.8x faster with its intermediate state bounded by two local
+   variables. It never touches query latency - the indexes are maintained incrementally on write
+   and a full rebuild is offline. Two caveats that the section below states in full: the k ~ +2.2
+   that motivated the work **did not reproduce** on the corpora that fit on the measuring machine
+   (both implementations measured linear in vocabulary there), so what is demonstrated is a
+   constant factor and a bounded memory shape rather than a fixed exponent; and the picblockhash
+   and band-bookkeeping rebuilds have the same `$group` shape and have not been measured or
+   changed.
 5. **The df cutoff is a tuned constant, and vocabulary grows sublinearly.** `STORAGE_BAND_DF_CUTOFF
    = 200` was chosen at this corpus size. Band-hash vocabulary follows Heaps' law (fitted
    V(n) = 1412.8 * n^0.7247 here), so posting lists lengthen as the corpus grows and a fixed cutoff
@@ -403,18 +409,143 @@ already bounded. It divides the *index* across nodes until each node's share is 
 returning each lookup to memory speed. That is the argument for distribution, and it is a
 storage argument rather than a throughput one.
 
-### Index maintenance is superlinear, even though queries are not
+### Index maintenance: partitioning the rebuild, and what the old measurement was really saying
 
-Worth separating from the query-path result, because it is the one place cost still grows fast.
-Rebuilding the PicHash count index took **437.1 s at 7,244 samples against 211.9 s at 5,243** -
-2.06x the time for 1.38x the corpus, an exponent near +2.2. The function-range and band-df
-rebuilds stayed cheap (35.7 s and 38.9 s).
+Worth separating from the query-path result, because it is the one place cost still grows with
+the corpus. Rebuilding the PicHash count index took **437.1 s at 7,244 samples against 211.9 s
+at 5,243** - 2.06x the time for 1.38x the corpus, an exponent near +2.2. The function-range and
+band-df rebuilds stayed cheap (35.7 s and 38.9 s). That +2.2 is the claim this section set out
+to act on, and it is the one number here that later measurement did not reproduce: on the
+corpora that fit on the measuring machine both the old and the new rebuild came out **linear in
+distinct hashes** (+0.99 and +1.08). Read the paragraphs below before quoting it -
+"Fitted exponents, and a result that contradicts the earlier measurement" states what is and is
+not established.
 
 This does not touch query latency: all three indexes are maintained incrementally on write, and
-a full rebuild is an offline operation run after a bulk import or a schema change. But it is a
-real operational cost that the headline numbers do not capture, and at a corpus where a rebuild
-matters it would need the same treatment the query path got - incremental or partitioned rebuilds
-rather than a single pass.
+a full rebuild is an offline operation run after a bulk import or a schema change. But at a
+corpus where a rebuild matters, a single pass is not a thing that can run.
+
+#### What the rebuild was doing
+
+One server-side `$group` over every pichash, then one upsert per distinct hash. Reading the code
+for corpus-shaped state - the same question that found the shortlist-ranking defect - turns up
+two, and eliminates the obvious third:
+
+- **Not the scan.** `explain` on the 7,244-sample corpus shows the pipeline's cursor stage is
+  already `PROJECTION_COVERED` over `IXSCAN _pichash_1`. It reads the 184 MB index, not the
+  6.0 GB of documents. That was worth checking before optimising: the intuitive diagnosis, "it
+  reads the whole collection", is wrong.
+- **The `$group` accumulator holds one entry per *distinct* hash**, and vocabulary grows with the
+  corpus - 2,337,173 distinct hashes over 8,657,357 functions here. `$group` is blocking, and
+  past `internalDocumentSourceGroupMaxMemoryBytes` (104,857,600 on this server) it spills to disk.
+- **The upserts arrive in the group's output order, which is not key order.** Each one matches
+  and inserts into an index that is itself growing, dirtying a random page each time.
+
+The fix follows from what the first point leaves on the table: a covered index scan also arrives
+**sorted**, and the old code threw that away. Equal hashes are adjacent, so counting them is a
+run length in two local variables rather than a table the size of the vocabulary, and the writes
+become plain inserts in ascending key order. The scan is cut into partitions of
+`STORAGE_REBUILD_PARTITION_SIZE` index keys, each an independent bounded `find` resumed by a
+keyset bound, so nothing accumulates and no cursor has to survive a multi-hour rebuild.
+
+#### Measured, both implementations, same corpus
+
+`benchmarks/bench_index_rebuild.py`, four sizes projected out of the 7,244-sample real corpus,
+three repeats each, medians. Raw results in `measurements/rebuild_pichash.json`.
+
+| samples | functions | distinct hashes | grouped | partitioned | speedup |
+|---|---|---|---|---|---|
+| 1,000 | 890,327 | 393,858 | 51.9 s | 10.8 s | **4.81x** |
+| 2,000 | 1,848,250 | 722,815 | 91.2 s | 20.8 s | **4.38x** |
+| 4,000 | 4,471,744 | 1,486,935 | 188.8 s | 43.6 s | **4.33x** |
+| 7,244 | 8,657,357 | 2,337,173 | 301.6 s | 73.1 s | **4.12x** |
+
+The indexes are identical at every size - the harness compares the full `_pichash -> df` map,
+2,337,173 entries at the largest, not a checksum or a count.
+
+Split into the read phase (producing the counts) and the write phase (storing them), which is
+the only way to see which half the gain comes from:
+
+| samples | grouped read | partitioned read | grouped write | partitioned write | upserts/s | inserts/s |
+|---|---|---|---|---|---|---|
+| 1,000 | 3.3 s | 1.6 s | 48.6 s | 9.2 s | 8,106 | 42,878 |
+| 2,000 | 7.8 s | 2.9 s | 83.3 s | 17.9 s | 8,674 | 40,333 |
+| 4,000 | 19.1 s | 6.5 s | 169.7 s | 37.1 s | 8,762 | 40,113 |
+| 7,244 | 32.6 s | 12.8 s | 269.0 s | 60.3 s | 8,690 | 38,765 |
+
+**The write phase is 89% of the grouped rebuild**, and replacing random-order upserts with
+ascending inserts is where most of the 4.1x comes from. The sorted scan is worth a further 2.5x
+on the read phase - the smaller half of a rebuild today, but the half that keeps growing with
+vocabulary.
+
+#### The spill is real, and it is not what made the rebuild expensive
+
+`explain` with `executionStats` on the `$group`, per size:
+
+| samples | spills | spilled to disk |
+|---|---|---|
+| 1,000 | 0 | - |
+| 2,000 | 2 | 11.5 MB |
+| 4,000 | 3 | 23.4 MB |
+| 7,244 | 4 | 36.7 MB |
+
+The mechanism is confirmed: the accumulator crosses the 100 MB limit somewhere between 1,000 and
+2,000 samples on this corpus, and both the spill count and the spilled volume grow with it from
+there. It is also, on this evidence, a modest cost - 36.7 MB of spill inside a 32.6 s read phase
+inside a 301.6 s rebuild. The partitioned scan removes it by construction rather than by raising
+the limit, which is the durable form of the fix; but the honest accounting is that the upsert
+loop was the expensive half, and a diagnosis that had stopped at the spill would have optimised
+the wrong 11%.
+
+#### Fitted exponents, and a result that contradicts the earlier measurement
+
+| | vs samples | vs functions | vs distinct hashes |
+|---|---|---|---|
+| grouped total | +0.89 | +0.77 | **+0.99** |
+| partitioned total | +0.97 | +0.84 | **+1.08** |
+| grouped read | +1.16 | +1.01 | +1.29 |
+| partitioned read | +1.05 | +0.92 | +1.17 |
+
+Distinct hashes is the column that means something: it is what both implementations produce one
+document for, and vocabulary grows sublinearly in samples (Heaps' law, fitted above), which is
+why the same cost reads as sublinear against sample count.
+
+Against it, **both implementations are linear, and neither is superlinear.** That is not the
+result this work set out to confirm. **The k ~ +2.2 quoted at the top of this section did not
+reproduce.** The partitioned rebuild is 4.1x faster with bounded memory, and that is a constant
+factor: the upsert rate is flat at 8,106-8,762/s across 5.9x of vocabulary growth, and the
+insert rate flat at 38,765-42,878/s. Nothing measured here bends upwards.
+
+The likeliest explanation is the instrument, and it is worth stating rather than settling by
+assertion. The scratch corpora are projections holding only `_pichash`: 209 MB of storage at the
+largest size against 2,317 MB for the real functions collection, and an 87 MB `_pichash` index
+against 184 MB, because `$out` builds an index in one sorted pass and it is denser than the same
+index grown by incremental insertion. The measured corpus therefore sits comfortably inside a
+3 GB WiredTiger cache where the real one does not, and a cost that appears only once the working
+set stops being resident is invisible here by construction.
+
+One half of that is checkable without a second full corpus, and was checked. Running both read
+phases against `real` itself - read-only, via a raw client that never writes, with every
+collection's document count recorded before and after and asserted equal - gives **33.76 s
+grouped and 13.69 s partitioned**, against 32.62 s and 12.83 s on the projection, both reporting
+exactly 2,337,173 hashes. So the projection is faithful for the read phase, as expected given
+that both implementations read the index and not the documents. Whatever the projection hides
+is in the *write* phase, where the real database's 4.9 GB of other collections compete for the
+same cache.
+
+What this measurement does and does not establish, plainly:
+
+- **Established**: the partitioned rebuild produces a bit-identical index, is 4.1-4.8x faster
+  across four sizes and 5.9x of vocabulary growth, holds its intermediate state in two local
+  variables instead of a corpus-sized table, and removes a server-side spill that provably
+  occurs and provably grows.
+- **Not established**: that it fixes the +2.2 exponent, because that exponent did not appear on
+  this instrument. Reproducing it needs two full-fidelity corpora of different sizes, roughly
+  5 GB of disk this machine does not have.
+- **Not measured at all**: the other rebuilds. `rebuildPicBlockHashIndex` has the same `$group`
+  shape and a worse accumulator (`$addToSet` of sample ids per block hash, over 9,219,605
+  block-hash documents), and `_rebuildBandBookkeepingBucketed` groups per band collection. Both
+  are candidates for the same treatment; neither has been measured, so neither has been changed.
 
 ### Sharding: verified on a real cluster, not designed on paper
 

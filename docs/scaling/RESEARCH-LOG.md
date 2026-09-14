@@ -446,3 +446,118 @@ collections involved are now hashed whole at each end of the run. Both published
 counts, `dbstats` and every other namespace's write counters identical, and the digests of
 `counters`, `families` and `settings` unchanged - 282 no-op write commands that moved no byte.
 The check is in the JSON, and the harness exits non-zero if it ever fails.
+
+## 8. Partitioning the PicHash count rebuild, and a diagnosis that was half wrong
+
+The query path had been bounded; offline maintenance had not. The PicHash count rebuild was the
+one operation with a measured superlinear exponent - k ~ +2.2, 211.9 s at 5,243 samples against
+437.1 s at 7,244 - so it is where the same treatment was owed. What follows is worth recording
+mostly for how the diagnosis went, because the obvious answer was wrong, the interesting answer
+was only 11% of the cost, and the measurement at the end disagreed with the measurement that
+started the work.
+
+### Reading the code before touching it
+
+The rebuild was one `$group` over every pichash followed by one upsert per distinct hash. Three
+candidate causes, in the order they occurred to me:
+
+1. **"It scans the whole functions collection."** This is the intuitive answer and it is false.
+   `explain` on the 7,244-sample corpus shows the pipeline's cursor stage as `PROJECTION_COVERED`
+   over `IXSCAN _pichash_1`: mongod pushes the projection into the index and never fetches a
+   document. It reads a 184 MB index, not 6.0 GB of records. Had I optimised from taste I would
+   have "fixed" the scan and measured nothing.
+2. **The `$group` accumulator.** Blocking, and one entry per *distinct* hash - 2,337,173 of them
+   over 8,657,357 functions. `internalDocumentSourceGroupMaxMemoryBytes` is 104,857,600 here, so
+   it spills. Vocabulary follows the corpus, so this only gets worse.
+3. **The upserts.** They arrive in the group's output order, which is not key order, so each one
+   matches and inserts at a random position in an index that is itself growing.
+
+The fix came from what (1) left lying around rather than from (2) or (3) directly: a covered
+index scan arrives **sorted**, and the old code discarded that. Sorted means equal hashes are
+adjacent, which means counting them is a run length in two local variables rather than a hash
+table the size of the vocabulary - and it means the output is ascending, so the writes can be
+plain inserts that fill the new index at its right edge instead of dirtying it at random.
+
+Partitioning then falls out: the scan is cut into bounded `find`s of `STORAGE_REBUILD_PARTITION_SIZE`
+index keys, each resumed by a keyset bound on the last key seen, so nothing accumulates and no
+cursor has to live for the length of a multi-hour rebuild.
+
+### Two edges that only exist because of partitioning
+
+A partition boundary can land inside a run. Emitting the trailing run would undercount it, so it
+is not emitted: the next partition restarts *inclusively* at its key and counts it from the
+beginning. That re-reads at most one run per partition, which is what keeps the scan linear -
+the unit test asserts `keys read <= keys + partitions * longest run`, so an implementation that
+was correct but quadratic would fail rather than merely be slow.
+
+Inclusive restart has its own failure: a hash held by more functions than a partition holds keys
+would make every partition identical and the loop would never advance. That case is counted with
+an indexed `count_documents` over the hash's own contiguous index range instead. It needs a hash
+with more than 500,000 holders to occur, so it is covered by the fake-collection tests and not by
+anything running against a real corpus.
+
+The subtler hazard is not in the arithmetic. Keyset paging uses `$gte`/`$gt`, and **MongoDB
+brackets comparisons by BSON type**: pointed at a corpus holding a pichash that is not a string,
+the scan would stop at the end of the string bracket and silently produce a short index, and a
+missing count document is *excluded* by the cutoff's filter - so exact matches would quietly stop
+being found. `_encodePichash` only ever writes `hex()`, and all 8,657,357 non-null values in the
+real corpus are strings, but "only ever" is a property of today's code. So the rebuild checks
+itself: the holders it counted must equal an independent count of the functions carrying a
+pichash, and if they disagree it discards its work and runs the grouped implementation. A
+violated precondition costs time, not correctness.
+
+### What the measurement said, including the part that disagrees
+
+`benchmarks/bench_index_rebuild.py`, four corpus sizes projected out of the real corpus, three
+repeats, both implementations back to back, indexes compared entry by entry:
+
+| samples | distinct hashes | grouped | partitioned | speedup | spills | spilled |
+|---|---|---|---|---|---|---|
+| 1,000 | 393,858 | 51.9 s | 10.8 s | 4.81x | 0 | - |
+| 2,000 | 722,815 | 91.2 s | 20.8 s | 4.38x | 2 | 11.5 MB |
+| 4,000 | 1,486,935 | 188.8 s | 43.6 s | 4.33x | 3 | 23.4 MB |
+| 7,244 | 2,337,173 | 301.6 s | 73.1 s | 4.12x | 4 | 36.7 MB |
+
+Three things came out of splitting the total into its read and write halves, which is the one
+analysis that made the result legible:
+
+- **The spill is real and it is minor.** It starts between 1,000 and 2,000 samples and grows
+  monotonically, exactly as the diagnosis predicted. It also sits inside a 32.6 s read phase
+  inside a 301.6 s rebuild. Candidate (2) was correct and accounted for about 11% of the cost.
+- **The upsert loop was the expensive half**: 269.0 s of 301.6 s at the largest size. Upserts run
+  at 8,106-8,762/s across the whole range; ascending inserts at 38,765-42,878/s. Candidate (3)
+  was the answer, and it is the one I ranked last.
+- **Neither rate degrades with size.** Fitted against distinct hashes - the quantity both
+  implementations produce one document for - grouped is +0.99 and partitioned +1.08. Both linear.
+
+So **the k ~ +2.2 did not reproduce**, and the result of this work is a 4.1x constant factor and
+a bounded memory shape, not a repaired exponent. Writing it up the other way round would have
+been easy and wrong.
+
+### Why the instrument is the likeliest explanation, and the half of it I could check
+
+The scratch corpora are projections holding only `_pichash` - 209 MB at the largest size against
+2,317 MB for the real functions collection, with an 87 MB index against 184 MB (`$out` builds an
+index in one sorted pass, so it is denser than one grown by incremental insertion). They fit
+inside a 3 GB WiredTiger cache; the real corpus does not. A cost that appears only when the
+working set stops being resident cannot show up here.
+
+Half of that is checkable without a second full corpus. Both read phases were run against `real`
+itself, read-only - a raw client rather than a `MongoDbStorage`, because `_getDb` ensures indexes
+on first use and a corpus that must not be modified must not be handed to code that writes on
+construction - with every collection's document count recorded before and after and asserted
+equal. Result: 33.76 s grouped and 13.69 s partitioned against 32.62 s and 12.83 s on the
+projection, both reporting exactly 2,337,173 hashes. The projection is faithful for the read
+phase, which is what the covered-scan argument predicts. Whatever it hides is in the write phase,
+where the real database's other 4.9 GB compete for the same cache - and confirming that needs two
+full-fidelity corpora, about 5 GB of disk the machine did not have.
+
+### The general lesson, which is not the one I expected
+
+The log already has "a benchmark can only find costs that are already visible at the size you can
+afford to run" (5e). This is the mirror image: **a benchmark can also fail to reproduce a cost
+that was real, when the corpus you can afford to run has a different shape from the one that
+produced it.** The earlier number was not wrong; it was taken on a database that no longer fits
+twice on this disk. The defensible move is to publish both, say which one the fix is entitled to
+claim, and name the experiment that would settle it - rather than quietly keeping the exponent
+that makes the change look better.

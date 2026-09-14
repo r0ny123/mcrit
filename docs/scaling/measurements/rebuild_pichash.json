@@ -1,0 +1,281 @@
+{
+  "source_db": "real",
+  "partition_size": 500000,
+  "repeats": 3,
+  "source_fingerprint_before": {
+    "band_0": 334911,
+    "band_1": 530044,
+    "band_10": 388780,
+    "band_11": 419355,
+    "band_12": 215637,
+    "band_13": 459924,
+    "band_14": 501444,
+    "band_15": 344077,
+    "band_16": 439430,
+    "band_17": 273256,
+    "band_18": 373236,
+    "band_19": 467397,
+    "band_2": 443859,
+    "band_3": 482755,
+    "band_4": 583066,
+    "band_5": 491646,
+    "band_6": 336034,
+    "band_7": 418107,
+    "band_8": 514480,
+    "band_9": 465168,
+    "candidates": 0,
+    "counters": 5,
+    "error": 3,
+    "families": 1662,
+    "function_ranges": 6768,
+    "functions": 8657357,
+    "logs": 0,
+    "matches": 0,
+    "picblockhashes": 9219605,
+    "pichash_counts": 2337173,
+    "query_functions": 0,
+    "query_samples": 0,
+    "samples": 7244,
+    "settings": 1,
+    "xcfg": 4144
+  },
+  "source_fingerprint_after": {
+    "band_0": 334911,
+    "band_1": 530044,
+    "band_10": 388780,
+    "band_11": 419355,
+    "band_12": 215637,
+    "band_13": 459924,
+    "band_14": 501444,
+    "band_15": 344077,
+    "band_16": 439430,
+    "band_17": 273256,
+    "band_18": 373236,
+    "band_19": 467397,
+    "band_2": 443859,
+    "band_3": 482755,
+    "band_4": 583066,
+    "band_5": 491646,
+    "band_6": 336034,
+    "band_7": 418107,
+    "band_8": 514480,
+    "band_9": 465168,
+    "candidates": 0,
+    "counters": 5,
+    "error": 3,
+    "families": 1662,
+    "function_ranges": 6768,
+    "functions": 8657357,
+    "logs": 0,
+    "matches": 0,
+    "picblockhashes": 9219605,
+    "pichash_counts": 2337173,
+    "query_functions": 0,
+    "query_samples": 0,
+    "samples": 7244,
+    "settings": 1,
+    "xcfg": 4144
+  },
+  "points": [
+    {
+      "corpus": {
+        "samples": 1000,
+        "sample_id_threshold": 999,
+        "functions": 890327,
+        "pichashes": 890327,
+        "storage_bytes": 18976768,
+        "pichash_index_bytes": 11776000,
+        "build_seconds": 10.743160247802734
+      },
+      "group_stats": {
+        "spills": 0,
+        "spilled_bytes": null,
+        "max_used_mem_bytes": null,
+        "used_disk": false
+      },
+      "read_phases": {
+        "grouped_read_seconds": 3.3038389682769775,
+        "partitioned_read_seconds": 1.5975310802459717,
+        "grouped_read_hashes": 393858,
+        "partitioned_read_hashes": 393858
+      },
+      "grouped": {
+        "durations": [
+          49.35323429107666,
+          55.22568202018738,
+          51.894795417785645
+        ],
+        "median": 51.894795417785645,
+        "min": 49.35323429107666,
+        "num_hashes": 393858,
+        "peak_rss_kb": 288724,
+        "rss_delta_kb": 0
+      },
+      "partitioned": {
+        "durations": [
+          12.120267629623413,
+          10.78315782546997,
+          10.713808059692383
+        ],
+        "median": 10.78315782546997,
+        "min": 10.713808059692383,
+        "num_hashes": 393858,
+        "peak_rss_kb": 310500,
+        "rss_delta_kb": 0
+      },
+      "identical_index": true,
+      "speedup": 4.8125786766478935
+    },
+    {
+      "corpus": {
+        "samples": 2000,
+        "sample_id_threshold": 1999,
+        "functions": 1848250,
+        "pichashes": 1848250,
+        "storage_bytes": 44679168,
+        "pichash_index_bytes": 22810624,
+        "build_seconds": 18.851413249969482
+      },
+      "group_stats": {
+        "spills": 2,
+        "spilled_bytes": 12060393,
+        "max_used_mem_bytes": null,
+        "used_disk": true
+      },
+      "read_phases": {
+        "grouped_read_seconds": 7.8494672775268555,
+        "partitioned_read_seconds": 2.886066198348999,
+        "grouped_read_hashes": 722815,
+        "partitioned_read_hashes": 722815
+      },
+      "grouped": {
+        "durations": [
+          84.93421530723572,
+          92.1350166797638,
+          91.1839325428009
+        ],
+        "median": 91.1839325428009,
+        "min": 84.93421530723572,
+        "num_hashes": 722815,
+        "peak_rss_kb": 385564,
+        "rss_delta_kb": 0
+      },
+      "partitioned": {
+        "durations": [
+          20.807432651519775,
+          20.881702423095703,
+          20.20491933822632
+        ],
+        "median": 20.807432651519775,
+        "min": 20.20491933822632,
+        "num_hashes": 722815,
+        "peak_rss_kb": 429516,
+        "rss_delta_kb": 0
+      },
+      "identical_index": true,
+      "speedup": 4.382276952180394
+    },
+    {
+      "corpus": {
+        "samples": 4000,
+        "sample_id_threshold": 6539,
+        "functions": 4471744,
+        "pichashes": 4471744,
+        "storage_bytes": 109805568,
+        "pichash_index_bytes": 51277824,
+        "build_seconds": 45.65341329574585
+      },
+      "group_stats": {
+        "spills": 3,
+        "spilled_bytes": 24502965,
+        "max_used_mem_bytes": null,
+        "used_disk": true
+      },
+      "read_phases": {
+        "grouped_read_seconds": 19.10091471672058,
+        "partitioned_read_seconds": 6.54564356803894,
+        "grouped_read_hashes": 1486935,
+        "partitioned_read_hashes": 1486935
+      },
+      "grouped": {
+        "durations": [
+          171.1168191432953,
+          190.32127356529236,
+          188.79811644554138
+        ],
+        "median": 188.79811644554138,
+        "min": 171.1168191432953,
+        "num_hashes": 1486935,
+        "peak_rss_kb": 484556,
+        "rss_delta_kb": 0
+      },
+      "partitioned": {
+        "durations": [
+          42.93342614173889,
+          43.61460304260254,
+          44.136507749557495
+        ],
+        "median": 43.61460304260254,
+        "min": 42.93342614173889,
+        "num_hashes": 1486935,
+        "peak_rss_kb": 620980,
+        "rss_delta_kb": 0
+      },
+      "identical_index": true,
+      "speedup": 4.328782180159344
+    },
+    {
+      "corpus": {
+        "samples": 7244,
+        "sample_id_threshold": 9783,
+        "functions": 8657357,
+        "pichashes": 8657357,
+        "storage_bytes": 218767360,
+        "pichash_index_bytes": 90910720,
+        "build_seconds": 85.98263239860535
+      },
+      "group_stats": {
+        "spills": 4,
+        "spilled_bytes": 38446119,
+        "max_used_mem_bytes": null,
+        "used_disk": true
+      },
+      "read_phases": {
+        "grouped_read_seconds": 32.61787033081055,
+        "partitioned_read_seconds": 12.825803995132446,
+        "grouped_read_hashes": 2337173,
+        "partitioned_read_hashes": 2337173
+      },
+      "grouped": {
+        "durations": [
+          274.4926824569702,
+          303.227844953537,
+          301.5784583091736
+        ],
+        "median": 301.5784583091736,
+        "min": 274.4926824569702,
+        "num_hashes": 2337173,
+        "peak_rss_kb": 707992,
+        "rss_delta_kb": 0
+      },
+      "partitioned": {
+        "durations": [
+          72.75402641296387,
+          73.8031747341156,
+          73.11644005775452
+        ],
+        "median": 73.11644005775452,
+        "min": 72.75402641296387,
+        "num_hashes": 2337173,
+        "peak_rss_kb": 872156,
+        "rss_delta_kb": 0
+      },
+      "identical_index": true,
+      "speedup": 4.124632682758589
+    }
+  ],
+  "exponents": {
+    "grouped": 0.8887158974379302,
+    "partitioned": 0.9666161801854745
+  }
+}

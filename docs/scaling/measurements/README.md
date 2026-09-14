@@ -25,6 +25,8 @@ JSON written by the harness, kept on this branch so the implementation branch st
 | `projection_1m.json` | `project_index_growth.py` | index size and per-query seek count projected from live collection counts |
 | `qps_onestage.json` | `bench_concurrency.py` | throughput, latency percentiles, memory and CPU/ticket saturation at concurrency 1-16 for the one-stage baseline |
 | `qps_twostage.json` | `bench_concurrency.py` | the same for the two-stage configuration (`MINHASH_MATCHING_SHORTLIST_SIZE=100`, `STORAGE_BAND_DF_CUTOFF=200`, `MINHASH_PICHASH_MAX_MATCHES=200`) |
+| `rebuild_pichash.json` | `bench_index_rebuild.py` | the PicHash count rebuild at four projected corpus sizes, grouped against partitioned: per-phase times, `$group` spill counts, upsert and insert rates, and the fitted exponents |
+| `rebuild_pichash_read_real.json` | `bench_index_rebuild.py --read-phase-only` | both rebuild read phases run against the `real` corpus itself, with the collection counts before and after that show it was only read |
 
 ## Reading the concurrency files
 
@@ -40,6 +42,19 @@ JSON written by the harness, kept on this branch so the implementation branch st
 - `read_tickets_total` is mongod's WiredTiger concurrent-read limit, and
   `read_queued_seconds` how long readers spent waiting for one. That pair is the saturation
   evidence.
+
+## Reading the rebuild files
+
+- `points[]` holds one entry per corpus size: `corpus` (samples, functions and distinct hashes),
+  the `grouped` and `partitioned` timings split into their read and write phases, `group_stats`
+  with the `$group` spill counts taken from `explain`, and `identical_index`, which is the
+  assertion that both implementations produced the same `_pichash -> df` map entry for entry.
+  `exponents` at the top level holds the fits; the one that means something is against distinct
+  hashes, which is what both implementations produce one document for.
+- `source_fingerprint_before` / `_after` are the source corpus's per-collection counts at each
+  end of the run. The scratch corpora are `$out` projections holding only `_pichash`, so they sit
+  inside the WiredTiger cache where a full corpus of the same sample count does not: read the
+  exponents, and treat the absolute seconds as this instrument's rather than a full corpus's.
 
 ## Caveats that apply to the concurrency files
 
