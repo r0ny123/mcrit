@@ -130,39 +130,75 @@ corpus-shaped work would.
 seek count stays **11,140** (557 query functions x 20 bands), identical to the count at 7,244
 samples. Per-query work does not grow with the corpus.
 
+**The hard limit is nearer than sharding, and sharding does not move it.** A band posting list is
+a `function_ids` array inside one document, extended with `$push`, and MongoDB caps a document at
+16 MB. Measured on this corpus: the largest `band_0` document holds **18,968 postings in 197,606
+bytes** - 10.42 bytes each - so **1,610,427 postings fit**, giving **84.9x headroom** over the
+current corpus. That puts the wall at roughly **615,000 samples**.
+
+Verified rather than projected. Pushing 100,000 ids at a time into one document succeeded ten
+times and failed on the eleventh:
+
+    successful pushes of 100k = 10
+    final df = 1000000   bsonsize = 15888958
+    error: BSONObj size: 17588958 is invalid. Size must be between 0 and 16793600(16MB)
+
+The write **fails**; it does not degrade. Ingestion stops for any sample containing a function
+whose band hash is already at the cap.
+
+Two things follow. First, **sharding cannot fix this** - a single document cannot span shards, so
+adding machines does not raise the cap. Second, the estimate is optimistic: it assumes the hottest
+posting list grows linearly with the corpus, while Malpedia is curated and deduplicated. A corpus
+carrying many near-duplicate packed variants concentrates df far faster and would hit the cap
+sooner.
+
+The fix is the standard bucket pattern - split a band hash's postings across several documents
+keyed `(band_hash, bucket)` and cap each - which also shards better than one hot document per
+hash. It is a change to the stored data shape, so it needs a migration and a version bump; it is
+a prerequisite for the sharding work rather than a consequence of it.
+
 **What does grow, ranked by how badly:**
 
-1. **Index residency - the one that is fatal.** The band index projects to **331 TB** at 10^9
+1. **The 16 MB posting-list cap - the one that binds first**, at ~615,000 samples, described
+   above. Nothing else on this list matters until it is fixed, because ingestion stops there.
+2. **Index residency - fatal at billion scale.** The band index projects to **331 TB** at 10^9
    samples (1.20e12 functions, 4.50e10 distinct band hashes), against 2.40 GB at 7,244. No single
    machine holds that, and **sharding is not implemented**. This is the gap between the current
    design and billion-scale, and nothing else on this list matters until it is closed. The
    encouraging part is that the work is already partitioned correctly: the 20 band collections are
    independent, and a query touches each with an equal share of its lookups, so sharding by band
    hash needs no algorithmic change - only a router and a fan-in.
-2. **Seek cost, as distinct from seek count.** The count is bounded; what each costs is not. The
+3. **Seek cost, as distinct from seek count.** The count is bounded; what each costs is not. The
    cold-cache measurement puts a number on it: **2.39x for two-stage against 1.33x for one-stage**,
    because bounded work is dominated by random lookups with little compute to amortise them. At a
    corpus too large to be resident, every lookup pays that. Sharding buys this down too, by
    shrinking each node's share until it is resident again.
-3. **Maintenance is still superlinear.** The PicHash count rebuild measured k ~ +2.2 (437.1 s at
+4. **Maintenance is still superlinear.** The PicHash count rebuild measured k ~ +2.2 (437.1 s at
    7,244 against 211.9 s at 5,243). It never touches query latency - the indexes are maintained
    incrementally on write and a full rebuild is offline - but at 10^9 a single-pass rebuild is not
    a thing that can run. It needs partitioning the same way queries got bounded.
-4. **The df cutoff is a tuned constant, and vocabulary grows sublinearly.** `STORAGE_BAND_DF_CUTOFF
+5. **The df cutoff is a tuned constant, and vocabulary grows sublinearly.** `STORAGE_BAND_DF_CUTOFF
    = 200` was chosen at this corpus size. Band-hash vocabulary follows Heaps' law (fitted
    V(n) = 1412.8 * n^0.7247 here), so posting lists lengthen as the corpus grows and a fixed cutoff
    discards a different - probably much larger - fraction at 10^9. **Recall 1.000 is a measurement
    at 7,244 samples, not a property of the design.** This is the correctness risk on the list, and
    the reason WAND/MaxScore is the right next step: it makes the bound adaptive rather than tuned.
-5. **Ingestion.** Indexing measured ~12 samples/minute single-node here. That is embarrassingly
+6. **Ingestion.** Indexing measured ~12 samples/minute single-node here. That is embarrassingly
    parallel and not an architectural problem, but reaching 10^9 samples is a distributed-ingest
    project in its own right, not something the current harness does.
 
 **The short answer**: per-query work is now corpus-independent and measured as such, so the
-algorithm will not degrade as the corpus grows. What will stop it is storage - the index outgrows
-one machine long before a billion samples, and sharding is the unbuilt piece. The remaining items
-are a tuning constant that needs to become adaptive, and an offline rebuild that needs
+*algorithm* will not degrade as the corpus grows. What stops it is storage, in two stages. At
+around **615,000 samples** a single band posting list exceeds MongoDB's 16 MB document limit and
+ingestion fails outright - that one binds first and sharding does not move it. Past that, the
+index outgrows one machine long before a billion, which is what sharding is for. The remaining
+items are a tuning constant that needs to become adaptive and an offline rebuild that needs
 partitioning.
+
+**Ordering matters here.** Sharding is the obvious next piece and it is the wrong one to build
+first: it addresses the limit at 10^9 while the limit at 6x10^5 is the one a growing corpus meets.
+Bucketing the posting lists is the prerequisite, and unlike sharding it can be built and verified
+on a single machine.
 
 ### What this does and does not establish
 
