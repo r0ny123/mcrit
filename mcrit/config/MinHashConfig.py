@@ -63,6 +63,38 @@ class MinHashConfig(ConfigInterface):
     MINHASH_MATCHING_CANDIDATE_WORKPACK_SIZE: int = 20000
     # size of functions to be processed into minhashes per work iteration
     MINHASH_GENERATION_WORKPACK_SIZE: int = 10000
+    # Two-stage 1-vs-N matching: how many corpus samples the exact stage is allowed to look at.
+    # 0 (the default) disables the shortlist entirely and matches against the whole corpus, i.e.
+    # the behaviour this knob was added to.
+    #
+    # Every stage of a 1-vs-N query is linear in corpus size, and so is its *output*: if a
+    # million corpus samples all link zlib and the query does too, a million samples genuinely
+    # match. Bounding the answer is the only thing that bounds the work. A shortlist stage votes
+    # for samples using only discriminative band hashes (see STORAGE_BAND_DF_CUTOFF), keeps the
+    # best MINHASH_MATCHING_SHORTLIST_SIZE of them, and the exact matching that follows is
+    # restricted to those - so cache fetch, pairwise scoring and result assembly stop scaling
+    # with the corpus and scale with this number instead.
+    #
+    # Matching *within* the shortlisted samples is unchanged: the same candidates, the same
+    # scores, the same reported functions. What a shortlist can cost is a sample that belonged
+    # in the answer not being ranked into it; benchmarks/compare_quality.py measures that recall
+    # against the unbounded result.
+    MINHASH_MATCHING_SHORTLIST_SIZE: int = 0
+    # Skip PicHashes held by more than this many corpus functions. 0 (the default) reports
+    # every exact match, i.e. the behaviour this knob was added to.
+    #
+    # PicHash lookup is the one stage two-stage matching does not bound, and it is linear in
+    # corpus size for the same reason banding was: a position-independent hash covering a common
+    # library function returns one tuple per holder. Measured on 257 real Malpedia samples the
+    # longest pichash posting list already held 16,976 functions, and that list grows with the
+    # corpus while the median (1) does not. At a million samples such a hash would return
+    # millions of tuples describing a function every sample contains - which is not an answer
+    # anyone reads, and is expensive to assemble.
+    #
+    # The count is taken from the _pichash index rather than by reading the documents, so a hash
+    # over the cutoff costs an index probe instead of a fetch. Like the band cutoff this trades
+    # recall for bounded work: exact matches through a hash that common stop being reported.
+    MINHASH_PICHASH_MAX_MATCHES: int = 0
     # when rebuilding minhash bands, work in packs of this size
     MINHASH_BAND_REBUILD_WORK_PACKAGE_SIZE: int = 100000
 

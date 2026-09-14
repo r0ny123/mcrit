@@ -114,6 +114,24 @@ class McritClient:
             return response
         return handle_response(response)
 
+    def rebuildFunctionRangeIndex(self):
+        """
+        Schedule a job that rebuilds the function->sample range index two-stage matching needs; answers the job id
+        """
+        response = requests.get(f"{self.mcrit_server}/rebuild_function_range_index", headers=self.headers)
+        if self.raw:
+            return response
+        return handle_response(response)
+
+    def rebuildBandDfIndex(self):
+        """
+        Schedule a job that stores and indexes each band's posting-list length, so STORAGE_BAND_DF_CUTOFF can skip from the index; answers the job id
+        """
+        response = requests.get(f"{self.mcrit_server}/rebuild_band_df_index", headers=self.headers)
+        if self.raw:
+            return response
+        return handle_response(response)
+
     def repairMinHashes(self):
         """
         Schedule a job that rehashes only the samples whose minhashes an older smda escaper produced (#142); answers the job id
