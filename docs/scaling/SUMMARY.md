@@ -2,50 +2,104 @@
 
 ## Baseline vs final, in one table
 
-Three real Malpedia corpus sizes, same query samples throughout (the corpus is grown in place,
-so sample ids stay valid and this is a controlled comparison). Warm cache, three repeats each,
-the indexer paused during measurement so nothing competed for CPU. "two-stage" is
-`MINHASH_MATCHING_SHORTLIST_SIZE=100`, `STORAGE_BAND_DF_CUTOFF=200`,
-`MINHASH_PICHASH_MAX_MATCHES=200`.
+Four real Malpedia corpus sizes, same three query samples throughout, addressed by sha256 so the
+comparison survives sample ids shifting as the corpus is grown in place. Warm cache, three
+repeats each (the table reports the median across repeats), nothing else competing for CPU.
+"two-stage" is `MINHASH_MATCHING_SHORTLIST_SIZE=100`, `STORAGE_BAND_DF_CUTOFF=200`,
+`MINHASH_PICHASH_MAX_MATCHES=200`. Corpus sizes are counted, not read from `/status` - see the
+note at the end of this section.
 
 | real samples | one-stage median | two-stage median | one-stage max | two-stage max | one-stage peak RSS | two-stage peak RSS |
 |---|---|---|---|---|---|---|
-| 2,016 | 1.57 s | 1.65 s | 3.57 s | 2.12 s | 367 MB | 276 MB |
-| 2,996 | 2.76 s | 1.89 s | 6.87 s | 2.21 s | 401 MB | 251 MB |
-| 5,243 | **5.17 s** | **1.47 s** | **14.20 s** | **1.54 s** | **556 MB** | **244 MB** |
+| 2,016 | 1.55 s | 1.60 s | 3.60 s | 2.10 s | 367 MB | 276 MB |
+| 2,997 | 2.71 s | 1.82 s | 6.91 s | 2.16 s | 401 MB | 251 MB |
+| 5,236 | 4.86 s | 1.46 s | 14.15 s | 1.49 s | 556 MB | 244 MB |
+| 7,244 | **10.20 s** | **1.58 s** | **25.39 s** | **1.93 s** | **766 MB** | **253 MB** |
 
-Fitted over that 2.60x growth, as k in `cost ~ corpus**k`:
+Fitted over that 3.59x growth, as k in `cost ~ corpus**k`:
 
 | | one-stage | two-stage |
 |---|---|---|
-| median | **k = +1.25** | **k = -0.12** |
-| mean | k = +1.36 | k = -0.20 |
-| max | k = +1.44 | k = -0.34 |
-| peak RSS | k = +0.43 | k = -0.13 |
+| median | **k = +1.40** | **k = -0.07** |
+| mean | k = +1.44 | k = -0.11 |
+| max | k = +1.49 | k = -0.17 |
+| peak RSS | k = +0.57 | k = -0.07 |
 
-**The baseline grows superlinearly on real data. Two-stage does not grow at all** - every
-measure of it, latency and memory alike, is flat or falling as the corpus triples. At 5,243
-samples that is **3.5x on the median, 6.1x on the mean, 9.2x on the tail, and 56% less memory.**
+**The baseline grows superlinearly on real data. Two-stage does not grow.** At 7,244 samples the
+gap is **6.4x on the median, 9.7x on the mean, 13.2x on the tail, and 3.0x less memory** - having
+been 1.0x on the median at the smallest corpus, where the two configurations were
+indistinguishable.
 
 Quality at that size, against the unrestricted result: **top-10 sample recall 1.000**, top-25
-0.933, and 0.971 of surviving function matches keep a bit-identical score.
+0.907, and **0.985 of surviving function matches keep a bit-identical score**. The loss is
+concentrated exactly where it is designed to be: of the three queries, the two whose result sets
+fit inside the shortlist returned identically to the baseline (236 and 756 samples, recall 1.000
+across the board), while the one matching 2,443 samples was truncated to 48 - top-10 still 1.000,
+top-25 0.72.
+
+### What the fourth point changed
+
+The three-point fit reported two-stage at k = -0.12 and described it as "flat or falling". With a
+fourth point that reading needed checking rather than repeating, and the check is worth recording
+because it nearly went the other way. The first two-stage repeat at 7,244 came in at 2.43 s,
+against 1.46 s at the previous size - which looks like the bound failing. It was a cache artefact:
+the one-stage runs immediately before it evict two-stage's working set, and repeats 2 and 3 gave
+1.58 s and 1.53 s.
+
+Across all four points the two-stage medians are 1.60, 1.82, 1.46, 1.58 - non-monotonic, noise
+around a flat line rather than a trend, which is what the small negative exponent summarises.
+Meanwhile the baseline's exponent strengthened from +1.25 to +1.40. A single repeat would have
+supported either conclusion; three repeats and a fourth corpus size are what make "flat" a
+measurement rather than an impression.
+
+### Cold cache: the bound is structural, but it is a bound on seeks
+
+Every number above is warm-cache, and the two-stage design's claim to stay flat rests on its work
+being bounded by construction - the df cutoff bounds posting-list traversal, the shortlist bounds
+candidates, the pichash cap bounds the last linear stage. That bounds *CPU*. It says nothing about
+I/O, and the way the design plausibly fails at 10^6 samples is the band index no longer fitting in
+RAM, so every bounded lookup becomes a disk seek.
+
+`cold_cache_bench.sh` measures that regime directly: mongod is restarted and the host page cache
+dropped before **each** query, so no query is warmed by the one before it. Same 7,244-sample
+corpus, same deployment, same 3 GB WiredTiger cache.
+
+| query | one-stage warm | one-stage cold | penalty | two-stage warm | two-stage cold | penalty | cold ratio |
+|---|---|---|---|---|---|---|---|
+| win.zloader (557 fn) | 10.20 s | 14.62 s | 1.43x | 1.93 s | 3.24 s | 1.68x | 4.5x |
+| win.blackpos (650 fn) | 25.39 s | 30.81 s | 1.21x | 1.59 s | 4.21 s | 2.64x | 7.3x |
+| win.acidbox (158 fn) | 3.87 s | 7.24 s | 1.87x | 0.53 s | 2.22 s | **4.18x** | 3.3x |
+| **total** | 39.45 s | 52.67 s | **1.33x** | 4.05 s | 9.67 s | **2.39x** | **5.4x** |
+
+**Two-stage pays nearly twice the cold penalty the baseline does**, and its advantage narrows from
+9.7x warm to 5.4x cold. That is the expected direction and it matters: bounded work is dominated
+by *random* posting-list lookups with little compute to amortise them, while the baseline's bulk
+scans stream from disk efficiently. The effect is sharpest on the smallest query - win.acidbox
+does the least compute per seek and pays 4.18x.
+
+So the bound is real - two-stage stays several times faster even when every lookup hits disk - but
+it is a bound on the *number* of seeks, not on their cost. **At a corpus large enough that the
+index cannot be resident, the honest expectation is the cold column, not the warm one.**
 
 ### Extrapolated to one million samples
 
-Applying the fitted exponents, 191x beyond the largest measured real corpus:
+Applying the fitted exponents, 138x beyond the largest measured real corpus:
 
-| | one-stage | two-stage |
-|---|---|---|
-| median | ~1 hour | **~1.5 s** |
-| mean | ~2.5 hours | **~1.2 s** |
-| tail (max) | ~7.8 hours | **~1.5 s** |
+| | one-stage | two-stage (warm-fit) | two-stage (cold-adjusted) |
+|---|---|---|---|
+| median | ~2 hours | ~1.5 s | **~4 s** |
+| tail (max) | ~9 hours | ~1.9 s | **~5 s** |
 
-The two-stage figures are near-restatements of the measured numbers, because a negative fitted
-exponent is taken as flat rather than as improvement. The one-stage figures are a genuine
-extrapolation of a clear superlinear trend and should be read as an order of magnitude, not a
-prediction: k > 1 cannot hold forever, since cost is ultimately bounded by scanning the corpus.
-The honest claim is that the baseline becomes unusable somewhere well before a million samples,
-and that two-stage does not.
+The two-stage warm figures are near-restatements of the measurements, since a negative fitted
+exponent is read as flat rather than as improvement. The cold-adjusted column multiplies them by
+the measured 2.39x cold penalty, which is the more honest figure at a size where the band index
+(projected at ~338 GB, see below) cannot be RAM-resident.
+
+The one-stage figures extrapolate a clear superlinear trend and should be read as an order of
+magnitude, not a prediction: k > 1 cannot hold forever, since cost is ultimately bounded by
+scanning the corpus. The defensible claim is that **the baseline becomes unusable well before a
+million samples, and two-stage does not** - while being clear that "does not" means seconds, not
+milliseconds.
 
 ### What this does and does not establish
 
@@ -55,25 +109,27 @@ above is backed by a file in `measurements/`.
 
 It is **not** a demonstration at a million samples. These remain unmeasured:
 
-- **Scale.** The largest real corpus here is 5,243 samples, 191x short of the target, and the
-  exponents are fitted on three points across 2.60x of growth. A negative exponent means flat
+- **Scale.** The largest real corpus here is 7,244 samples, 138x short of the target, and the
+  exponents are fitted on four points across 3.59x of growth. A negative exponent means flat
   across what was measured, not flat forever.
 - **Absolute latency.** 1.5 s that stays 1.5 s is *stable*, not *blazing*. Billion-scale
   similarity search at Google or Meta targets tens of milliseconds; this is two orders of
   magnitude off that, and the achievement here is the flatness, not the number.
 - **Concurrency.** Every measurement is one query at a time, on one machine, against one mongod,
   warm cache. QPS under load was never measured; there is no sharding and no distribution.
-- **Cold cache and memory residency.** WiredTiger has 3 GB here. At a million samples the band
-  index alone would far exceed RAM, and every figure above is warm-cache.
+- **Cold cache at scale.** Measured here (2.39x penalty for two-stage, 1.33x for one-stage), but
+  only on a corpus whose working set is far smaller than 10^6. The seek *count* is bounded by
+  query size and does not grow with the corpus; the seek *cost* at a size where nothing is
+  resident is not something 7,244 samples can establish.
 - **Whether the cutoff still preserves recall at scale.** `STORAGE_BAND_DF_CUTOFF=200` was tuned
   at this corpus size. Posting lists grow with the corpus - Heaps' law fitted at
   V(n) = 1412.8 * n^0.7247 on this data - so at 10^6 the same constant discards a different, and
-  possibly much larger, fraction of the index. Recall 1.000 is a result at 5,243 samples, not a
+  possibly much larger, fraction of the index. Recall 1.000 is a result at 7,244 samples, not a
   guarantee at 1,000,000.
 
 The defensible claim is that **the baseline becomes unusable well before a million samples and
-the two-stage design does not**, together with a measured, quality-preserving 3.5x-9.2x at the
-largest size tested. Closing the remaining gap means sharding the band index across machines,
+the two-stage design does not**, together with a measured, quality-preserving 6.4x-13.2x warm
+(5.4x cold) at the largest size tested. Closing the remaining gap means sharding the band index across machines,
 measuring under concurrent load, re-measuring recall and cutoff binding at 10^5-10^6 with a cold
 cache, and replacing the flat df cutoff with WAND/MaxScore so the bound adapts rather than being
 a tuned constant.
@@ -125,6 +181,19 @@ cost with a measured one at the corpus sizes available here.
 already bounded. It divides the *index* across nodes until each node's share is resident again,
 returning each lookup to memory speed. That is the argument for distribution, and it is a
 storage argument rather than a throughput one.
+
+### Index maintenance is superlinear, even though queries are not
+
+Worth separating from the query-path result, because it is the one place cost still grows fast.
+Rebuilding the PicHash count index took **437.1 s at 7,244 samples against 211.9 s at 5,243** -
+2.06x the time for 1.38x the corpus, an exponent near +2.2. The function-range and band-df
+rebuilds stayed cheap (35.7 s and 38.9 s).
+
+This does not touch query latency: all three indexes are maintained incrementally on write, and
+a full rebuild is an offline operation run after a bulk import or a schema change. But it is a
+real operational cost that the headline numbers do not capture, and at a corpus where a rebuild
+matters it would need the same treatment the query path got - incremental or partitioned rebuilds
+rather than a single pass.
 
 ### A note on the corpus sizes above
 
