@@ -78,6 +78,54 @@ measuring under concurrent load, re-measuring recall and cutoff binding at 10^5-
 cache, and replacing the flat df cutoff with WAND/MaxScore so the bound adapts rather than being
 a tuned constant.
 
+### What a million samples actually costs, from measured index growth
+
+Extrapolating the fitted latency exponents 191x is weak evidence, which is why they are hedged
+above. Index *size* extrapolates much better, because what drives it is structural rather than
+empirical: every hashable function contributes exactly one posting to each of the 20 band
+collections, and function count is linear in sample count. So the size at any corpus follows
+from counting what exists. `benchmarks/project_index_growth.py` does that against a live corpus.
+
+Measured at 5,510 real samples, projected to 10^6:
+
+| | today (5,510 samples) | at 10^6 samples |
+|---|---|---|
+| functions | 6,287,521 | 1.14e9 |
+| distinct band hashes | 7,029,368 | 3.05e8 (Heaps, beta = 0.7247) |
+| band index size | **1.86 GB** | **~338 GB** |
+
+338 GB against the 3 GB WiredTiger cache these measurements ran with. **The band index cannot be
+resident on one machine at a million samples** - it is roughly 100x the cache it has here.
+
+This is the thing the flat latency curve does not prove, and it has a specific consequence. The
+df cutoff bounds how many postings a query *reads*; it does not bound the structure those reads
+land in. The seek count per query is set by query size, not corpus size - 557 functions x 20
+bands = 11,140 posting-list lookups for the median measured query - so it stays constant as the
+corpus grows. What changes is the cost of each one, as it stops being a memory reference:
+
+| device | per-query I/O floor at 10^6 |
+|---|---|
+| NVMe SSD (80 us) | **0.89 s** |
+| SATA SSD (150 us) | 1.67 s |
+| spinning disk (5 ms) | 55.7 s |
+
+Two things follow. First, single-node two-stage at a million samples plausibly lands around
+1-2 s on NVMe - close to what is measured today, but **I/O-bound rather than CPU-bound**, and
+for a different reason than the exponent fit suggests. That the two arguments agree is worth
+more than either alone. Second, it is fatal on spinning disks, which is a deployment constraint
+worth stating rather than discovering.
+
+This is a projection from measured counts, not a measurement. It assumes B-tree internal nodes
+stay cached (they are a small fraction of the structure), uses published seek latencies rather
+than ones measured here, and counts only band lookups - the pichash probe and the matching-cache
+fetch add to it. The cold-cache benchmark (`cold_cache_bench.sh`) replaces the assumed per-seek
+cost with a measured one at the corpus sizes available here.
+
+**What sharding actually buys**, in these terms: it does not reduce the work per query, which is
+already bounded. It divides the *index* across nodes until each node's share is resident again,
+returning each lookup to memory speed. That is the argument for distribution, and it is a
+storage argument rather than a throughput one.
+
 ### A note on the corpus sizes above
 
 They are counted from the samples that exist, not read from `/status`. `/status` sums the
