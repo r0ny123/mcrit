@@ -23,11 +23,40 @@ JSON written by the harness, kept on this branch so the implementation branch st
 | `r7k_quality.json` | `compare_quality.py` | recall and score agreement on the real corpus at 7,244 samples |
 | `cold_one_*.json`, `cold_full_*.json` | `cold_cache_bench.sh` | one query per file, each after a mongod restart and a page-cache drop, so no query is warmed by the one before it |
 | `projection_1m.json` | `project_index_growth.py` | index size and per-query seek count projected from live collection counts |
+| `qps_onestage.json` | `bench_concurrency.py` | throughput, latency percentiles, memory and CPU/ticket saturation at concurrency 1-16 for the one-stage baseline |
+| `qps_twostage.json` | `bench_concurrency.py` | the same for the two-stage configuration (`MINHASH_MATCHING_SHORTLIST_SIZE=100`, `STORAGE_BAND_DF_CUTOFF=200`, `MINHASH_PICHASH_MAX_MATCHES=200`) |
 
-## Caveats that apply to all of them
+## Reading the concurrency files
+
+- `levels[]` holds one entry per concurrency level, each with `repeats[]` (one entry per repeat,
+  every individual request timed in `repeats[].requests[]`) and the pooled percentiles across
+  repeats. `requests_per_second_min` / `_max` / `_stdev` over the repeats are the variance.
+- `read_only_check` holds the before and after snapshots of the corpus database and the verdict.
+  `read_only_check.result.clean` being `true` is the assertion that the run only read; the
+  harness exits non-zero if it is not.
+- `foreign_cpu_fraction` per repeat is machine-wide busy CPU that was neither a worker nor
+  mongod. It polices the measurement: a level with a large share was measured next to something
+  else and is not a measurement of this software.
+- `read_tickets_total` is mongod's WiredTiger concurrent-read limit, and
+  `read_queued_seconds` how long readers spent waiting for one. That pair is the saturation
+  evidence.
+
+## Caveats that apply to the concurrency files
+
+- One machine, 4 cores, ~15.7 GB RAM, one mongod with a 3 GB WiredTiger cache, warm cache, one
+  corpus of 7,244 real Malpedia samples. The ceiling reported is the machine's, not the design's.
+- Concurrency is realised as independent OS processes, mirroring how `SpawningWorker` executes
+  jobs. The REST hop, the queue round trip and the per-job interpreter start-up are outside the
+  measured window; `spawn_cost` in `qps_twostage.json` measures that last constant separately.
+- The three query samples are the ones every earlier scaling point used, addressed by sha256.
+  Three distinct queries cycled round-robin is a narrow workload: it says nothing about a mix of
+  query sizes wider than 158-650 functions, and the corpus-side working set it touches is the
+  same one every repeat.
+
+## Caveats that apply to the serial measurements
 
 - Single machine, single mongod (3 GB WiredTiger cache), warm cache, one query at a time.
-  Concurrency was never measured.
+  Throughput under concurrent load is measured separately, in the `qps_*.json` files above.
 - `quality_250_sl25.json` was produced *before* the sample-score reader was fixed; its
   `top10_sample_recall` of 0.90 is an artefact of comparing two arbitrary orderings, not a real
   recall loss. It is kept because the mistake is part of the record - see the research log.

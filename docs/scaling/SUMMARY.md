@@ -81,6 +81,125 @@ So the bound is real - two-stage stays several times faster even when every look
 it is a bound on the *number* of seeks, not on their cost. **At a corpus large enough that the
 index cannot be resident, the honest expectation is the cold column, not the warm one.**
 
+### Concurrency: what one machine serves, and what runs out first
+
+Everything above is one query at a time, which answers "how long does a query take" and not "how
+many queries a minute can this deployment serve". The second question is the one a maintainer
+asks about a change to the matching path, and it has a different answer, because it is decided by
+whatever runs out first rather than by the cost of a single query.
+
+`benchmarks/bench_concurrency.py` measures it. Concurrency is realised the way MCRIT actually
+executes jobs: `SpawningWorker` polls the queue, spawns `python -m mcrit singlejobworker` for one
+job, waits for it to exit, and only then claims the next - so one worker is one job at a time in
+its own OS process, and a deployment serving several queries at once runs several worker
+processes. Each level here is therefore C independent processes, each with its own
+`MinHashIndex`, storage object and pymongo pool. Nothing shares a GIL, exactly as in production.
+
+Same 7,244-sample corpus, same three query samples by sha256, cycled round-robin so every level
+runs the identical mix of query sizes. Three repeats per level, warm cache, 837 timed requests in
+all. **The box is 4 cores and 15.7 GB of RAM, with one mongod 7.0 holding a 3 GB WiredTiger
+cache** - so every ceiling below is that machine's, not the design's.
+
+| concurrency | one-stage req/s | two-stage req/s | ratio | one-stage p50 | two-stage p50 | one-stage p99 | two-stage p99 | one-stage peak RSS | two-stage peak RSS |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.069 | 0.946 | 13.7x | 10.96 s | 1.27 s | 28.07 s | 1.63 s | 752 MB | 237 MB |
+| 2 | 0.109 | 2.028 | 18.5x | 10.46 s | 1.14 s | 29.56 s | 1.43 s | 1,189 MB | 478 MB |
+| 4 | 0.190 | **3.032** | 15.9x | 11.74 s | **1.46 s** | 33.13 s | **2.04 s** | 2,431 MB | 950 MB |
+| 8 | 0.240 | **3.194** | 13.3x | 20.30 s | 2.77 s | 66.18 s | 3.98 s | 4,870 MB | 1,900 MB |
+| 16 | **0.259** | 2.871 | 11.1x | 40.10 s | 5.91 s | 131.39 s | 9.46 s | **9,718 MB** | 3,809 MB |
+
+Throughput is the median of three repeats; the full spread between the fastest and slowest repeat
+was **at most 7.7% of the median** at any level of either configuration, so the levels are
+separated by far more than the run-to-run noise. Latencies are pooled over all three repeats.
+
+**Peak throughput on this machine: 3.19 req/s two-stage against 0.259 one-stage - 192 queries a
+minute against 15.6, a factor of 12.3.** Both configurations top out at four cores' worth of
+work; what differs is how much work a query is.
+
+#### Where throughput stops scaling
+
+Two-stage scales 2.14x from one worker to two, 3.21x to four, and then stops: 3.38x at eight and
+**3.04x at sixteen, which is less than at eight**. One-stage climbs more slowly and flattens in
+the same place, at 3.76x. Neither ever exceeds 4x, and the reason is visible directly - machine
+CPU measured 3.35 of 4 cores busy at concurrency 4, 3.88 at 8 and **3.99 at 16**.
+
+So the ceiling is the four cores, and the design does not change it. What the design changes is
+how many queries those four cores buy, which is set by CPU per request:
+
+| | client CPU/request | mongod CPU/request | total |
+|---|---|---|---|
+| one-stage | 8.23 s | 8.09 s | **16.32 s** |
+| two-stage | 1.04 s | 0.32 s | **1.36 s** |
+
+(at concurrency 4, where both are saturated but neither is yet thrashing.) **12.0x less CPU per
+query is the whole of the throughput result** - the shortlist does not make the machine bigger,
+it makes the query cheaper, and throughput follows almost exactly.
+
+#### What saturates, and it is not the same thing for both
+
+- **Cores, for both.** 3.99 of 4 busy at concurrency 16. This is the binding limit.
+- **The GIL, for neither.** Concurrency is separate OS processes, so there is no shared
+  interpreter lock to contend on. This is worth stating because it is the first thing to suspect
+  in a Python service and it is the wrong suspect here.
+- **mongod's read tickets, for the baseline only.** WiredTiger admits a bounded number of
+  concurrent readers. Two-stage never waits on one: **0.02 seconds of ticket queueing across
+  three repeats at concurrency 16**. One-stage waits **43 s at concurrency 8 and 332 s at
+  concurrency 16**. The baseline hits a second wall that the two-stage configuration never
+  reaches, which is what the CPU split says too - one-stage puts half its load inside mongod
+  (8.09 of 16.32 CPU-seconds per request), two-stage a fifth of a much smaller number.
+- **RAM, for the baseline, nearly.** At concurrency 16 one-stage held **9.7 GB** of worker RSS
+  and left 2.2 GB free on a 15.7 GB machine - within 200 MB of the harness's abort guard. Two-stage
+  held 3.8 GB and left 9.0 GB. Per worker that is 752 MB against 236 MB. **A 4-core box cannot
+  run 16 concurrent one-stage queries for a corpus much larger than this one**; it can run 16
+  two-stage queries with room to spare.
+
+#### Does the advantage hold under load?
+
+It widens and then narrows, and both halves are worth stating. From 13.7x at one query to
+**18.5x at two** - two-stage converts the second core almost perfectly (2.14x) while the baseline
+manages 1.59x, because the baseline is already contending inside mongod. Past saturation it
+compresses to **11.1x at sixteen**, because two-stage's per-request CPU inflates under load
+(1.36 s at concurrency 4 to 1.77 s at 16, +30%) while the baseline's does not (16.32 s to 15.85 s).
+
+That asymmetry is the same property the cold-cache measurement found from the other side.
+Two-stage's win comes from touching very little, so it is the configuration that benefits most
+from its working set being resident - and sixteen workers evicting each other is the same insult
+as a cold cache. The baseline's bulk scans have little locality to lose.
+
+**The honest reading: the advantage is smallest exactly where the machine is most overloaded, and
+it is still 11x there.** And the comparison of operating points is starker than any single ratio.
+Two-stage at concurrency 4 serves 3.03 queries a second with a p99 of **2.04 s**; one-stage has
+no such point at all, since its p99 is already 28 s with a single query in flight and 131 s at
+sixteen. Beyond concurrency 4 two-stage buys no throughput and only latency, which makes four
+workers per 4-core node the operating point this data supports.
+
+#### What this measurement does not cover
+
+- **One machine.** 4 cores, 15.7 GB, one mongod. The ceilings are this box's. What a larger node
+  or several nodes serve is not measured, though the CPU accounting says two-stage would track
+  cores closely until mongod becomes the shared bottleneck.
+- **Three queries, cycled.** Every worker runs the same three samples, so the corpus-side working
+  set is shared between them and stays hot. Sixteen *different* queries would have less locality
+  and would flatter two-stage less - the direction is known, the size is not.
+- **The matching path, not the whole request.** The measured window is
+  `MatcherSample.getMatchesForSample` in a warm worker process. It excludes the REST hop, the
+  queue round trip, and the interpreter start-up that `SpawningWorker` pays per job - which was
+  measured separately at **1.65 s**, and is worth naming: at 1.27 s of matching, a real
+  single-job worker spends *more* time starting Python than matching. That constant is invisible
+  in the baseline's 11 s queries and dominant in two-stage's, which is an argument for a resident
+  worker pool that this data makes for the first time.
+- **p99 is a small-sample statistic here.** It comes from 144 requests at the largest one-stage
+  level and 288 at the largest two-stage one, so read it as "the tail", not as a percentile with
+  three digits of meaning.
+
+Every number here is backed by `measurements/qps_onestage.json` and `measurements/qps_twostage.json`,
+which also record what proves the runs were sound: machine-wide CPU that belonged to neither the
+workers nor mongod stayed at **0.0% for two-stage and at most 2.0% for one-stage**, so nothing
+else on the box was competing; and the corpus database was verified unchanged at the end of each
+run - document counts, `dbstats` and mongod's per-namespace `top` write counters, with the
+contents of `counters`, `families` and `settings` hashed whole to show that the storage
+constructor's idempotent upserts changed no byte of them.
+
 ### Extrapolated to one million samples
 
 Applying the fitted exponents, 138x beyond the largest measured real corpus:
@@ -214,8 +333,11 @@ It is **not** a demonstration at a million samples. These remain unmeasured:
 - **Absolute latency.** 1.5 s that stays 1.5 s is *stable*, not *blazing*. Billion-scale
   similarity search at Google or Meta targets tens of milliseconds; this is two orders of
   magnitude off that, and the achievement here is the flatness, not the number.
-- **Concurrency.** Every measurement is one query at a time, on one machine, against one mongod,
-  warm cache. QPS under load was never measured; there is no sharding and no distribution.
+- **Concurrency beyond one machine.** Throughput under load is now measured (see above): 3.19
+  req/s two-stage against 0.259 one-stage, both bounded by this box's four cores. What is still
+  unmeasured is anything past one node - there is no sharding and no distribution - and the
+  workload measured is three queries cycled, whose shared working set stays hot in a way a
+  stream of distinct queries would not.
 - **Cold cache at scale.** Measured here (2.39x penalty for two-stage, 1.33x for one-stage), but
   only on a corpus whose working set is far smaller than 10^6. The seek *count* is bounded by
   query size and does not grow with the corpus; the seek *cost* at a size where nothing is
@@ -228,10 +350,10 @@ It is **not** a demonstration at a million samples. These remain unmeasured:
 
 The defensible claim is that **the baseline becomes unusable well before a million samples and
 the two-stage design does not**, together with a measured, quality-preserving 6.4x-13.2x warm
-(5.4x cold) at the largest size tested. Closing the remaining gap means sharding the band index across machines,
-measuring under concurrent load, re-measuring recall and cutoff binding at 10^5-10^6 with a cold
-cache, and replacing the flat df cutoff with WAND/MaxScore so the bound adapts rather than being
-a tuned constant.
+(5.4x cold, 12.3x on throughput under concurrent load) at the largest size tested. Closing the
+remaining gap means sharding the band index across machines, re-measuring recall and cutoff
+binding at 10^5-10^6 with a cold cache, and replacing the flat df cutoff with WAND/MaxScore so
+the bound adapts rather than being a tuned constant.
 
 ### What a million samples actually costs, from measured index growth
 

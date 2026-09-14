@@ -343,3 +343,106 @@ benchmarking.
   8 threads produced 1,378 rate-limit failures against 136 successes. One or two threads under
   a global pace, with the sample listing cached so a restart during a cooldown does not die on
   its first call, fetches reliably.
+
+## 7. Concurrency, and three ways the harness lied before it told the truth
+
+Every earlier number in this log is one query at a time. That was a deliberate simplification
+and it stopped being defensible once the result was going into a pull request: the first thing a
+maintainer asks about a change to the matching path is what happens when ten people query at
+once, and "we never measured that" is not an answer. `benchmarks/bench_concurrency.py` closes it.
+
+### Deciding what "concurrent" means before measuring it
+
+The choice that mattered was not the tooling but reading how MCRIT actually runs a job.
+`SpawningWorker._executeJobPayload` spawns `python -m mcrit singlejobworker`, then *blocks on
+`console_handle.wait()`* before its poll loop claims the next job. One worker is therefore one
+job at a time, in a dedicated OS process, and concurrency in a real deployment means running
+several worker processes. That settles a question that would otherwise have been guessed:
+threads would have measured GIL contention that production never experiences, and a thread pool
+would have been the wrong shape rather than merely a different one.
+
+So each level is C independent processes started with the "spawn" method, each building its own
+`MinHashIndex`. What that model leaves out is the REST hop, the queue round trip, and the
+per-job interpreter start-up - all constants that fall equally on both configurations. The
+start-up constant was measured rather than waved at, at **1.65 s**, and it turned out to be the
+most surprising number in the exercise: a two-stage query is 1.27 s, so a production
+single-job worker spends more time starting Python than matching. That is an argument for a
+resident worker pool, and nothing in a serial latency measurement would have suggested it.
+
+### The result
+
+Peak on this 4-core, 15.7 GB box: **3.19 req/s two-stage against 0.259 one-stage, 12.3x**. Both
+saturate the same four cores (3.99 of 4 busy at concurrency 16), so the design does not raise the
+ceiling; it lowers the price of a query, from **16.32 CPU-seconds to 1.36**, and throughput
+follows that ratio almost exactly. Full tables in `SUMMARY.md`.
+
+Two things are worth extracting beyond the headline.
+
+**The baseline saturates mongod as well as the CPU; two-stage does not.** WiredTiger's read
+tickets queued for 332 seconds across the one-stage runs at concurrency 16, and for **0.02
+seconds** across two-stage's. The CPU split says the same thing from the other side: one-stage
+spends half its per-request CPU inside mongod, two-stage a fifth of a far smaller number. The
+baseline has two walls; bounding the work removed one of them entirely.
+
+**The advantage widens, then narrows, and the narrowing is the same effect the cold-cache runs
+found.** 13.7x at one query, 18.5x at two, 11.1x at sixteen. Past saturation two-stage's
+per-request CPU inflates 30% while the baseline's does not, because two-stage's win comes from
+touching very little and is therefore the configuration with the most locality to lose when
+sixteen workers evict each other. The measurement that reads as a weakness under load is the
+same property that reads as a strength when the cache is warm.
+
+### Three defects in the harness, found before they became results
+
+Worth recording because all three produced plausible output rather than an error, which is the
+failure mode this log keeps collecting.
+
+**A read-only check that was too slow to run.** The first proof of read-only-ness counted every
+collection with `count_documents({})`. On this corpus that scans 28.7 million `_id` entries
+across 35 collections, and the run simply sat there - I had it diagnosed as a deadlock in the
+worker pool, and went looking in the wrong place, before noticing the last line printed was the
+snapshot. The fix is not "count faster" but noticing that counting was the wrong witness anyway:
+`dbstats.objects` is an exact total for free, and mongod's per-namespace `top` counters catch the
+in-place update that no count would have shown.
+
+**`self._stop` on a `threading.Thread` subclass.** The resource sampler stored its stop flag as
+`self._stop`, which is a name `threading.Thread` already owns - `join()` calls it. The thread
+ran correctly, sampled correctly, and then made the process unjoinable, so the failure surfaced
+at the *end* of a level as `TypeError: 'Event' object is not callable` rather than where the
+mistake was.
+
+**The query mix depended on the concurrency level.** Requests were handed out round-robin over
+three query samples whose costs span 5x, with a fixed count per worker. With four requests per
+worker, concurrency 1 ran six `win.zloader` against three each of the others - 50/25/25 - while
+concurrency 16 ran even thirds. Each level was internally consistent and the throughput curve
+looked entirely reasonable; it was partly a curve of *which queries ran*, and the worst-skewed
+level was concurrency 1, the baseline every speedup on the level is divided by. The harness now
+rounds each level up to whole passes over the query set, and the one-stage run was redone.
+
+None of the three would have announced itself in the output. The one that would have survived
+into the pull request is the third, because its symptom was a plausible number.
+
+### Measuring on a shared box, and admitting it in the data
+
+The first attempt produced a two-stage p50 of **93.95 s** against a published serial median of
+1.60 s. Nothing was wrong with the harness: other work on the same host was churning the same
+3 GB WiredTiger cache, and `currentOp` showed a 75-second `getmore` on `real.functions` under an
+`IXSCAN` that normally costs milliseconds. Rather than trusting a quiet-looking box, the harness
+now records machine-wide busy CPU minus the workers' own minus mongod's, and reports it per
+level as `foreign_cpu_fraction`. In the runs that were kept it is **0.0% for two-stage and at
+most 2.0% for one-stage**, which is the difference between a measurement and an anecdote.
+
+### Read-only, proven rather than promised
+
+The corpus is shared and must not change. The matching path was audited for writes first - every
+storage method it reaches only reads, and the matching cache lives in the matcher's memory rather
+than being persisted - but the audit also predicted one thing the code does write:
+`_ensureIndexAndUnknownFamily` runs on every storage construction and sends `$max` and
+`$setOnInsert` upserts at `counters` and `families`. On a populated database those match existing
+documents and modify nothing, but mongod counts the command, so the first honest run came back
+**VIOLATED** with 8 updates against `real.counters` and 4 against `real.families`.
+
+Excusing that as idempotent would have been an argument, not a proof, so the three small
+collections involved are now hashed whole at each end of the run. Both published runs end with
+counts, `dbstats` and every other namespace's write counters identical, and the digests of
+`counters`, `families` and `settings` unchanged - 282 no-op write commands that moved no byte.
+The check is in the JSON, and the harness exits non-zero if it ever fails.
