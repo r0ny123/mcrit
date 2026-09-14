@@ -101,6 +101,69 @@ scanning the corpus. The defensible claim is that **the baseline becomes unusabl
 million samples, and two-stage does not** - while being clear that "does not" means seconds, not
 milliseconds.
 
+### Billion-scale readiness: where the bottlenecks actually are
+
+The question this work exists to answer is not "how fast is it today" but "what breaks when the
+corpus grows". Those are different, and the second is not answered by extrapolating the first -
+a cost that is invisible at 7,244 samples and fatal at 10^9 shows up as a wall, not a gradient.
+
+**The query path is bounded by query size, not corpus size.** Every stage that was linear in the
+corpus now has a bound that does not move as the corpus grows:
+
+| stage | what bounds it | was |
+|---|---|---|
+| PicHash lookup | `MINHASH_PICHASH_MAX_MATCHES` | O(corpus) |
+| band candidate generation | `STORAGE_BAND_DF_CUTOFF` | O(corpus) |
+| matching-cache fetch | shortlist | O(candidates) |
+| pairwise scoring | shortlist x query functions | O(candidates) |
+| result assembly | `MINHASH_MATCHING_SHORTLIST_SIZE` | O(matches) |
+| shortlist ranking | samples that received a vote | O(corpus) |
+
+The last row was found by asking this question rather than by benchmarking. `_rankShortlist`
+fetched a function count for *every sample in the corpus*, once per matching job. At the sizes
+measured here that map is 5,034 entries and costs nothing - which is exactly why four points
+across 3.59x of growth show no trace of it. At 10^9 samples it is a 10^9-entry dict per query.
+No amount of measuring at this scale would have found it; only reading the code for
+corpus-shaped work would.
+
+`project_index_growth.py --target 1000000000` confirms the invariant that matters: the per-query
+seek count stays **11,140** (557 query functions x 20 bands), identical to the count at 7,244
+samples. Per-query work does not grow with the corpus.
+
+**What does grow, ranked by how badly:**
+
+1. **Index residency - the one that is fatal.** The band index projects to **331 TB** at 10^9
+   samples (1.20e12 functions, 4.50e10 distinct band hashes), against 2.40 GB at 7,244. No single
+   machine holds that, and **sharding is not implemented**. This is the gap between the current
+   design and billion-scale, and nothing else on this list matters until it is closed. The
+   encouraging part is that the work is already partitioned correctly: the 20 band collections are
+   independent, and a query touches each with an equal share of its lookups, so sharding by band
+   hash needs no algorithmic change - only a router and a fan-in.
+2. **Seek cost, as distinct from seek count.** The count is bounded; what each costs is not. The
+   cold-cache measurement puts a number on it: **2.39x for two-stage against 1.33x for one-stage**,
+   because bounded work is dominated by random lookups with little compute to amortise them. At a
+   corpus too large to be resident, every lookup pays that. Sharding buys this down too, by
+   shrinking each node's share until it is resident again.
+3. **Maintenance is still superlinear.** The PicHash count rebuild measured k ~ +2.2 (437.1 s at
+   7,244 against 211.9 s at 5,243). It never touches query latency - the indexes are maintained
+   incrementally on write and a full rebuild is offline - but at 10^9 a single-pass rebuild is not
+   a thing that can run. It needs partitioning the same way queries got bounded.
+4. **The df cutoff is a tuned constant, and vocabulary grows sublinearly.** `STORAGE_BAND_DF_CUTOFF
+   = 200` was chosen at this corpus size. Band-hash vocabulary follows Heaps' law (fitted
+   V(n) = 1412.8 * n^0.7247 here), so posting lists lengthen as the corpus grows and a fixed cutoff
+   discards a different - probably much larger - fraction at 10^9. **Recall 1.000 is a measurement
+   at 7,244 samples, not a property of the design.** This is the correctness risk on the list, and
+   the reason WAND/MaxScore is the right next step: it makes the bound adaptive rather than tuned.
+5. **Ingestion.** Indexing measured ~12 samples/minute single-node here. That is embarrassingly
+   parallel and not an architectural problem, but reaching 10^9 samples is a distributed-ingest
+   project in its own right, not something the current harness does.
+
+**The short answer**: per-query work is now corpus-independent and measured as such, so the
+algorithm will not degrade as the corpus grows. What will stop it is storage - the index outgrows
+one machine long before a billion samples, and sharding is the unbuilt piece. The remaining items
+are a tuning constant that needs to become adaptive, and an offline rebuild that needs
+partitioning.
+
 ### What this does and does not establish
 
 The growth problem is solved across the range measured: the thing that made 1-vs-N unusable -

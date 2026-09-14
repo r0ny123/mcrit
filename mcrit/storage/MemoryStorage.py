@@ -989,9 +989,18 @@ class MemoryStorage(StorageInterface):
             count=len(function_ids),
         )
 
-    def getSampleFunctionCounts(self):
+    def getSampleFunctionCounts(self, sample_ids=None):
+        """sample_id -> function count, optionally restricted to `sample_ids`.
+
+        The restriction exists for the MongoDB backend, where building the whole-corpus map per
+        matching job was the last per-query cost that grew with corpus size. Kept in step here so
+        both backends answer the same call; this one still walks its own functions either way.
+        """
+        wanted = None if sample_ids is None else {int(sample_id) for sample_id in sample_ids}
         counts: Dict[int, int] = {}
         for function_entry in self._functions.values():
+            if wanted is not None and function_entry.sample_id not in wanted:
+                continue
             counts[function_entry.sample_id] = counts.get(function_entry.sample_id, 0) + 1
         return counts
 
