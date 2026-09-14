@@ -19,6 +19,10 @@ JSON written by the harness, kept on this branch so the implementation branch st
 | `r5k_one_*.json`, `r5k_full_*.json` | `bench_matching.py` | the 5,243-sample real-corpus point, three repeats per configuration |
 | `r3k_quality.json`, `r5k_quality.json` | `compare_quality.py` | recall and score agreement on the real corpus at 2,996 and 5,243 samples |
 | `pcA_*.json`, `pcB_*.json` | `bench_matching.py` | A/B of the PicHash count index: `$group` counting vs the indexed probe, same corpus |
+| `r7k_one_*.json`, `r7k_full_*.json` | `bench_matching.py` | the 7,244-sample real-corpus point, three repeats per configuration |
+| `r7k_quality.json` | `compare_quality.py` | recall and score agreement on the real corpus at 7,244 samples |
+| `cold_one_*.json`, `cold_full_*.json` | `cold_cache_bench.sh` | one query per file, each after a mongod restart and a page-cache drop, so no query is warmed by the one before it |
+| `projection_1m.json` | `project_index_growth.py` | index size and per-query seek count projected from live collection counts |
 
 ## Caveats that apply to all of them
 
