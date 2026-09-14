@@ -13,6 +13,7 @@ from mcrit.config.QueueConfig import QueueConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.matchers.MatcherSample import MatcherSample
 from mcrit.queue.QueueFactory import QueueFactory
 from mcrit.storage.StorageFactory import StorageFactory
 
@@ -76,16 +77,42 @@ class BandBucketingTest(unittest.TestCase):
         return index._storage._getDb()["band_0"].count_documents({})
 
     def testPostingListSplitsAcrossDocuments(self):
-        """With a bucket smaller than the corpus the list spans several documents."""
-        index = self._index(bucket_size=2, db_suffix="split")
-        self._fill(index, [self.report, self.report_2])
+        """A posting list longer than the cap spans several documents, none over the cap.
+
+        Driven through _updateBands with known ids rather than through a corpus: whether an
+        indexed fixture happens to contain a band hash hot enough to spill is a property of the
+        fixture, not of the code under test, and an earlier version of this test passed for that
+        reason alone (no hash in it had even three postings, so a cap of two never triggered).
+        """
+        index = self._index(bucket_size=3, db_suffix="split")
         storage = index._storage
+        band_hash = 424242
+        storage._updateBands({0: {band_hash: [1, 2, 3, 4, 5, 6, 7]}})
         collection = storage._getDb()["band_0"]
-        spilled = collection.count_documents({"bucket": {"$gt": 0}})
-        self.assertGreater(spilled, 0, "a bucket size of 2 must force a spill on this corpus")
-        # every bucket obeys the cap
-        for document in collection.find({}, {"function_ids": 1, "_id": 0}):
-            self.assertLessEqual(len(document.get("function_ids", [])), 2)
+        documents = sorted(collection.find({"band_hash": band_hash}, {"_id": 0}), key=lambda d: d.get("bucket", 0))
+        self.assertEqual(len(documents), 3, "seven postings at a cap of three must occupy three buckets")
+        self.assertEqual([len(d["function_ids"]) for d in documents], [3, 3, 1])
+        self.assertEqual([d["bucket"] for d in documents], [0, 1, 2])
+        self.assertEqual(documents[0]["df"], 7, "bucket 0 carries the total")
+        self.assertEqual(documents[0]["tail"], 2)
+        self.assertEqual(documents[0]["tail_n"], 1)
+        # and the postings themselves survive the split, in order
+        recovered = [fid for document in documents for fid in document["function_ids"]]
+        self.assertEqual(recovered, [1, 2, 3, 4, 5, 6, 7])
+
+    def testAppendingContinuesIntoTheTailBucket(self):
+        """A second write must fill the part-full tail before opening a new bucket."""
+        index = self._index(bucket_size=3, db_suffix="append")
+        storage = index._storage
+        band_hash = 515151
+        storage._updateBands({0: {band_hash: [1, 2, 3, 4]}})
+        storage._updateBands({0: {band_hash: [5, 6, 7]}})
+        collection = storage._getDb()["band_0"]
+        documents = sorted(collection.find({"band_hash": band_hash}, {"_id": 0}), key=lambda d: d.get("bucket", 0))
+        self.assertEqual([len(d["function_ids"]) for d in documents], [3, 3, 1])
+        self.assertEqual(documents[0]["df"], 7)
+        recovered = [fid for document in documents for fid in document["function_ids"]]
+        self.assertEqual(sorted(recovered), [1, 2, 3, 4, 5, 6, 7])
 
     def testTotalDfIsKeptOnBucketZero(self):
         """df on bucket 0 is the total across buckets - the cutoff reads it and nothing else."""
@@ -106,39 +133,24 @@ class BandBucketingTest(unittest.TestCase):
         """The point of the whole change: results must be identical, bucketed or not."""
         plain = self._index(bucket_size=0, db_suffix="plain")
         self._fill(plain, [self.report, self.report_2])
-        bucketed = self._index(bucket_size=2, db_suffix="bucketed")
+        # bucket size 1 so every posting list of more than one entry is split. A larger cap would
+        # leave this fixture unbucketed - no band hash in it holds three postings - and the
+        # comparison would pass by testing two identical unbucketed indexes against each other.
+        bucketed = self._index(bucket_size=1, db_suffix="bucketed")
         self._fill(bucketed, [self.report, self.report_2])
+        spilled = bucketed._storage._getDb()["band_0"].count_documents({"bucket": {"$gt": 0}})
+        self.assertGreater(spilled, 0, "the comparison is worthless unless something actually spilled")
 
+        # MinHashIndex.getMatchesForSample queues a job and returns its id - comparing those
+        # compares two UUIDs and passes whatever the matcher did. Drive the matcher directly.
         sample_id = sorted(sample.sample_id for sample in plain._storage.getSamples(start_index=0, limit=0))[0]
-        plain_job = plain.getMatchesForSample(sample_id)
-        bucketed_job = bucketed.getMatchesForSample(sample_id)
-
-        plain_matches = plain_job["matches"]["samples"] if "matches" in plain_job else plain_job
-        bucketed_matches = bucketed_job["matches"]["samples"] if "matches" in bucketed_job else bucketed_job
+        plain_matches = MatcherSample(plain.queue._worker).getMatchesForSample(sample_id)
+        bucketed_matches = MatcherSample(bucketed.queue._worker).getMatchesForSample(sample_id)
+        self.assertTrue(plain_matches["matches"]["samples"], "the fixture must produce at least one match")
         self.assertEqual(
-            json.dumps(plain_matches, sort_keys=True),
-            json.dumps(bucketed_matches, sort_keys=True),
+            json.dumps(plain_matches["matches"], sort_keys=True),
+            json.dumps(bucketed_matches["matches"], sort_keys=True),
             "bucketing must not change a single reported match",
-        )
-
-    def testCandidatesAreUnchangedByBucketing(self):
-        """Lower level than the report: the candidate sets themselves must agree."""
-        plain = self._index(bucket_size=0, db_suffix="cand_plain")
-        self._fill(plain, [self.report, self.report_2])
-        bucketed = self._index(bucket_size=2, db_suffix="cand_bucketed")
-        self._fill(bucketed, [self.report, self.report_2])
-
-        function_entries = plain._storage.getFunctionsBySampleId(
-            sorted(sample.sample_id for sample in plain._storage.getSamples(start_index=0, limit=0))[0]
-        )
-        minhashes = {entry.function_id: entry.getMinHash() for entry in function_entries if entry.minhash}
-        self.assertTrue(minhashes, "the fixture must produce at least one hashed function")
-        plain_candidates = plain._storage.getCandidatesForMinHashes(minhashes)
-        bucketed_candidates = bucketed._storage.getCandidatesForMinHashes(minhashes)
-        self.assertEqual(
-            {key: sorted(value) for key, value in plain_candidates.items()},
-            {key: sorted(value) for key, value in bucketed_candidates.items()},
-            "a split posting list must yield the same candidates as an unsplit one",
         )
 
     def testDeletionKeepsBookkeepingConsistent(self):
