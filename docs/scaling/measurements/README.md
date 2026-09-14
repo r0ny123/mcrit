@@ -27,6 +27,10 @@ JSON written by the harness, kept on this branch so the implementation branch st
 | `qps_twostage.json` | `bench_concurrency.py` | the same for the two-stage configuration (`MINHASH_MATCHING_SHORTLIST_SIZE=100`, `STORAGE_BAND_DF_CUTOFF=200`, `MINHASH_PICHASH_MAX_MATCHES=200`) |
 | `rebuild_pichash.json` | `bench_index_rebuild.py` | the PicHash count rebuild at four projected corpus sizes, grouped against partitioned: per-phase times, `$group` spill counts, upsert and insert rates, and the fitted exponents |
 | `rebuild_pichash_read_real.json` | `bench_index_rebuild.py --read-phase-only` | both rebuild read phases run against the `real` corpus itself, with the collection counts before and after that show it was only read |
+| `dedup_before_full_*.json`, `dedup_before_one_*.json` | `bench_matching.py` | per-stage timings on the 7,244-sample real corpus with the per-function fetch, three repeats, two-stage and knobs-at-0 |
+| `dedup_after_full_*.json`, `dedup_after_one_*.json` | `bench_matching.py` | the same, with the deduplicated fetch |
+| `dedup_fetch_twostage.json`, `dedup_fetch_onestage.json` | `bench_cache_fetch.py` | the fetch driven in isolation over one query's candidate id set: per-strategy time, traced memory, and the dedup factor |
+| `dedup_fingerprint_*.json` | `db_fingerprint.py` | per-collection document counts and dbstats of `real` before and after each measurement run |
 
 ## Reading the concurrency files
 
@@ -55,6 +59,27 @@ JSON written by the harness, kept on this branch so the implementation branch st
   end of the run. The scratch corpora are `$out` projections holding only `_pichash`, so they sit
   inside the WiredTiger cache where a full corpus of the same sample count does not: read the
   exponents, and treat the absolute seconds as this instrument's rather than a full corpus's.
+
+## Reading the matching-cache fetch files
+
+The before/after runs used the same three query samples addressed by sha256 as the earlier
+real-corpus points (`009363ee...`, `00c6e653...`, `00366976...`), so they are comparable with them.
+
+`real` is a reference corpus and the benchmark only reads it. `db_fingerprint.py compare`
+reported `UNCHANGED: database 'real', 35 collections, 28716568 objects, identical before and
+after` for both the before and the after run, and again for the isolated fetch run. The queue
+database was pointed at a scratch name (`wt_dedup_queue`) so no job bookkeeping could land next
+to the corpus.
+
+Caveats:
+
+- Single machine, single mongod, warm cache, one query at a time. Concurrency was never
+  measured.
+- Peak RSS is a process-wide high-water mark, so in a multi-query run it is the peak up to and
+  including that query, not that query's own allocation.
+- `bench_cache_fetch.py` measures time and memory in separate passes: `tracemalloc` taxes every
+  allocation, and timing under it would flatter whichever strategy allocates least - which is
+  the thing being compared.
 
 ## Caveats that apply to the concurrency files
 

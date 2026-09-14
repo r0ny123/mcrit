@@ -913,6 +913,102 @@ Measured build cost at 12,500 samples / ~10M functions: 145 s and 147 s.
   not "provably constant". Stage 1 still performs index lookups whose cost is logarithmic in
   corpus size, and a flat cutoff remains a blunt instrument - see next steps.
 
+## Deduplicating the matching-cache fetch
+
+Scoring compares each distinct signature once. The fetch that feeds it did not: it decoded one
+MinHash per candidate function, so on a candidate set where a signature is held by thirty
+functions it decoded that signature thirty times and kept thirty copies of it. The fetch now
+decodes once per distinct signature and hands every function carrying it the same object. This
+is exact - the decode is a pure function of the stored hex string - and the match reports are
+unchanged, which is asserted by test rather than assumed.
+
+### What could not be deduplicated, and why
+
+The fetch is keyed by function id and has to stay that way. Each document it reads supplies
+`sample_id` as well as the signature, and `sample_id` is per-function attribution: it is how a
+match is reported, and `sample_id_to_func_ids` is what the PicHash filter subtracts from.
+**Nothing stored lets the fetch ask for "the distinct signatures of these function ids"** - that
+would need a signature-keyed index, which is a schema change and an index to maintain on every
+write. So the number of documents read is unchanged; what is deduplicated is the decode and the
+retained objects.
+
+### The dedup factor is higher on a candidate set than on the corpus
+
+The corpus-wide factor at 257 samples was 2.46x. A *candidate set* is not a corpus sample: it is
+selected by band collision, and band collision is exactly the thing that correlates with holding
+the same signature. Measured on the 7,244-sample real corpus, per query
+(`benchmarks/bench_cache_fetch.py`):
+
+| query | configuration | candidate functions | distinct signatures | dedup factor |
+|---|---|---|---|---|
+| `009363ee` | two-stage | 2,534 | 1,616 | 1.57x |
+| `00c6e653` | two-stage | 11,837 | 400 | **29.59x** |
+| `00366976` | two-stage | 1,470 | 228 | 6.45x |
+| `009363ee` | knobs at 0 | 126,525 | 24,844 | 5.09x |
+| `00c6e653` | knobs at 0 | 397,361 | 23,343 | **17.02x** |
+| `00366976` | knobs at 0 | 48,927 | 12,267 | 3.99x |
+
+**4x to 30x, against 2.46x corpus-wide.** That is the number that says how much of the fetch was
+redundant, and it is now logged by the fetch itself so a deployment can read its own rather than
+inherit these.
+
+### What it is worth: the fetch in isolation
+
+Same id sets, fetch driven alone, three repeats, median. `per_function` is the production fetch
+with only the slice decode replaced by the old per-function one, so slicing, the thread pool and
+the merge are identical and the comparison isolates the decode. Memory is traced in a separate
+pass, because `tracemalloc` taxes allocation and would flatter the strategy that allocates less.
+
+| query | candidate functions | per-function | deduplicated | traced peak before | after |
+|---|---|---|---|---|---|
+| `009363ee` (knobs at 0) | 126,525 | 1.819 s | **1.538 s** | 53.8 MB | 43.8 MB |
+| `00c6e653` (knobs at 0) | 397,361 | 4.054 s | **3.793 s** | 180.3 MB | 136.8 MB |
+| `00366976` (knobs at 0) | 48,927 | 0.914 s | **0.455 s** | 23.0 MB | 19.2 MB |
+| `00c6e653` (two-stage) | 11,837 | 0.092 s | **0.078 s** | 8.1 MB | 7.9 MB |
+| `009363ee` (two-stage) | 2,534 | 0.027 s | 0.026 s | 1.9 MB | 1.9 MB |
+| `00366976` (two-stage) | 1,470 | 0.015 s | 0.015 s | 1.1 MB | 1.1 MB |
+
+**7% to 50% off the isolated fetch, 0% to 24% off its allocation, and never slower.** The win
+scales with the candidate set, which is the shape that matters: it is zero where the set is
+small and largest where the set is large.
+
+### What it is worth end to end: honestly, nothing measurable
+
+The same three queries through the whole matcher, three repeats, medians summed across the three
+queries, before against after (`bench_matching.py`, raw JSON in `measurements/`):
+
+| configuration | quantity | before | after |
+|---|---|---|---|
+| two-stage | matching-cache fetch stage | 0.269 s | 0.270 s |
+| two-stage | total | 4.847 s | 4.742 s |
+| knobs at 0 | matching-cache fetch stage | 10.193 s | 10.487 s |
+| knobs at 0 | total | 42.760 s | 43.333 s |
+
+**No measurable change in either direction.** The run-to-run spread on the knobs-at-0 fetch stage
+is about +-0.4 s on a 3-5 s stage, several times larger than the 0.3-0.5 s the isolated
+measurement attributes to the decode, and the stage also contains the cache-object construction
+(`_setFunctionEntry` and the LRU bookkeeping per function), which this change does not touch and
+which dominates it. In the two-stage configuration the whole stage is 0.27 s of a 4.8 s query, so
+there was never room for a visible win there.
+
+So: **a real reduction in corpus-shaped work, invisible at this corpus size.** It is worth having
+because what it removes grows with the corpus while what it costs does not - the decode and the
+retained bytes are per candidate function, and the candidate set is what grows - but anyone
+looking for it in a stopwatch reading at 7,244 samples will not find it, and this document should
+not pretend otherwise.
+
+### The alternative that was measured and rejected
+
+Grouping by signature inside mongod (`$group` on `minhash`, pushing the function and sample ids
+per group) would take the repeated signature off the wire as well, not just out of the decode.
+It is in `bench_cache_fetch.py` as the `aggregated` strategy and it is **slower**: 2.807 s against
+1.538 s at 126k ids, 6.269 s against 3.793 s at 397k. It does allocate less on the widest set
+(124.8 MB against 136.8 MB), so the wire saving is real - it is just smaller than what the
+aggregation costs mongod. Part of the gap is that the aggregation runs as one unsliced cursor
+while the find path is sliced across a thread pool, so this is a measurement of the two
+implementations rather than of the two ideas; a sliced, threaded aggregation was not written.
+The find path stays.
+
 ## What remains
 
 1. **WAND / MaxScore instead of a flat cutoff.** A df cutoff discards a long posting list
@@ -921,8 +1017,12 @@ Measured build cost at 12,500 samples / ~10M functions: 145 s and 147 s.
 2. **Sharding.** A petabyte corpus is a partitioning problem. Band hashes partition cleanly, and
    the two-stage shape is already compatible: stage 1 fans out per shard, each returns a local
    top-N, and the merged shortlist feeds stage 2. Not implemented.
-3. **Push dedup further down.** Scoring is deduplicated; the matching-cache *fetch* still pulls
-   one signature per candidate function rather than per distinct signature.
+3. **A signature-keyed index, if the fetch ever has to read fewer documents.** The fetch now
+   decodes one signature per distinct signature (see above), but it still *reads* one document
+   per candidate function, because each one carries per-function attribution. Reading fewer
+   would need a signature -> function_ids index, i.e. a schema change and an index maintained on
+   every write; at 4x-30x dedup on a candidate set that is worth costing out, and it was
+   deliberately not done here.
 4. **Adaptive shortlist size.** A fixed N is wrong in both directions - the right N depends on
    how sharply the vote distribution falls off. Stopping where the votes flatten would keep more
    of the tail on ambiguous queries and less on clear ones.

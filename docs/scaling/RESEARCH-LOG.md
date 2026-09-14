@@ -561,3 +561,65 @@ produced it.** The earlier number was not wrong; it was taken on a database that
 twice on this disk. The defensible move is to publish both, say which one the fix is entitled to
 claim, and name the experiment that would settle it - rather than quietly keeping the exponent
 that makes the change look better.
+
+## 9. Deduplicating the matching-cache fetch, and a measurement that nearly lied
+
+Scoring had been deduplicated by signature; the fetch feeding it had not. The open question was
+whether the fetch could also read *fewer documents*, not merely decode fewer signatures.
+
+**It cannot, without a schema change.** Each document the fetch reads carries `sample_id` as well
+as the signature, and `sample_id` is per-function attribution - it is what a match is reported
+with, and `sample_id_to_func_ids` is what the PicHash filter subtracts from. Asking storage for
+"the distinct signatures of these function ids" needs a signature-keyed index that does not
+exist. So what was left to deduplicate is the hex decode and the retained bytes: one
+`bytes.fromhex` per candidate function became one per distinct signature, and every function
+carrying a signature now shares one object.
+
+### The dedup factor on a candidate set is not the corpus dedup factor
+
+The corpus-wide figure at 257 samples was 2.46x. On the 7,244-sample real corpus, the *candidate
+sets* of the three standing query samples deduplicate **3.99x to 29.59x**. That is not a
+surprise once stated: a candidate set is assembled by band collision, and band collision is the
+thing that correlates with holding the same signature. It does mean the corpus figure understates
+what the fetch stood to gain, and that the right number to quote for a fetch is the one measured
+on a candidate set. The fetch now logs its own.
+
+### Measuring the wrong two things
+
+The first version of `bench_cache_fetch.py` compared the production fetch against a hand-written
+per-function loop, and reported the deduplicated path **2x faster** at 126k ids. That number was
+wrong and flattering: the production path slices the id set and fetches the slices from a thread
+pool, and the hand-written baseline did neither. It measured threading, not deduplication.
+Rewriting the baseline as *the production fetch with only the slice decode swapped* dropped the
+same comparison to 1.19x. The lesson is the ordinary one and it keeps recurring here: a baseline
+that is not the code being replaced measures the difference between two implementations, not the
+change.
+
+A second version of the same mistake was avoided rather than made: `tracemalloc` taxes every
+allocation, so timing under it would have flattered the strategy that allocates least - which is
+precisely the strategy under test. Time and memory are measured in separate passes.
+
+### The honest end-to-end result: nothing measurable
+
+Isolated, the deduplicated fetch is 7%-50% faster and allocates 0%-24% less, never slower, with
+the gain scaling with the candidate set. End to end, over the same three queries, three repeats,
+both configurations, **the matching-cache fetch stage and the total do not move**: 10.193 s ->
+10.487 s (knobs at 0) and 0.269 s -> 0.270 s (two-stage), summed over the three queries, against
+a run-to-run spread several times larger than the effect. The stage also contains per-function
+cache-object construction that this change does not touch and that dominates it.
+
+That is worth recording as a result, not hiding as a disappointment. The change removes work that
+is proportional to the candidate set, and the candidate set is what grows with the corpus; the
+cost it adds is a dict lookup per distinct signature, which grows far more slowly. It is a
+reduction in corpus-shaped work whose absolute size at 7,244 samples is below the noise floor of
+the instrument - which is the same category as the shortlist-ranking defect in 5e, found by
+asking what is shaped like the corpus rather than by reading a profile.
+
+### `$group` in mongod: measured, rejected
+
+Grouping by signature server-side would take the repeated signature off the wire too. Measured as
+the `aggregated` strategy: **slower** (2.807 s against 1.538 s at 126k ids; 6.269 s against
+3.793 s at 397k), though it does allocate less on the widest set (124.8 MB against 136.8 MB), so
+the wire saving is real and simply smaller than what the aggregation costs. The comparison is
+also not clean - the aggregation runs as one unsliced cursor against a sliced, threaded find - so
+what is rejected is this implementation of the idea, not the idea. The find path stays.
