@@ -1,0 +1,19 @@
+{
+  "num_samples": 7244,
+  "num_functions": 8657357,
+  "num_bands": 20,
+  "distinct_band_hashes": 8482606,
+  "band_index_bytes": 2401390592,
+  "target_samples": 1000000000,
+  "growth": 138045.27885146328,
+  "projected_band_index_bytes": 331500633903920.5,
+  "projected_distinct_band_hashes": 45030100755.7224,
+  "query_functions": 557,
+  "band_lookups_per_query": 11140,
+  "io_floor_seconds": {
+    "NVMe SSD": 0.8912,
+    "SATA SSD": 1.671,
+    "spinning disk": 55.7
+  },
+  "heaps_beta": 0.7247
+}
