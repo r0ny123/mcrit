@@ -231,11 +231,27 @@ def cmd_match(args):
     storage = index._storage
 
     status = index.getStatus()
-    num_samples = status["status"]["num_samples"]
-    print("corpus: %d samples, %d functions, %d families" % (num_samples, status["status"]["num_functions"], status["status"]["num_families"]), flush=True)
 
     all_samples = storage.getSamples(start_index=0, limit=0)
     sample_ids = sorted(sample.sample_id for sample in all_samples)
+    # The corpus size on the x-axis of every scaling plot has to be the number of samples that
+    # actually exist, counted here, not the one /status reports. /status sums the denormalised
+    # per-family counters, and those drift: MongoDbStorage._updateFamilyStats skips its decrement
+    # when a family document is missing, so a bulk deletion leaves them over-reporting for good.
+    # Measured on this corpus, they claimed 7,414 samples and 9,451,566 functions against an
+    # actual 5,322 and 6,114,096 - a 2,092-sample overstatement that exactly matches an earlier
+    # deletion. Fitting an exponent against that axis is fitting against a bookkeeping error, so
+    # the reported figure is kept only to record the disagreement. recomputeFamilyStats() repairs
+    # it; this does not depend on having run it.
+    num_samples = len(sample_ids)
+    num_samples_reported = status["status"]["num_samples"]
+    print("corpus: %d samples, %d functions, %d families" % (num_samples, status["status"]["num_functions"], status["status"]["num_families"]), flush=True)
+    if num_samples_reported != num_samples:
+        print(
+            "WARNING: /status reports %d samples but %d exist; family counters have drifted by %+d. "
+            "Run storage.recomputeFamilyStats() to repair them." % (num_samples_reported, num_samples, num_samples_reported - num_samples),
+            flush=True,
+        )
     if args.query_sha256:
         # Sample ids are assigned per corpus, so the *same* sample has different ids in two
         # differently-sized corpora. Selecting by sha256 is what makes a scaling comparison
@@ -314,6 +330,7 @@ def cmd_match(args):
     summary = {
         "db": args.db,
         "num_corpus_samples": num_samples,
+        "num_corpus_samples_reported_by_status": num_samples_reported,
         "num_corpus_functions": status["status"]["num_functions"],
         "queries": results,
         "median_total_seconds": statistics.median(totals) if totals else 0.0,
