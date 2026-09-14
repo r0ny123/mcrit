@@ -254,6 +254,43 @@ The cheap checks, in the order they pay off:
    on a throwaway database before being run against the real corpus; both times that was the
    step that confirmed the invariant rather than assuming it.
 
+## 5d. A seventh defect, found after the results were published
+
+The three real-corpus points were reported, committed and pushed. Refitting them from the raw
+JSON afterwards - to derive the exponents rather than transcribe them - produced k = +0.68 on
+the median instead of the published +1.25. One of the two numbers was wrong.
+
+The JSON recorded corpus sizes of 1,571 / 5,089 / 7,328. The summary quoted 2,016 / 2,996 /
+5,243. The harness had been taking its x-axis from `index.getStatus()`, which sums the
+denormalised per-family counters - and `_updateFamilyStats` logs a warning and *skips its
+decrement* when a family document is missing, so the 2,540 samples deleted during the xcfg
+recovery were never subtracted from them.
+
+The drift is measurable today: the counters claim 7,414 samples against 5,322 that exist, an
+overstatement of 2,092. It is also constant, which is what made the published numbers
+recoverable rather than merely suspect. Subtracting it reproduces the quoted sizes: 5,089 ->
+2,997 against 2,996 quoted, 7,328 -> 5,236 against 5,243, and on the current corpus it lands
+exactly. An independent artefact agrees: the range rebuild at the third point covered 4,760
+samples, consistent with 5,236 of which 476 have no functions.
+
+So the published results stand - the quoted sizes were counted, not read from `/status` - but
+the JSON preserved the wrong one of the two numbers, and nothing in the pipeline noticed the two
+sources disagreeing by 40%.
+
+Three things are worth extracting:
+
+- **A derived number and a displayed number must come from the same place.** The summary counted;
+  the JSON asked `/status`. Both were written by the same run, and they disagreed for months of
+  wall-clock without complaint. The fix is not "use the right one" but to record both and warn
+  when they differ, which the harness now does.
+- **Denormalised counters are a silent-failure shape**, the same one as 5c: an incremental
+  counter with a skip path that only logs. `recomputeFamilyStats` (upstream, #151) exists
+  precisely because this drifts, which is evidence the failure is endemic rather than incidental
+  to this corpus.
+- **Re-deriving a published result is a check, not ceremony.** This surfaced only because the
+  exponents were recomputed from files instead of being trusted, and that happened after the work
+  was called finished. The result survived; the instrument did not.
+
 ## 6. Operational notes (things that cost real time here)
 
 - **mongod aborts rather than degrades when it runs out of file descriptors.** The container's
