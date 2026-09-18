@@ -20,10 +20,16 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - Require `smda>=4.8.0` (was `>=4.2.13`). smda 4.5.0 moved `ESCAPER_DOWNWARD_COMPATIBILITY` from
   `1.13.16` to `4.4.5`, the release whose Intel escaper changed output, so a corpus whose minhashes
   were computed under smda 4.4.4 or older is reported stale after this upgrade and that report is
-  correct: `repair_minhashes` brings it current. Samples hashed under 4.4.5 or newer are unaffected.
-  smda 4.4.5 through 4.7.0 also move native function recovery, so re-disassembling a file can yield
-  a different function set than the stored report has. *Measured:* the 191 database-free tests pass
-  unchanged under 4.8.0.
+  correct: `repair_minhashes` brings it current. Samples whose recorded `minhash_smda_version` is
+  4.4.5 or newer are unaffected; a sample with no recorded version (imported, or indexed before
+  1.9.0) counts as stale regardless, as described under 1.9.0. **.NET samples are the exception
+  nothing here repairs:** smda 4.4.5 ends CIL blocks at `throw`, `rethrow`, `endfinally` and
+  `endfilter`, which changes the `pic_hash`, block hashes and shingles of every method containing
+  one. That is a change to the stored report's structure, not to escaping, so neither
+  `repair_minhashes` nor pic-hash recalculation reaches it - such samples have to be deleted and
+  submitted again. smda 4.4.5 through 4.7.0 also move Intel and AArch64 function recovery, so
+  re-disassembling a file can yield a different function set than the stored report has.
+  *Measured:* the 191 database-free tests pass unchanged under 4.8.0; no corpus was re-indexed.
 
 ## [1.9.0] - 2026-09-08
 
