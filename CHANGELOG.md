@@ -20,8 +20,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - `mcrit client submit --disassembler ida`, using IDA Pro headlessly instead of SMDA to disassemble
   submitted files, with `--ida-sigs` applying a FLIRT signature bundle and `--ida-sig-min-matches`
   setting how many functions a signature must name to be kept. It needs IDA Pro 9.1+, its licence
-  accepted once in the GUI, `pip install "mcrit[ida]"` and `IDADIR`; without those the submission
-  prints the missing-dependency message and skips the file rather than aborting the run. Every file
+  accepted once in the GUI, `pip install "mcrit[ida]"` and `IDADIR`; without the package the run
+  stops with that hint before any file is touched. Every file
   is disassembled in its own subprocess because the headless IDA library holds one database per
   process, so worker mode is forced for the `dir`/`recursive`/`malpedia` modes and a file exceeding
   `--worker-timeout` is skipped silently apart from the timeout line - raise the timeout for large
@@ -43,6 +43,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   command placed both after `submit`, where the parser does not know them, so every worker exited
   with a usage error and nothing was submitted; the error reached the console only as the worker's
   relayed stderr. Without the two options (server taken from the environment) it worked.
+- `--force_update` reaches the worker: it was not forwarded, so with `--worker` a known sample was
+  always skipped and its family, version and library flag never updated.
 - A worker that exceeds `--worker-timeout` is now killed. It was only reported, and kept running
   after the parent had moved on, so a run over many slow files accumulated orphaned processes.
 

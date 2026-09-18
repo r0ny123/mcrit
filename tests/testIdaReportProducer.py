@@ -24,6 +24,7 @@ BUNDLE_FILES = [
     "linux/debian/debian-libc6-dev-i386.sig",
     "linux/debian/debian-libc6-dev-armhf.sig",
     "linux/debian/debian-libc6-dev-armel.sig",
+    "linux/debian/debian-libffi-dev-arm.sig",
     "linux/ubuntu/ubuntu-libssl-dev-amd64.sig",
     "golang/stdlibs/golang_std_pc_ABI0.sig",
     "golang/stdlibs/golang_std_pc_ABI0Internal.sig",
@@ -42,14 +43,19 @@ class FakeIdaFuncs:
     IDASGN_APPLIED = 2
     IDASGN_BADARG = 3
 
-    def __init__(self, matches_by_name, states=None):
+    def __init__(self, matches_by_name, states=None, known_names=None, undo=None):
         self.matches_by_name = matches_by_name
         self.states = states or {}
-        self.names = sorted(matches_by_name)
-        self.planned = []
+        self.known_names = set(known_names if known_names is not None else matches_by_name)
+        self.names = []
+        self.undo = undo
 
     def plan_to_apply_idasgn(self, path):
-        self.planned.append(path)
+        name = os.path.splitext(os.path.basename(path))[0]
+        if name in self.known_names:
+            self.names.append(name)
+            if self.undo is not None:
+                self.undo.on_undo = self.names.pop
         return True
 
     def get_idasgn_qty(self):
@@ -67,6 +73,7 @@ class FakeIdaUndo:
     def __init__(self):
         self.undo_points = []
         self.undos = 0
+        self.on_undo = None
 
     def create_undo_point(self, prefix, label):
         self.undo_points.append((prefix, label))
@@ -74,6 +81,9 @@ class FakeIdaUndo:
 
     def perform_undo(self):
         self.undos += 1
+        if self.on_undo is not None:
+            self.on_undo()
+            self.on_undo = None
         return True
 
 
@@ -110,10 +120,12 @@ class SelectCandidateSigsTest(unittest.TestCase):
     def _names(self, selected):
         return sorted(os.path.basename(path) for path in selected)
 
-    def testPeSelectsAllWindowsSigs(self):
+    def testPeSelectsWindowsSigsOfItsArchitecture(self):
         selected = selectCandidateSigs(self.sig_root, "Portable executable for AMD64 (PE)", "metapc", 64, False, False)
         self.assertTrue(all(os.path.isabs(path) for path in selected))
-        self.assertEqual(["Microsoft.CRT-Desktop_x64.sig", "Microsoft.CRT-Desktop_x86.sig"], self._names(selected))
+        self.assertEqual(["Microsoft.CRT-Desktop_x64.sig"], self._names(selected))
+        selected = selectCandidateSigs(self.sig_root, "Portable executable for 80386 (PE)", "metapc", 32, False, False)
+        self.assertEqual(["Microsoft.CRT-Desktop_x86.sig"], self._names(selected))
 
     def testElfX64SelectsAmd64Sigs(self):
         selected = selectCandidateSigs(self.sig_root, "ELF64 for x86-64 (Shared object)", "metapc", 64, False, False)
@@ -121,7 +133,7 @@ class SelectCandidateSigsTest(unittest.TestCase):
 
     def testElfArm32SelectsBothSoftAndHardFloat(self):
         selected = selectCandidateSigs(self.sig_root, "ELF for ARM (Executable)", "ARM", 32, False, False)
-        self.assertEqual(["debian-libc6-dev-armel.sig", "debian-libc6-dev-armhf.sig"], self._names(selected))
+        self.assertEqual(["debian-libc6-dev-armel.sig", "debian-libc6-dev-armhf.sig", "debian-libffi-dev-arm.sig"], self._names(selected))
 
     def testGoAddsGolangSigsToPlatformSigs(self):
         selected = selectCandidateSigs(self.sig_root, "ELF64 for x86-64 (Executable)", "metapc", 64, True, False)
@@ -173,12 +185,20 @@ class ApplySigsTest(unittest.TestCase):
         self.assertEqual([], kept)
         self.assertEqual(1, ida_undo.undos)
 
-    def testUnknownSignatureIsSkipped(self):
-        ida_funcs = FakeIdaFuncs({"other": 100})
+    def testUnlocatableSignatureIsUndone(self):
+        ida_funcs = FakeIdaFuncs({"missing": 100}, known_names=[])
         ida_undo = FakeIdaUndo()
         kept = self._runApplySigs(["/sigs/missing.sig"], 1, ida_funcs, ida_undo)
         self.assertEqual([], kept)
-        self.assertEqual(0, ida_undo.undos)
+        self.assertEqual(1, ida_undo.undos)
+
+    def testKeptSignaturesSurviveTheUndoOfLaterOnes(self):
+        ida_undo = FakeIdaUndo()
+        ida_funcs = FakeIdaFuncs({"first": 40, "weak": 2, "last": 15}, undo=ida_undo)
+        kept = self._runApplySigs(["/sigs/first.sig", "/sigs/weak.sig", "/sigs/last.sig"], 10, ida_funcs, ida_undo)
+        self.assertEqual([("/sigs/first.sig", 40), ("/sigs/last.sig", 15)], kept)
+        self.assertEqual(1, ida_undo.undos)
+        self.assertEqual(["first", "last"], ida_funcs.names)
 
 
 class ProduceIdaReportTest(unittest.TestCase):

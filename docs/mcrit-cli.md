@@ -22,9 +22,8 @@ options:
                         Submit a single <file> or all files in a <dir>. Use <recursive> submission for a folder
                         structured as ./family_name/version/version/files. Synchronize <malpedia> into MCRIT. Default:
                         <file>.
-  -f FAMILY, --family FAMILY
-                        Set/Override SmdaReport with this family (only in modes: file/dir)
-  -v VERSION, --version VERSION
+  -f, --family FAMILY   Set/Override SmdaReport with this family (only in modes: file/dir)
+  -v, --version VERSION
                         Set/Override SmdaReport with this version (only in modes: file/dir)
   -l, --library         Set/Override SmdaReport with the library flag (only in modes: file/dir/recursive, default:
                         False).
@@ -32,8 +31,7 @@ options:
                         file/dir, default: False).
   -x, --executables_only
                         Only process files that are parsable PE or ELF files (default: False).
-  -o OUTPUT, --output OUTPUT
-                        Optionally store SMDA reports in folder OUTPUT.
+  -o, --output OUTPUT   Optionally store SMDA reports in folder OUTPUT, which is created if not existing.
   -s, --smda            Do not disassemble, instead only submit files that are recognized as SMDA reports (only works
                         with modes: file/dir).
   --disassembler {smda,ida}
@@ -45,7 +43,7 @@ options:
                         default: 10).
   -w, --worker          Spawn workers to process the submission (only in modes: dir/recursive/malpedia, default:
                         False).
-  -t WORKER_TIMEOUT, --worker-timeout WORKER_TIMEOUT
+  -t, --worker-timeout WORKER_TIMEOUT
                         Timeout for workers to conclude the submission (default: 300 seconds).
 ```
 
@@ -124,6 +122,9 @@ Caveats:
 * FLIRT results reach MCRIT only as function names, which the server stores as function labels attributed
   to the submitting user. There is no per-function library flag - `--library` remains a per-sample property.
 * The sample is copied to a temporary directory before analysis, so no IDA database files appear next to it.
+* IDA loads a file of no format it recognises as a raw binary instead of refusing it, so a file in which
+  it finds no functions is skipped rather than stored as an empty sample.
+* If the `ida-domain` package is missing, the run stops with an install hint before touching any file.
 * Base address suffixes in filenames (`..._dump_0x00400000`) are ignored; IDA's loader decides the base address.
 
 ```bash

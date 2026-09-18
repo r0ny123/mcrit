@@ -1,23 +1,16 @@
 #!/usr/bin/python
 
 import contextlib
-import importlib.util
 import io
 import logging
 import os
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from unittest.mock import MagicMock, patch
 
 from mcrit.client.McritConsole import McritConsole, get_primary_smda_meta_data, getSmdaReportFromFilepath, is_smda_report, submitViaSubprocess
-
-# IdaReportProducer pulls in IDA dependencies that are optional and absent here, so the tests that
-# exercise the ida branch provide the module themselves and patch produceIdaReport on it.
-if importlib.util.find_spec("mcrit.client.IdaReportProducer") is None:
-    sys.modules["mcrit.client.IdaReportProducer"] = types.ModuleType("mcrit.client.IdaReportProducer")
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(message)s")
@@ -92,7 +85,7 @@ class TestCLI(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             console, args = self._submitArgs(["--disassembler", "ida", tmp_dir, "--mode", "dir"])
             self.assertFalse(args.worker)
-            with contextlib.redirect_stdout(io.StringIO()):
+            with patch("mcrit.client.McritConsole.is_ida_available", return_value=True), contextlib.redirect_stdout(io.StringIO()):
                 console._handle_submit(args)
             self.assertTrue(args.worker)
 
@@ -135,7 +128,7 @@ class TestCLI(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             _, args = self._submitArgs(["--disassembler", "ida", "--ida-sigs", tmp_dir, "-f", "some_family", "-v", "some_version", tmp_dir])
             report = MagicMock(family="", version="")
-            with patch("mcrit.client.IdaReportProducer.produceIdaReport", create=True, return_value=report) as mock_produce:
+            with patch("mcrit.client.McritConsole.produceIdaReport", return_value=report) as mock_produce:
                 with contextlib.redirect_stdout(io.StringIO()):
                     result = getSmdaReportFromFilepath(args, "/some/sample")
             mock_produce.assert_called_once_with("/some/sample", tmp_dir, 10)
@@ -145,22 +138,29 @@ class TestCLI(unittest.TestCase):
 
     def testGetSmdaReportViaIdaSkipsEmptyReport(self):
         _, args = self._submitArgs(["--disassembler", "ida", "/some/sample"])
-        with patch("mcrit.client.IdaReportProducer.produceIdaReport", create=True, return_value=MagicMock(num_functions=0)):
+        with patch("mcrit.client.McritConsole.produceIdaReport", return_value=MagicMock(num_functions=0)):
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 self.assertIsNone(getSmdaReportFromFilepath(args, "/some/sample"))
         self.assertIn("no functions", stdout.getvalue())
 
-    def testGetSmdaReportViaIdaWithoutIdaDomain(self):
-        _, args = self._submitArgs(["--disassembler", "ida", "/some/sample"])
-        error = ImportError('ida-domain is not available, install it via pip install "mcrit[ida]" and point IDADIR at your IDA installation.')
-        stdout = io.StringIO()
-        with patch("mcrit.client.IdaReportProducer.produceIdaReport", create=True, side_effect=error):
+    def testIdaWithoutIdaDomainFailsBeforeAnyFile(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            console, args = self._submitArgs(["--disassembler", "ida", tmp_dir, "--mode", "dir"])
+            stdout = io.StringIO()
+            with patch("mcrit.client.McritConsole.is_ida_available", return_value=False), contextlib.redirect_stdout(stdout):
+                console._handle_submit(args)
+            self.assertIn('pip install "mcrit[ida]"', stdout.getvalue())
+            console.client.getSamples.assert_not_called()
+
+    def testIdaSigMinMatchesHasToBePositive(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            console, args = self._submitArgs(["--disassembler", "ida", "--ida-sig-min-matches", "0", tmp_dir, "--mode", "dir"])
+            stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
-                result = getSmdaReportFromFilepath(args, "/some/sample")
-        self.assertIsNone(result)
-        self.assertIn('pip install "mcrit[ida]"', stdout.getvalue())
-        self.assertNotIn("Traceback", stdout.getvalue())
+                console._handle_submit(args)
+            self.assertIn("at least 1", stdout.getvalue())
+            console.client.getSamples.assert_not_called()
 
 
 if __name__ == "__main__":

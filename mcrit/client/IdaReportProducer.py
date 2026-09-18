@@ -24,7 +24,15 @@ DEBARCHS_BY_PROCESSOR = {
     ("x86", 64): ["amd64"],
     ("x86", 32): ["i386"],
     ("arm", 64): ["arm64"],
-    ("arm", 32): ["armhf", "armel"],
+    ("arm", 32): ["armhf", "armel", "arm"],
+}
+
+# architecture suffixes of the windows signature bundle, per (processor family, bitness)
+WINDOWS_ARCHS_BY_PROCESSOR = {
+    ("x86", 64): "x64",
+    ("x86", 32): "x86",
+    ("arm", 64): "arm64",
+    ("arm", 32): "arm",
 }
 
 GOLANG_ARCHS_BY_PROCESSOR = {
@@ -46,7 +54,7 @@ def _normalizeProcessor(processor: str) -> str:
 
 def _normalizeFileFormat(file_format: str) -> str:
     normalized = (file_format or "").lower()
-    if "portable executable" in normalized or normalized.endswith("(pe)") or "(pe)" in normalized:
+    if "portable executable" in normalized or "(pe)" in normalized:
         return "PE"
     if "elf" in normalized:
         return "ELF"
@@ -86,7 +94,9 @@ def selectCandidateSigs(sig_root: str, file_format: str, processor: str, bitness
     sig_root = os.path.abspath(sig_root)
     candidates = set()
     if normalized_format == "PE":
-        candidates.update(_findSigs(sig_root, "windows", "**", "*.sig"))
+        windows_arch = WINDOWS_ARCHS_BY_PROCESSOR.get((normalized_processor, bitness))
+        if windows_arch:
+            candidates.update(_findSigs(sig_root, "windows", "**", f"*_{windows_arch}.sig"))
     elif normalized_format == "ELF":
         for debarch in DEBARCHS_BY_PROCESSOR.get((normalized_processor, bitness), []):
             candidates.update(_findSigs(sig_root, "linux", "**", f"*-{debarch}.sig"))
@@ -128,6 +138,7 @@ def applySigs(sig_paths: List[str], min_matches: int) -> List[Tuple[str, int]]:
         index = _getSigIndex(ida_funcs, sig_path)
         if index < 0:
             LOGGER.warning("could not locate planned signature %s", sig_path)
+            ida_undo.perform_undo()
             continue
         for _ in range(128):
             state = ida_funcs.calc_idasgn_state(index)
@@ -140,7 +151,7 @@ def applySigs(sig_paths: List[str], min_matches: int) -> List[Tuple[str, int]]:
         if num_matches < min_matches:
             ida_undo.perform_undo()
             continue
-        print(f"applied signature {label} with {num_matches} matches.")
+        LOGGER.info("applied signature %s with %d matches", label, num_matches)
         kept.append((sig_path, num_matches))
     return kept
 
@@ -197,14 +208,12 @@ def produceIdaReport(filepath: str, sig_root: Optional[str] = None, min_matches:
             report = Disassembler(backend="IDA").disassembleBuffer(interface.getBinary(), 0)
         finally:
             if interface is not None:
-                IdaInterface.instance = interface
                 IdaInterface().close()
 
     with open(filepath, "rb") as input_file:
-        file_content = input_file.read()
-    report.sha256 = hashlib.sha256(file_content).hexdigest()
+        report.sha256 = hashlib.file_digest(input_file, "sha256").hexdigest()
     report.filename = os.path.basename(filepath)
-    report.binary_size = len(file_content)
+    report.binary_size = os.path.getsize(filepath)
     # MongoDbStorage.updateMinHashesForSamples() parses the trailing token as the smda version
     report.smda_version = f"MCRIT4IDA cli via SMDA {SmdaConfig().VERSION}"
     return report
