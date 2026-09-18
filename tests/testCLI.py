@@ -5,6 +5,7 @@ import importlib.util
 import io
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -109,6 +110,27 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(command[command.index("--ida-sig-min-matches") + 1], "25")
             self.assertEqual(command[-1], "/some/sample")
 
+    def testSubprocessCommandParsesWithServerAndToken(self):
+        console = McritConsole()
+        args = console.parser.parse_args(["client", "--server", "http://127.0.0.1:1", "--apitoken", "token", "submit", "/some/dir", "--mode", "dir", "-f", "some_family"])
+        with patch("mcrit.client.McritConsole.subprocess.Popen") as mock_popen:
+            mock_popen.return_value.communicate.return_value = (b"", b"")
+            with contextlib.redirect_stdout(io.StringIO()):
+                submitViaSubprocess(args, "/some/sample")
+        reparsed = console.parser.parse_args(mock_popen.call_args[0][0][3:])
+        self.assertEqual(reparsed.server, "http://127.0.0.1:1")
+        self.assertEqual(reparsed.apitoken, "token")
+        self.assertEqual(reparsed.family, "some_family")
+        self.assertEqual(reparsed.filepath, "/some/sample")
+
+    def testSubprocessIsKilledOnTimeout(self):
+        _, args = self._submitArgs(["/some/dir", "--mode", "dir"])
+        with patch("mcrit.client.McritConsole.subprocess.Popen") as mock_popen:
+            mock_popen.return_value.communicate.side_effect = [subprocess.TimeoutExpired("mcrit", 1), (b"", b"")]
+            with contextlib.redirect_stdout(io.StringIO()):
+                submitViaSubprocess(args, "/some/sample")
+        mock_popen.return_value.kill.assert_called_once()
+
     def testGetSmdaReportViaIda(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             _, args = self._submitArgs(["--disassembler", "ida", "--ida-sigs", tmp_dir, "-f", "some_family", "-v", "some_version", tmp_dir])
@@ -120,6 +142,14 @@ class TestCLI(unittest.TestCase):
             self.assertIs(result, report)
             self.assertEqual(report.family, "some_family")
             self.assertEqual(report.version, "some_version")
+
+    def testGetSmdaReportViaIdaSkipsEmptyReport(self):
+        _, args = self._submitArgs(["--disassembler", "ida", "/some/sample"])
+        with patch("mcrit.client.IdaReportProducer.produceIdaReport", create=True, return_value=MagicMock(num_functions=0)):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertIsNone(getSmdaReportFromFilepath(args, "/some/sample"))
+        self.assertIn("no functions", stdout.getvalue())
 
     def testGetSmdaReportViaIdaWithoutIdaDomain(self):
         _, args = self._submitArgs(["--disassembler", "ida", "/some/sample"])

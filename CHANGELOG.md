@@ -28,7 +28,9 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   samples and when signatures are applied, as probing them is the slow part. Two limits to know:
   FLIRT results arrive as function labels attributed to the submitting user, not as a per-function
   library flag, and base-address suffixes in filenames are ignored because IDA's loader decides the
-  base address ([#83]).
+  base address. A file of no format IDA recognises is loaded as a raw binary rather than refused, so
+  a file in which IDA finds no functions is skipped instead of being stored as an empty sample
+  ([#83]).
 
 ### Fixed
 
@@ -36,6 +38,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   the "Processing file:" line made every file below it unreachable, so the mode walked the tree,
   printed one line per sample and submitted nothing - it looked like a successful run and left the
   corpus empty. The failure mode is silent: the only symptom was a sample count that never moved.
+
+- `mcrit client submit --worker` works together with `--server` and `--apitoken`. The spawned
+  command placed both after `submit`, where the parser does not know them, so every worker exited
+  with a usage error and nothing was submitted; the error reached the console only as the worker's
+  relayed stderr. Without the two options (server taken from the environment) it worked.
+- A worker that exceeds `--worker-timeout` is now killed. It was only reported, and kept running
+  after the parent had moved on, so a run over many slow files accumulated orphaned processes.
 
 ### Changed
 

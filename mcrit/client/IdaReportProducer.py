@@ -164,8 +164,8 @@ def _applyCandidateSigs(interface: Any, sig_root: str, min_matches: int) -> None
     ida_loader = importlib.import_module("ida_loader")
     sig_paths = selectCandidateSigs(
         sig_root,
-        ida_loader.get_file_type_name(),
-        interface.db.architecture,
+        ida_loader.get_file_type_name() or "",
+        interface.db.architecture or "",
         interface.getBitness(),
         _isGoBinary(interface),
         _isRustBinary(interface),

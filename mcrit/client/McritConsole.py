@@ -156,6 +156,10 @@ def getSmdaReportFromFilepath(args, filepath):
                     if base_addr is not None:
                         print(f"NOTE: Ignoring the base address in the filename, IDA's loader decides: {filepath}")
                     smda_report = produceIdaReport(filepath, args.ida_sigs, args.ida_sig_min_matches)
+                    # IDA loads a file of no known format as a raw binary instead of refusing it
+                    if not smda_report.num_functions:
+                        print(f"Skipping a file in which IDA found no functions: {filepath}")
+                        smda_report = None
                 else:
                     disassembler = Disassembler()
                     if base_addr is not None:
@@ -193,11 +197,12 @@ def getSmdaReportFromFilepath(args, filepath):
 
 def submitViaSubprocess(args, filepath):
     # a python found on PATH may lack the optional IDA dependencies this process was started with
-    command = [sys.executable, "-m", "mcrit", "client", "submit"]
+    command = [sys.executable, "-m", "mcrit", "client"]
     if args.server:
         command.extend(["--server", args.server])
     if args.apitoken:
         command.extend(["--apitoken", args.apitoken])
+    command.append("submit")
     if args.family:
         command.extend(["--family", args.family])
     if args.version:
@@ -227,6 +232,9 @@ def submitViaSubprocess(args, filepath):
             stderr_result = stderr_result.strip().decode("utf-8")
             print("STDERR logs from subprocess: ", stderr_result)
     except subprocess.TimeoutExpired:
+        # communicate() does not stop the child when its timeout expires
+        console_handle.kill()
+        console_handle.communicate()
         print(f"Processing {str(filepath)} with a spawned worker timed out during processing.")
 
 
