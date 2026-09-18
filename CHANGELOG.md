@@ -15,6 +15,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- `mcrit client submit --mode recursive` submits again. An unconditional `continue` directly after
+  the "Processing file:" line made every file below it unreachable, so the mode walked the tree,
+  printed one line per sample and submitted nothing - it looked like a successful run and left the
+  corpus empty. The failure mode is silent: the only symptom was a sample count that never moved.
+
 ### Changed
 
 - Require `smda>=4.8.0` (was `>=4.2.13`). smda 4.5.0 moved `ESCAPER_DOWNWARD_COMPATIBILITY` from

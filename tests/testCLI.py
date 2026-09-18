@@ -2,9 +2,11 @@
 
 import logging
 import os
+import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
-from mcrit.client.McritConsole import get_primary_smda_meta_data, is_smda_report
+from mcrit.client.McritConsole import McritConsole, get_primary_smda_meta_data, is_smda_report
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(message)s")
@@ -32,6 +34,24 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(smda_meta["filename"], "example_filename")
         self.assertEqual(smda_meta["family"], "example_family")
         self.assertEqual(smda_meta["version"], "example_version")
+
+    def testRecursiveSubmitsFiles(self):
+        console = McritConsole()
+        console.client = MagicMock()
+        console.client.getSamples.return_value = {}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sample_dir = os.sep.join([tmp_dir, "some_family", "1.0"])
+            os.makedirs(sample_dir)
+            sample_path = os.sep.join([sample_dir, "some_sample"])
+            with open(sample_path, "wb") as fout:
+                fout.write(b"MZ\x90\x00")
+            args = console.parser.parse_args(["client", "submit", "--mode", "recursive", tmp_dir])
+            args.filepath = tmp_dir
+            with patch("mcrit.client.McritConsole.getSmdaReportFromFilepath") as mock_get_report:
+                mock_get_report.return_value = MagicMock(family="", version="")
+                console._handle_submit_recursive(args)
+            mock_get_report.assert_called_once_with(args, sample_path)
+            console.client.addReport.assert_called_once()
 
 
 if __name__ == "__main__":

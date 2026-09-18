@@ -549,7 +549,6 @@ class McritConsole:
                     family_name = getFamilyName(folder_relative_path)
                     version = getSampleVersion(folder_relative_path, family_name)
                     print("Processing file: ", filepath, " as ", family_name, "|", version)
-                    continue
                     if args.worker:
                         args.family = getFamilyName(folder_relative_path)
                         args.version = getSampleVersion(folder_relative_path, args.family)
