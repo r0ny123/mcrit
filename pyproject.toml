@@ -50,6 +50,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ida = ["smda[ida]>=4.8.0"]
 dev = [
     "build",
     "coverage",

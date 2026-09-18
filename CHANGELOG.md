@@ -15,6 +15,21 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Added
+
+- `mcrit client submit --disassembler ida`, using IDA Pro headlessly instead of SMDA to disassemble
+  submitted files, with `--ida-sigs` applying a FLIRT signature bundle and `--ida-sig-min-matches`
+  setting how many functions a signature must name to be kept. It needs IDA Pro 9.1+, its licence
+  accepted once in the GUI, `pip install "mcrit[ida]"` and `IDADIR`; without those the submission
+  prints the missing-dependency message and skips the file rather than aborting the run. Every file
+  is disassembled in its own subprocess because the headless IDA library holds one database per
+  process, so worker mode is forced for the `dir`/`recursive`/`malpedia` modes and a file exceeding
+  `--worker-timeout` is skipped silently apart from the timeout line - raise the timeout for large
+  samples and when signatures are applied, as probing them is the slow part. Two limits to know:
+  FLIRT results arrive as function labels attributed to the submitting user, not as a per-function
+  library flag, and base-address suffixes in filenames are ignored because IDA's loader decides the
+  base address ([#83]).
+
 ### Fixed
 
 - `mcrit client submit --mode recursive` submits again. An unconditional `continue` directly after
@@ -310,6 +325,7 @@ date, the version, and what changed.
 [Unreleased]: https://github.com/danielplohmann/mcrit/compare/v1.9.0...HEAD
 [1.9.0]: https://github.com/danielplohmann/mcrit/compare/v1.8.1...v1.9.0
 [#44]: https://github.com/danielplohmann/mcrit/issues/44
+[#83]: https://github.com/danielplohmann/mcrit/issues/83
 [#142]: https://github.com/danielplohmann/mcrit/issues/142
 [#147]: https://github.com/danielplohmann/mcrit/pull/147
 [#149]: https://github.com/danielplohmann/mcrit/issues/149

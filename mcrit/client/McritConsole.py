@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 from dotenv import load_dotenv
 from smda.common.SmdaReport import SmdaReport
@@ -147,27 +148,30 @@ def getSmdaReportFromFilepath(args, filepath):
         if args.executables_only and not is_pe_or_elf(filepath):
             print(f"Skipping a file not recognized as executable: {filepath}")
         else:
-            disassembler = Disassembler()
-            if get_base_addr(filename) is not None:
-                base_addr = get_base_addr(filename)
-                try:
-                    smda_report = disassembler.disassembleBuffer(readFileContent(filepath), base_addr)
-                    smda_report.filename = filename
-                except Exception:
-                    import traceback
+            base_addr = get_base_addr(filename)
+            try:
+                if args.disassembler == "ida":
+                    from mcrit.client.IdaReportProducer import produceIdaReport
 
-                    print(f"ERROR: SMDA caused an exception while processing this file: {filepath}")
-                    print(traceback.format_exc())
-                    return None
-            else:
-                try:
-                    smda_report = disassembler.disassembleFile(filepath)
-                except Exception:
-                    import traceback
+                    if base_addr is not None:
+                        print(f"NOTE: Ignoring the base address in the filename, IDA's loader decides: {filepath}")
+                    smda_report = produceIdaReport(filepath, args.ida_sigs, args.ida_sig_min_matches)
+                else:
+                    disassembler = Disassembler()
+                    if base_addr is not None:
+                        smda_report = disassembler.disassembleBuffer(readFileContent(filepath), base_addr)
+                        smda_report.filename = filename
+                    else:
+                        smda_report = disassembler.disassembleFile(filepath)
+            except ImportError as err:
+                print(f"ERROR: {err}")
+                return None
+            except Exception:
+                import traceback
 
-                    print(f"ERROR: SMDA caused an exception while processing this file: {filepath}")
-                    print(traceback.format_exc())
-                    return None
+                print(f"ERROR: The disassembler caused an exception while processing this file: {filepath}")
+                print(traceback.format_exc())
+                return None
     # apply any of the forced flags: family, version, library
     if smda_report:
         if args.mode in ["file", "dir"]:
@@ -188,7 +192,8 @@ def getSmdaReportFromFilepath(args, filepath):
 
 
 def submitViaSubprocess(args, filepath):
-    command = ["python", "-m", "mcrit", "client", "submit"]
+    # a python found on PATH may lack the optional IDA dependencies this process was started with
+    command = [sys.executable, "-m", "mcrit", "client", "submit"]
     if args.server:
         command.extend(["--server", args.server])
     if args.apitoken:
@@ -205,6 +210,12 @@ def submitViaSubprocess(args, filepath):
         command.extend(["--output", args.output])
     if args.smda:
         command.extend(["--smda"])
+    if args.disassembler != "smda":
+        command.extend(["--disassembler", args.disassembler])
+    if args.ida_sigs:
+        command.extend(["--ida-sigs", args.ida_sigs])
+    if args.ida_sig_min_matches != 10:
+        command.extend(["--ida-sig-min-matches", str(args.ida_sig_min_matches)])
     command.append(filepath)
     console_handle = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
@@ -253,6 +264,17 @@ class McritConsole:
         client_submit.add_argument("-o", "--output", type=str, help="Optionally store SMDA reports in folder OUTPUT, which is created if not existing.")
         client_submit.add_argument(
             "-s", "--smda", action="store_true", help="Do not disassemble, instead only submit files that are recognized as SMDA reports (only works with modes: file/dir)."
+        )
+        client_submit.add_argument(
+            "--disassembler", type=str, default="smda", choices=["smda", "ida"], help="Disassembler used to produce reports for submitted files (default: smda)."
+        )
+        client_submit.add_argument(
+            "--ida-sigs",
+            type=str,
+            help="Root folder of an unpacked FLIRT signature bundle, probed per sample and applied where enough functions match (only with --disassembler ida).",
+        )
+        client_submit.add_argument(
+            "--ida-sig-min-matches", type=int, default=10, help="Number of functions a FLIRT signature must name to be kept (only with --disassembler ida, default: 10)."
         )
         client_submit.add_argument("-w", "--worker", action="store_true", help="Spawn workers to process the submission (only in modes: dir/recursive/malpedia, default: False).")
         client_submit.add_argument("-t", "--worker-timeout", type=int, default=300, help="Timeout for workers to conclude the submission (default: 300 seconds).")
@@ -445,6 +467,19 @@ class McritConsole:
         if args.worker and args.mode not in ["dir", "recursive", "malpedia"]:
             print("Mode <worker> only works with modes: dir/recursive/malpedia.")
             return
+        if args.disassembler == "ida" and args.smda:
+            print("Disassembler <ida> is not compatible with SMDA report loading.")
+            return
+        if args.disassembler != "ida" and (args.ida_sigs is not None or args.ida_sig_min_matches != 10):
+            print("Options <ida-sigs|ida-sig-min-matches> only work with disassembler <ida>.")
+            return
+        if args.ida_sigs is not None and not os.path.isdir(args.ida_sigs):
+            print("Your <ida-sigs> is not a directory or does not exist.")
+            return
+        if args.disassembler == "ida" and args.mode in ["dir", "recursive", "malpedia"] and not args.worker:
+            # idalib holds a single database per process, and one malformed sample must not end the batch
+            args.worker = True
+            print("NOTE: Disassembler <ida> processes each file in its own subprocess, enabling <worker>.")
         # behavior according to the modes offered
         if args.mode == "file":
             self._handle_submit_file(args)
