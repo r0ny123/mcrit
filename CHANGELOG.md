@@ -15,6 +15,16 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Changed
+
+- Require `smda>=4.8.0` (was `>=4.2.13`). smda 4.5.0 moved `ESCAPER_DOWNWARD_COMPATIBILITY` from
+  `1.13.16` to `4.4.5`, the release whose Intel escaper changed output, so a corpus whose minhashes
+  were computed under smda 4.4.4 or older is reported stale after this upgrade and that report is
+  correct: `repair_minhashes` brings it current. Samples hashed under 4.4.5 or newer are unaffected.
+  smda 4.4.5 through 4.7.0 also move native function recovery, so re-disassembling a file can yield
+  a different function set than the stored report has. *Measured:* the 191 database-free tests pass
+  unchanged under 4.8.0.
+
 ## [1.9.0] - 2026-09-08
 
 Correctness and operator-recovery release, plus a large `getUniqueBlocks` speedup. **Matching
