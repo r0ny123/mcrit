@@ -812,7 +812,11 @@ class MongoDbStorage(StorageInterface):
             updated_count = old_family_info.num_samples if update_information["is_library"] else 0
             self._getDb().families.update_one({"family_id": family_id}, {"$set": {"num_library_samples": updated_count}})
             self._updateDbState()
-        if "family_name" in update_information:
+        # the family's own name is not a rename: merging a family into itself deleted the document its
+        # samples still point to, or for family 0 doubled its counters. Compared with the stored name
+        # rather than looked up, because another family may carry the same name: recomputeFamilyStats
+        # re-creates a missing family document under the name its samples carry
+        if "family_name" in update_information and update_information["family_name"] != old_family_info.family_name:
             old_family_info = self.getFamily(family_id)
             family_name = update_information["family_name"]
             new_family_id = self.addFamily(family_name)
