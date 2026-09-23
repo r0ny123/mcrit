@@ -246,6 +246,28 @@ class MemoryStorageTest(TestCase):
             self.assertEqual(counts, self._storedFamilyCounts(family_id))
         self.assertEqual(family_2, self.storage.getSampleById(sample_b.sample_id).family_id)
 
+    def testRenamingAFamilyReindexesEachFunctionUnderItsOwnSample(self):
+        # MemoryStorage re-keyed the moved functions with whichever sample its loop over all samples
+        # had ended on, so renaming a family whose samples were not the last ones stored raised KeyError
+        self.storage.clearStorage()
+        report_a, report_b = self._twoReports()
+        report_b.family = "family_2"
+        sample_a = self.storage.addSmdaReport(report_a)
+        sample_b = self.storage.addSmdaReport(report_b)
+        assert sample_a is not None and sample_b is not None
+        family_1, family_2 = sample_a.family_id, sample_b.family_id
+        self.assertTrue(self.storage.modifyFamily(family_1, {"family_name": "family_1a"}))
+        family_1a = self.storage.getFamilyId("family_1a")
+        self.assertEqual(family_1a, self.storage.getSampleById(sample_a.sample_id).family_id)
+        self.assertEqual(self._actualFamilyCounts(family_1a), self._storedFamilyCounts(family_1a))
+        # both reports hold the same functions, so each pichash names one function of each sample
+        for function_entry in self.storage.getFunctionsBySampleId(sample_a.sample_id) or []:
+            self.assertEqual(family_1a, function_entry.family_id)
+            pichash_matches = self.storage.getMatchesForPicHash(function_entry.pichash)
+            self.assertIn((family_1a, sample_a.sample_id, function_entry.function_id), pichash_matches)
+            self.assertNotIn((family_1, sample_a.sample_id, function_entry.function_id), pichash_matches)
+            self.assertEqual({family_1a, family_2}, {family_id for family_id, _, _ in pichash_matches})
+
     def testRecomputeFamilyStatsCorrectsDriftedCounters(self):
         self.storage.clearStorage()
         report_a, _ = self._twoReports()
