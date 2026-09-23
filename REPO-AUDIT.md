@@ -1030,6 +1030,9 @@ Suite counts are the full offline suite with Playwright's Chromium present (mast
 | #206 | `fix/206-admin-account-handlers` @ `9252805` | 997 | as in its PR text | `fix-206-admin-account-handlers.md` |
 | #207 (part) | `fix/207-check-then-fetch` @ `452794c` | 991 | backend calls 8 → 6, 3 → 2, 7 → 5; pages and diagrams identical to master | `fix-207-check-then-fetch.md` |
 | new issue | `fix/specific-export-unknown-id` @ `99a93f5` | 993 | the table in its PR text | `fix-specific-export-unknown-id.md` |
+| #189 | `fix/189-explore-sleeps` @ `9bb08a0` | 1004 | POST 319 → 76 ms, 1320 → 75 ms returning to a cross compare; landing page current 5/5 | `fix-189-explore-sleeps.md` |
+| #197 | `fix/197-link-hunt-links` @ `96978e3` | 989 | 7 jobs here have 11-42 clusters, so paging runs for real; links identical to master once unfolded | `fix-197-link-hunt-links.md` |
+| new issue | `fix/linkhunt-empty-family-count` @ `9508923` | 988 | a filter with the family count left empty: master 500, here 200; six other link hunt pages byte-identical | `fix-linkhunt-empty-family-count.md` |
 
 What changed against the published patches, all after an adversarial review here:
 - **#193**: the new test file gets the shebang and `LOG` header that every other file in
@@ -1053,6 +1056,8 @@ What changed against the published patches, all after an adversarial review here
   corrected. The author email is also fixed.
 - **#183** is this session's own. Its PR says "Part of #183": the family guard the issue also
   asks for is #145's.
+- **#189**: the commit subject loses its `explore:` prefix, which no other commit here uses.
+- **#197**: the stray blank line at the end of the new test file is gone.
 
 ### 13.2 Not a PR
 
@@ -1070,6 +1075,18 @@ the unnamed family every mcrit storage keeps, which is empty here and has an exp
 `/explore/families`: one click downloads everything. File
 `pr-text/issue-new-specific-export.md` as an issue, then open `fix/specific-export-unknown-id`
 with `pr-text/fix-specific-export-unknown-id.md`, putting the new number in place of `#NNN`.
+
+A second one, found while checking #197: a link hunt filter submitted with "Unpenalized family
+count" left empty is a 500 (`TypeError` in mcrit's `getLinkHuntResults`), on master as on
+#197. File `pr-text/issue-new-linkhunt-family-count.md`, then open
+`fix/linkhunt-empty-family-count` with `pr-text/fix-linkhunt-empty-family-count.md`.
+
+Two more are in the mcrit backend, not here; they are for mcrit's own tracker:
+- `SampleResource.on_put` checks a version with `^[ -~]{1,64}$` but says "version may be 0-64
+  printable characters", so clearing a version is refused with a 400. Master's modify route
+  ignores the refusal and says the change was scheduled; #189 reports it.
+- `GET /complete_minhashes` with nothing left to hash raises `UnboundLocalError` in
+  `Worker.updateMinHashes`, and the job never finishes.
 
 ### 13.4 Conflicts between open PRs to expect
 
@@ -1095,7 +1112,7 @@ with `pr-text/fix-specific-export-unknown-id.md`, putting the new number in plac
     not a regression.
   - #147: "a sample no longer in the backend renders blank" was checked by reading only,
     because checking it live means deleting a sample.
-- The status page's #189 and #197: live check running.
+- The status page's #189 and #197: both hold live, on a corpus five times the size of yours (see 13.1).
 - Earlier numbers in this file called the ripgrep sample "8.5k functions". It has 11,598, and
   the texts are corrected.
 
