@@ -297,7 +297,10 @@ class MemoryStorage(StorageInterface):
                 if family_id == sample_entry.family_id:
                     self._samples[sample_id].is_library = update_information["is_library"]
             self._families[family_id].num_library_samples = self._families[family_id].num_samples
-        if "family_name" in update_information:
+        # the family's own name is not a rename: merging a family into itself dropped it and then failed
+        # on the lookup, or for family 0 doubled its counters. Compared with the stored name rather than
+        # looked up, because another family may carry the same name
+        if "family_name" in update_information and update_information["family_name"] != old_family_info.family_name:
             old_family_info = self.getFamily(family_id)
             family_name = update_information["family_name"]
             new_family_id = self.addFamily(family_name)

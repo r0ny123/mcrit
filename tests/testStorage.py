@@ -203,6 +203,49 @@ class MemoryStorageTest(TestCase):
             self.storage.recomputeFamilyStats(),
         )
 
+    def testRenamingAFamilyToItsOwnNameChangesNothing(self):
+        # the name resolves to the family itself: merging it into itself deleted the family (mongo),
+        # raised KeyError (memory), and doubled the counters of family 0, whose name is ""
+        self.storage.clearStorage()
+        report_a, report_b = self._twoReports()
+        report_b.family = ""
+        sample_a = self.storage.addSmdaReport(report_a)
+        sample_b = self.storage.addSmdaReport(report_b)
+        assert sample_a is not None and sample_b is not None
+        family_1 = sample_a.family_id
+        self.assertEqual(0, sample_b.family_id)
+        counts_before = {family_id: self._storedFamilyCounts(family_id) for family_id in (0, family_1)}
+        self.assertTrue(self.storage.modifyFamily(family_1, {"family_name": "family_1"}))
+        self.assertIsNotNone(self.storage.getFamily(family_1))
+        self.assertTrue(self.storage.modifyFamily(0, {"family_name": ""}))
+        for family_id, counts in counts_before.items():
+            self.assertEqual(counts, self._storedFamilyCounts(family_id))
+            self.assertEqual(self._actualFamilyCounts(family_id), self._storedFamilyCounts(family_id))
+        self.assertEqual("family_1", self.storage.getFamily(family_1).family_name)
+        self.assertEqual(family_1, self.storage.getSampleById(sample_a.sample_id).family_id)
+        self.assertEqual(0, self.storage.getSampleById(sample_b.sample_id).family_id)
+        # the rest of the update still applies
+        self.assertTrue(self.storage.modifyFamily(family_1, {"family_name": "family_1", "is_library": True}))
+        self.assertTrue(self.storage.getSampleById(sample_a.sample_id).is_library)
+        self.assertEqual(1, self._storedFamilyCounts(family_1)["num_library_samples"])
+
+    def testRenamingAFamilyToItsOwnNameLeavesAnotherOfTheSameNameAlone(self):
+        # names are not unique: resolving the name found the other family, and merged this one into it
+        self.storage.clearStorage()
+        report_a, report_b = self._twoReports()
+        report_b.family = "family_2"
+        sample_a = self.storage.addSmdaReport(report_a)
+        sample_b = self.storage.addSmdaReport(report_b)
+        assert sample_a is not None and sample_b is not None
+        family_1, family_2 = sample_a.family_id, sample_b.family_id
+        self._nameFamilyInStorage(family_2, "family_1")
+        self.assertEqual(family_1, self.storage.getFamilyId("family_1"))
+        counts_before = {family_id: self._storedFamilyCounts(family_id) for family_id in (family_1, family_2)}
+        self.assertTrue(self.storage.modifyFamily(family_2, {"family_name": "family_1"}))
+        for family_id, counts in counts_before.items():
+            self.assertEqual(counts, self._storedFamilyCounts(family_id))
+        self.assertEqual(family_2, self.storage.getSampleById(sample_b.sample_id).family_id)
+
     def testRecomputeFamilyStatsCorrectsDriftedCounters(self):
         self.storage.clearStorage()
         report_a, _ = self._twoReports()
@@ -221,6 +264,11 @@ class MemoryStorageTest(TestCase):
         stats = self.storage.getStats(with_pichash=False)
         self.assertEqual(1, stats["num_samples"])
         self.assertEqual(10, stats["num_functions"])
+
+    def _nameFamilyInStorage(self, family_id, family_name):
+        # bypasses modifyFamily, the way recomputeFamilyStats re-creates a missing family document
+        # under the name its samples carry, whatever other family has it
+        self.storage._families[family_id].family_name = family_name
 
     def _driftFamilyCounters(self, family_id, num_samples, num_functions):
         family = self.storage._families[family_id]
@@ -654,6 +702,9 @@ class MongoDbStorageTest(MemoryStorageTest):
 
     def _driftFamilyCounters(self, family_id, num_samples, num_functions):
         self.storage._getDb().families.update_one({"family_id": family_id}, {"$set": {"num_samples": num_samples, "num_functions": num_functions}})
+
+    def _nameFamilyInStorage(self, family_id, family_name):
+        self.storage._getDb().families.update_one({"family_id": family_id}, {"$set": {"family_name": family_name}})
 
     def testRecomputeCreatesTheFamilyDocumentSamplesReferenceWithoutOne(self):
         # the family_id 1908 case of #151: samples carry an id that no family document describes
