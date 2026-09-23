@@ -860,9 +860,13 @@ until someone relies on it. Found:
 - **#163's `modifyFunction`, #169's typed searches, #177's `modifyFamily`**: fixed in their
   merges, each with a test that fails on the bare call;
 - **the scaling stack (#194-#200)**: its second PR adds `rebuildFunctionRangeIndex` and
-  `rebuildBandDfIndex` the same way. The stack merges clean, and fixing two lines would mean
-  cascading `main` through seven stacked branches, so it was left as it is: once the ratchet
-  above is on `main`, it fails on those two in the stack's upstream CI.
+  `rebuildBandDfIndex` the same way. Fixed on 2026-09-23: `main` (e94d339) was cascaded up
+  the seven stacked branches with ordinary merges, in stack order (f907296, 5b6efe6, a1afe24,
+  e50087c, a071e50, 6356282, 1f4c3e1), and the second branch carries the fix in e9f3c03, with
+  a test that failed first (`2 failed, 1 passed` before, `1 passed, 2 subtests passed` after).
+  ruff, ruff format and the full suite including the mongo-marked tests pass on every branch
+  (218-230 non-mongo, 96-123 mongo), and fork PRs #43-#49 are green on all seven checks,
+  Integration tests included. The ratchet above no longer trips on the stack.
 
 Also recorded: #169 asserts the dict search answers `None` in raw mode, and #183 makes every
 method honour raw mode. Whichever of the two lands second has to reconcile that test.
