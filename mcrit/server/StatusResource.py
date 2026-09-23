@@ -4,7 +4,7 @@ import re
 import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
-from mcrit.server.utils import db_log_msg, jsonify, timing
+from mcrit.server.utils import db_log_msg, get_username, jsonify, timing
 
 
 class StatusResource:
@@ -91,7 +91,7 @@ class StatusResource:
     @timing
     def on_get_complete_minhashes(self, req, resp):
         """Schedule a job that calculates every missing minhash, for samples whose hashing job failed earlier. Answers the job id."""
-        minhash_report = self.index.updateMinHashes(None, force_recalculation=True)
+        minhash_report = self.index.updateMinHashes(None, force_recalculation=True, username=get_username(req))
         resp.data = jsonify({"status": "successful", "data": minhash_report})
         db_log_msg(self.index, req, "StatusResource.on_get_complete_minhashes - success.")
         return
@@ -99,7 +99,7 @@ class StatusResource:
     @timing
     def on_get_rebuild_index(self, req, resp):
         """Schedule a job that drops the band index and rebuilds it from the stored minhashes. Answers the job id."""
-        index_report = self.index.rebuildIndex(force_recalculation=True)
+        index_report = self.index.rebuildIndex(force_recalculation=True, username=get_username(req))
         resp.data = jsonify({"status": "successful", "data": index_report})
         db_log_msg(self.index, req, "StatusResource.on_get_rebuild_index - success.")
         return
@@ -122,7 +122,7 @@ class StatusResource:
     @timing
     def on_get_recalculate_pichashes(self, req, resp):
         """Schedule a job that recalculates the pichashes of every sample hashed with an older smda. Answers the job id."""
-        index_report = self.index.recalculatePicHashes(force_recalculation=True)
+        index_report = self.index.recalculatePicHashes(force_recalculation=True, username=get_username(req))
         resp.data = jsonify({"status": "successful", "data": index_report})
         db_log_msg(self.index, req, "StatusResource.on_get_recalculate_pichashes - success.")
         return
@@ -138,7 +138,7 @@ class StatusResource:
     @timing
     def on_get_recalculate_minhashes(self, req, resp):
         """Schedule a job that drops every minhash and recalculates all of them. Answers the job id."""
-        index_report = self.index.recalculateMinHashes(force_recalculation=True)
+        index_report = self.index.recalculateMinHashes(force_recalculation=True, username=get_username(req))
         resp.data = jsonify({"status": "successful", "data": index_report})
         db_log_msg(self.index, req, "StatusResource.on_get_recalculate_minhashes - success.")
         return
