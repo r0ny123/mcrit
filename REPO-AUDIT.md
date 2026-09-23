@@ -636,10 +636,12 @@ release:
 
 ### 10.1 Master verified, and §9 corrected
 
-- **Tests:** 962 passed, 6 skipped, ruff clean. That is the figure the release commit
-  states, measured here rather than taken from it. The 6 skips are the Playwright tests;
-  with `playwright==1.56.0` against the Chromium build preinstalled in this environment they
-  run, and pass.
+- **Tests:** 962 passed, 6 skipped, ruff clean - the figure the release commit states,
+  measured here rather than taken from it. The six skips hide more than six tests:
+  `testFunctionVsBrowser.py` skips as a whole module, which counts once, and holds 18. With
+  `playwright==1.56.0` against the Chromium build preinstalled in this environment the suite
+  collects **985, and all 985 pass**. The release notes' "968 in total" and "six of them
+  drive a real browser" count that module as one test.
 - **§9's absorption check is withdrawn.** A fake integration that merges #170 and then
   reverts its `mcritweb/views/data.py` change, put through the same `merge-tree` comparison,
   comes out "identical". All 39 heads #177 integrated are ancestors of it, which makes the
@@ -647,8 +649,9 @@ release:
   is *not* in the integration's history.
 - **Reading the resolutions is the real check, with one blind spot.**
   `git show --remerge-diff` over the 61 merges now on `master`: 20 carry hand edits (12 in
-  #177, 8 in the later integrations), and all 20 were read. Each keeps the intent of both
-  sides, with two things worth recording:
+  #177, 8 in the later integrations), and all 20 were read. Three things are worth recording,
+  two of them resolutions that did nothing but delete the conflict markers - which reads as
+  the safest resolution there is, and was wrong both times:
   - `a5f7aa4` (#175 against #116 in `style.css`, part of batch-3) dropped a closing `}`.
     53 `{` met 52 `}`, and CSS error recovery swallowed the seven rules after it, the
     function comparison's whole layout (#74), without an error anywhere. Already fixed on
@@ -657,9 +660,13 @@ release:
     safest resolution there is. But the two sides had shared one closing `}` below the
     conflict as context, and each needed its own. A brace count catches that where reading
     does not, so every stylesheet merged since has been checked with one.
-  - `d350c5d` removes #104's sha256 check and its tests in favour of #169, which stops the
-    request naming the upload's file at all. Legitimate: the replacement tests cover every
-    case #104 listed, and more.
+  - `d350c5d` (#169, `AGENTS.md`) kept the Uploads bullet #169 had rewritten next to its
+    rewrite, so the file says both that uploads are "named by SHA-256" and that a query
+    upload is named by its job id. Missed here as well; it turned up while checking the
+    `data.submit` finding in §10.7, and is fixed on a branch (§10.8).
+  - `d350c5d` also removes #104's sha256 check and its tests in favour of #169, which stops
+    the request naming the upload's file at all. Legitimate: the replacement tests cover
+    every case #104 listed, and more.
 
 ### 10.2 Upstream PR state after the release
 
@@ -678,7 +685,7 @@ diff shrinks back to its own change. #172 merges clean and was left alone; the o
 resolved by reading both sides, checked with ruff (which selects `F`, so shadowed and
 undefined names fail), a duplicated-block check and a CSS brace count, and pushed only after
 a green full suite. Test counts differ because each branch carries its own tests on top of
-master's 962.
+master's 985 (every test, the browser ones included - see §10.1).
 
 | PR | branch | commits | passed | what the resolution had to decide |
 |---|---|---|---|---|
@@ -750,21 +757,132 @@ This fork's `main` is untouched: 0 ahead of upstream `main`, 13 behind, for §9'
   live #174 worktree during a suite run. That run was stopped and repeated rather than
   trusted.
 
-### 10.7 Found along the way, open
+### 10.7 Found along the way
 
-- `data.submit` writes every submitted binary to `temp/uploads/<sha256>` before handing it
-  to mcrit, and nothing reads it again: the only reader of that directory is the query
-  upload path, which names files by job id (#169). That is an unbounded second copy of every
+Fixed on branches of their own, cut from 1.5.0 (§10.8):
+
+- `data.submit` wrote every submitted binary to `temp/uploads/<sha256>` before handing it to
+  mcrit, and nothing read it again: the only reader of that directory is the query upload
+  path, which names files by job id (#169). That is an unbounded second copy of every
   submitted sample, usually malware, on the web host - and the 1.5.0 notes tell operators
-  the sha256-named files there are orphans they can delete, while this route keeps making
-  new ones. The name itself is safe: on that branch it is always a digest of the upload.
-- `AGENTS.md` links two ADRs by the number they had before the renumbering (the link text
-  says ADR-0003 for 0014, table reloads, and for 0010, search results as dicts), and carries
-  two "Uploads" bullets: the pre-#169 one, "named by SHA-256", kept beside the one that
-  replaced it and contradicting it.
+  the sha256-named files there are orphans they can delete, while this route kept making
+  new ones. The name itself was safe: on that branch it is always a digest of the upload.
+- ADR references that renumbering left behind: `AGENTS.md` linked 0014 (table reloads) and
+  0010 (search results as dicts) under the text "ADR-0003", and `explore.fetchDotGraph` and
+  `testCfgGraphs` (twice) cited `docs/adr/0003` - which is about function labels - for the
+  CFG export round trip that 0011 records, from the commit that added 0011. Plus the
+  duplicated Uploads bullet of §10.1.
 - Thirteen check/cross icons across eight templates put the tag's closing `>` inside the
   `{% else %}` branch, so when the condition is true the markup is
   `<i … class="fa-solid fa-square-check" </i>`: the `</i>` is read as attributes and the
   `<i>` element is never closed.
+
+Noted, not changed:
+
 - `index()` asks for finished `getMatchesForSample` jobs only, which never carry a
   `family_id`, so its `getFamily` branch cannot run.
+- The jobs page's "Minhashing (N)" counts only mcrit's own minhashing job types, so the
+  admin maintenance jobs filed under that tab are listed but not counted in its number.
+- The 1.5.0 notes undercount the suite (§10.1); a published release note is not the place
+  to fix it, the next one is.
+
+### 10.8 After the branch updates
+
+**The fork's own open PR.** Of the fork's 23 open PRs, 21 head a branch updated in §10.3 and
+one (`fix/37-show-job-owner`, #172 upstream) merges clean. The last, r0ny123/mcritweb#67
+(`feat/schedule-maintenance-jobs`, the admin buttons for mcrit 1.9.0's three repairs), exists
+only in the fork and was 247 commits behind 1.5.0. It took `master` without a conflict, and
+review turned up two gaps in the PR itself:
+
+- it raised `requirements.txt` to `mcrit>=1.9.0` and left `setup.py` at `>=1.5.3`, so
+  `pip install -e .` could resolve an mcrit without the client methods the new buttons call.
+  Both files say 1.9.0 now, and `tests/testMcritFloor.py` fails when they disagree;
+- the jobs page, which files every job the server page starts under its own type, had no
+  entry for the three new types, and `?active=repairMinHashes` said it was not a job type.
+  Filed with the others now; the Minhashing tab also marks itself for all eight entries it
+  opens onto, where it named three.
+
+`affdc5b`, 1022 passed; the PR description was brought up to date rather than commented on.
+
+**Four fork branches head no PR anywhere** - `fix/56-listing-pages-drop-id-matches-paged`,
+`fix/65-empty-state-map-drift`, `fix/69-duo-page-hover-and-edge-throws`, `fix/triage-batch` -
+and were left untouched, per the owner's rule about branches unrelated to a PR or issue.
+
+**New fix branches, cut from 1.5.0, no PR opened** (§10.7 has the findings):
+
+| branch | commits | passed | what |
+|---|---|---|---|
+| `fix/close-the-check-icon-tags` | `4e5563c` | 989 | thirteen icons closed; a lint over the template tree for any conditional that closes a tag in one branch only, and a render of the sample row both ways |
+| `fix/docs-left-stale-by-the-integration` | `ec5cd42` `12c8dca` | 989 | the ADR references, with `tests/testAdrReferences.py` holding them to existing files and matching numbers; the duplicated Uploads bullet |
+| `fix/submit-keeps-no-upload-copy` | `5e47c2d` | 987 | `data.submit` keeps no copy; a test submits an unmapped and a dumped binary and finds `temp/uploads` empty |
+
+The last two both edit the AGENTS.md Uploads bullets on neighbouring lines, so whichever
+lands second has a one-line conflict; the commit message says how to resolve it.
+
+## 11. mcrit after upstream's 2026-09-16 merges
+
+Upstream mcrit merged #161 (who asked for a job), #184 (the export/import round trip) and
+#185 (typed client errors) on 2026-09-16. No release followed; v1.9.0 is still the latest.
+**22 upstream mcrit PRs are open**, every one headed by a branch of this fork, and five of
+them no longer merged.
+
+### 11.1 The five that conflicted
+
+Each took upstream `main` as an ordinary merge, was resolved by reading both sides, and
+passed ruff, `ruff format --check` and every test not marked `mongo` before it was pushed.
+MongoDB was not started here, so the `mongo` tests ran in CI: all five fork PRs report all
+seven checks green, "Integration tests" (the MongoDB service job) included.
+
+| upstream | branch | commits | what the resolution had to decide |
+|---|---|---|---|
+| #160 | `fix/47-cached-job-prefers-finished` | `e069654` | two new tests at the same spot in `testMongoQueue`; both kept |
+| #163 | `feat/72-modify-function` | `398a5ef` `9a6d09b` | `modifyFunction` beside `main`'s `getMatchesCross(username=)`; then the route's docstring said 202 where it answers 200 |
+| #169 | `feat/64-typed-search-results` | `1712f3c` | the `_search_request` / `_search_base` split, parsing in `main`'s mode |
+| #177 | `feat/57-family-actors` | `22b2730` | the actors and `main`'s requester, both on the family modification |
+| #183 | `docs/54-api-reference` | `5af77d4` | 51 client hunks: the typed client rebuilt with `main`'s six changes applied, then checked method by method against `main` |
+
+### 11.2 What git merged without a conflict, and got wrong
+
+#185 moved every `McritClient` method from `handle_response` to `self._handle`, so a client
+built with `raise_client_errors` / `raise_server_errors` raises typed errors instead of
+answering `None`. A method written before that - on a branch, or on `main` while #185 was
+open - still parses with `handle_response` directly and ignores the mode, and nothing fails
+until someone relies on it. Found:
+
+- **on `main`**: `rebuildPicBlockHashIndex`, `repairMinHashes`, `recomputeFamilyStats`,
+  which arrived while #185 was open. Fixed on `fix/client-errors-reach-every-method` (no PR
+  opened), with a test for the three and a ratchet that fails on any client method parsing
+  outside the client's mode;
+- **#163's `modifyFunction`, #169's typed searches, #177's `modifyFamily`**: fixed in their
+  merges, each with a test that fails on the bare call;
+- **the scaling stack (#194-#200)**: its second PR adds `rebuildFunctionRangeIndex` and
+  `rebuildBandDfIndex` the same way. The stack merges clean, and fixing two lines would mean
+  cascading `main` through seven stacked branches, so it was left as it is: once the ratchet
+  above is on `main`, it fails on those two in the stack's upstream CI.
+
+Also recorded: #169 asserts the dict search answers `None` in raw mode, and #183 makes every
+method honour raw mode. Whichever of the two lands second has to reconcile that test.
+
+### 11.3 The fork's `main`, and what that costs its PRs
+
+The fork's `main` is still 13 commits behind upstream `main`, untouched per §9. Its PRs are
+opened against it, so the five branches above now show upstream's 13 commits in their fork
+PR diffs as well - until the fork is synced with upstream, which is the owner's call (one
+click, a fast-forward, nothing of the fork's lost). The upstream PRs, which are the ones
+that get merged, show only their own changes.
+
+### 11.4 The sixteen that merge clean
+
+A clean textual merge has hidden a broken one often enough today (§10.4, §11.2) that the
+other sixteen were not taken on git's word either. For each, the merge with upstream `main`
+was built as a throwaway commit object - no branch or ref touched - and put through ruff,
+`ruff format --check` and every test not marked `mongo` in a detached worktree.
+
+*In progress when this was committed:* #162, #168, #193 and #194 pass; the other twelve
+are still running.
+
+### 11.5 Issues
+
+The fork's two open issues, r0ny123/mcrit#50 and #51, each ask the maintainer for a design
+decision (an adaptive band-df cutoff; the LogBucket cache keyed on its parameters). They were
+left alone at the owner's instruction.
