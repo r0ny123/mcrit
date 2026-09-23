@@ -1065,7 +1065,9 @@ the page even on a synthetic report with 349k function matches. Post
 
 `/data/specific_export/samples/<unknown or non-numeric id>` exports the whole corpus: 31.7 MB,
 all 66 samples, where one sample was asked for. `/data/specific_export/family/<unknown>` is a
-500, and a family without samples takes the whole-corpus path too. File
+500, and a family without samples takes the whole-corpus path too. That includes family 0,
+the unnamed family every mcrit storage keeps, which is empty here and has an export button on
+`/explore/families`: one click downloads everything. File
 `pr-text/issue-new-specific-export.md` as an issue, then open `fix/specific-export-unknown-id`
 with `pr-text/fix-specific-export-unknown-id.md`, putting the new number in place of `#NNN`.
 
