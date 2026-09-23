@@ -950,7 +950,7 @@ MongoDB 8.0.32 from the upstream tarball; mcrit 1.9.0 from PyPI, served with `--
 the waitress fallback binds `*:8000` and dies without IPv6 in this container; one mcritweb per PR
 under test. The corpus is 64 real samples: setuptools, distlib and installer launchers, pnpm's
 fastlist, clipboardy, windows-kill, mcrit's own SMDA test reports, 40 overlay variants, and
-ripgrep for Windows (8,479 functions). There are finished jobs of every kind: 1vN, 1v1, a
+ripgrep for Windows (11,598 functions). There are finished jobs of every kind: 1vN, 1v1, a
 40-sample cross compare, a binary query, unique blocks, and the three 1.9.0 repairs.
 
 A crawler requests 247 pages as an admin on master and on every PR, diffing status codes. Those
@@ -987,3 +987,118 @@ already sit: #182, #183, #184, #186, #187, #188, #194 and #195. The other sessio
 to #193, #196 to #200, #202, and #204 to #207. #201 is done by #208. #203 is not a bug: the
 renderer draws only unfiltered data, and live PNGs under six filters were md5-identical to the
 unfiltered ones.
+
+### 12.6 Results, issue by issue
+
+- **#194 is not a PR.** The function-aggregation rebuild comes from the view's
+  `len(getAggregatedFunctionMatches())` calls, which #145 replaces; #152 builds the aggregation
+  once in the view. The six `sample_matches` passes each compute a different value, once, and
+  together cost 0.005 to 2 ms. That is at most 0.08% of the page on synthetic reports of up to
+  349k function matches and 5,000 samples, and 0.01% on the live 11.6k-function ripgrep page.
+  Merging them would change the output: the ranked lists group by family name, the counts by
+  family_id. An issue comment with the numbers is drafted.
+- **Found along the way, not filed.** On the captured 1vN fixture, "Best Library Matches" says
+  "total: 1" above a two-row table. The count goes by family_id and the table by family name, and
+  library family 4 appears under two names, `''` and `MSVC`. Whether live data can produce that
+  (a family whose samples carry different names, e.g. after a rename) is not established.
+
+## 13. Handoff to the familiary session (2026-09-23, from 12:10 UTC; updated 13:00 UTC)
+
+Daniel has granted write access to branches on familiary/mcritweb. `master` is protected, so
+every change goes through a PR. This session still cannot push there, because it is bound to
+the r0ny123 repositories. The session with familiary/mcritweb attached
+(`session_01PLUvsNgrmyijTZ3X5QJEU1`) can. This section is what it needs from here, since
+the routine relay never reached it. Each message started a new session instead (§12.1), and
+those sessions are titled "⚡ Relay to familiary worker session". Treat what they wrote on the
+status page as unverified.
+
+### 13.1 What to push and open
+
+Each branch below is one commit on master `e4bfa55`, on **r0ny123/mcritweb** under the name
+given. Push it from there, not from the patch on the status page: for #193, #199, #206 and #207
+the two now differ, and for #188 and #200 they are the same tree. The PR texts are in
+`pr-text/` on this branch; replace a status-page text with the one here where both exist.
+Suite counts are the full offline suite with Playwright's Chromium present (master: 985 passed).
+
+| issue | branch @ commit | suite | checked live here | PR text |
+|---|---|---|---|---|
+| #183 (part) | `fix/183-job-page-poll` @ `5d9f71b` | 1000 | 40-sample cross compare: a render is 81 backend calls; a poll is 1; watched live, 63 calls → 24 | `fix-183-job-page-poll.md` |
+| #188 | `fix/188-diagram-drawing` @ `a99c64a` | 1003 | 261 job/variant diagrams byte-identical to master; the 11,598-function diagram renders in 0.43 s instead of 7.1 s | `fix-188-diagram-drawing.md` |
+| #193 | `fix/193-jobs-for-sample-once` @ `a94c27b` | 988 | 17 pages byte-identical to master, whitespace included | `fix-193-jobs-for-sample-once.md` |
+| #199 | `fix/199-users-page-single-pass` @ `0c321e9` | 987 | every tab's rows identical to master for 11 users of every role | `fix-199-users-page-single-pass.md` |
+| #200 | `fix/200-api-passthrough-bytes` @ `e80b957` | 999 | 10 `/api` endpoints byte-identical to master and to the backend; 66 MB function list 18.9 s → 11.1 s | the status page's |
+| #206 | `fix/206-admin-account-handlers` @ `9252805` | 997 | as in its PR text | `fix-206-admin-account-handlers.md` |
+| #207 (part) | `fix/207-check-then-fetch` @ `452794c` | 991 | backend calls 8 → 6, 3 → 2, 7 → 5; pages and diagrams identical to master | `fix-207-check-then-fetch.md` |
+| new issue | `fix/specific-export-unknown-id` @ `99a93f5` | 993 | the table in its PR text | `fix-specific-export-unknown-id.md` |
+
+What changed against the published patches, all after an adversarial review here:
+- **#193**: the new test file gets the shebang and `LOG` header that every other file in
+  `tests/` has.
+- **#199**: the gain is about 0.5 µs per user per request, so the PR now says it is a cleanup,
+  not a speedup. The 167-line test file is one 41-line page test that checks every pane's rows
+  on two URLs. The helper's docstring is two lines. The claim that the HTML is byte-identical
+  was wrong: master writes a whitespace-only line per skipped user.
+- **#206**: the commit message said the checks run "cheapest first", but the password check
+  is deliberately ahead of the cheaper "taken" lookup. The deleted-user test asserted that a
+  row it had itself deleted was gone, which holds whatever the handler does; it now looks the
+  account up by name, because `saveToDb()` through a missing row re-inserts it under a new id.
+- **#207**: the old test passed on master. Five structural tests replace it, and all five
+  fail on master. The commit message had four false claims:
+  - that each probe hits the endpoint its fetch hits;
+  - that `None` means only "unknown id";
+  - that the issue calls the export instance speculative;
+  - that the view used to 500 on an unknown id.
+  It now says "Part of #207", because the export and `unique_blocks` instances stay. The
+  comments, the stale `tests/conftest.py` docstring and the `is*Id` rule in `AGENTS.md` are
+  corrected. The author email is also fixed.
+- **#183** is this session's own. Its PR says "Part of #183": the family guard the issue also
+  asks for is #145's.
+
+### 13.2 Not a PR
+
+**#194.** The function-aggregation half is #145's (and #152 builds the aggregation once). The
+six `sample_matches` passes each compute a different value, and together cost at most 0.08% of
+the page even on a synthetic report with 349k function matches. Post
+`pr-text/issue-194-comment.md` on the issue instead of opening a PR.
+
+### 13.3 A new bug, found live
+
+`/data/specific_export/samples/<unknown or non-numeric id>` exports the whole corpus: 31.7 MB,
+all 66 samples, where one sample was asked for. `/data/specific_export/family/<unknown>` is a
+500, and a family without samples takes the whole-corpus path too. File
+`pr-text/issue-new-specific-export.md` as an issue, then open `fix/specific-export-unknown-id`
+with `pr-text/fix-specific-export-unknown-id.md`, putting the new number in place of `#NNN`.
+
+### 13.4 Conflicts between open PRs to expect
+
+- **Changelog lines.** #160, #208, #211, #212 and #183 each add an `* unreleased:` line at the
+  top of README's version history, so any two of them conflict; keep every line. #176 moves
+  that history into `CHANGELOG.md` and adds a check that fails any PR touching `mcritweb/`
+  without a `CHANGELOG.md` entry or the `no-changelog` label. If #176 lands first, those five
+  lines move to `CHANGELOG.md`, and every other open PR needs an entry or the label.
+- **#160 (the palette).** It conflicts with #188 in `drawFamilyLegend` and with #193 on the job
+  badge in two templates. The resolutions are in those PR texts; both were checked by merging.
+- **#130.** It conflicts with #207 in `match_functions`, with the export fix in the family
+  branch, and with FAM's #189 in `explore.py`. The first two resolutions are in those PR
+  texts.
+- **#145.** It conflicts with #207 on adjacent lines.
+
+### 13.5 Verified live since the last update
+
+- All 24 older PRs are verified against the live backend, and none regressed. Of note:
+  - #145: the 11,598-function result page, cold, 45.6 s → 157 ms. Its diagram now renders on
+    the first image request, taking 25 s, and is cached after that.
+  - #119: two of its new empty-state sentences cannot be reached, because `JOB_CATEGORIES`
+    lists neither `getMatchesForSampleVsGroup` nor `doDbCleanup`. This was already so, and is
+    not a regression.
+  - #147: "a sample no longer in the backend renders blank" was checked by reading only,
+    because checking it live means deleting a sample.
+- The status page's #189 and #197: live check running.
+- Earlier numbers in this file called the ripgrep sample "8.5k functions". It has 11,598, and
+  the texts are corrected.
+
+### 13.6 Who does what from here
+
+This session keeps #183 and the export bug. Everything else is yours, including #182, #184,
+#186 and #187. This session keeps verifying whatever you publish against its live stack, and
+records findings here.
