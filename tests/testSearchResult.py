@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from smda.common.SmdaReport import SmdaReport
 
-from mcrit.client.McritClient import McritClient
+from mcrit.client.McritClient import McritBadRequest, McritClient
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
@@ -102,6 +102,19 @@ class McritClientTypedSearchTest(unittest.TestCase):
         with patch("mcrit.client.McritClient.requests.get", return_value=MagicMock(status_code=400)):
             self.assertIsNone(client.searchSamples("bad query"))
             self.assertIsNone(client.searchFamilies("bad query"))
+
+    def test_a_raising_client_raises_from_every_search(self):
+        """The client's error modes reach the typed searches as well as the dict ones. The typed
+        ones were written before the modes existed and parsed with handle_response directly,
+        which answers None whatever mode the client is in."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True)
+        failed = MagicMock(status_code=400, url="http://mcrit.test/search/samples")
+        failed.json.return_value = {"status": "failed", "data": {"message": "bad query"}}
+        with patch("mcrit.client.McritClient.requests.get", return_value=failed):
+            for search in (client.searchSamples, client.searchFamilies, client.searchFunctions, client.search_samples):
+                with self.subTest(search=search.__name__ if hasattr(search, "__name__") else "search_samples"):
+                    with self.assertRaises(McritBadRequest):
+                        search("bad query")
 
 
 if __name__ == "__main__":
