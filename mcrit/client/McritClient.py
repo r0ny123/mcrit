@@ -217,7 +217,7 @@ class McritClient:
         response = requests.get(f"{self.mcrit_server}/rebuild_picblockhash_index", headers=self.headers)
         if self.raw:
             return response
-        return handle_response(response)
+        return self._handle(response)
 
     def repairMinHashes(self):
         """
@@ -226,7 +226,7 @@ class McritClient:
         response = requests.post(f"{self.mcrit_server}/repair_minhashes", headers=self.headers)
         if self.raw:
             return response
-        return handle_response(response)
+        return self._handle(response)
 
     def recomputeFamilyStats(self):
         """
@@ -235,7 +235,7 @@ class McritClient:
         response = requests.post(f"{self.mcrit_server}/recompute_family_stats", headers=self.headers)
         if self.raw:
             return response
-        return handle_response(response)
+        return self._handle(response)
 
     def recalculatePicHashes(self):
         response = requests.get(f"{self.mcrit_server}/recalculate_pichashes", headers=self.headers)

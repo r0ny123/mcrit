@@ -15,6 +15,16 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **`McritClient`'s error modes reach the three maintenance jobs.** `rebuildPicBlockHashIndex`,
+  `repairMinHashes` and `recomputeFamilyStats` parsed their answer with `handle_response`
+  directly instead of `self._handle`, so a client built with `raise_client_errors` or
+  `raise_server_errors` still got `None` from them - a refused or failed job request that looked
+  like one nothing had answered. They landed while the modes were being written, which is how
+  they were missed. `testClientErrors` now fails on any method that parses outside the client's
+  mode, not only on these three.
+
 ## [1.9.0] - 2026-09-08
 
 Correctness and operator-recovery release, plus a large `getUniqueBlocks` speedup. **Matching
