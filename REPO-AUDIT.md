@@ -911,3 +911,79 @@ would still carry is §11.2's pair of methods in the scaling stack.
 The fork's two open issues, r0ny123/mcrit#50 and #51, each ask the maintainer for a design
 decision (an adaptive band-df cutoff; the LogBucket cache keyed on its parameters). They were
 left alone at the owner's instruction.
+
+## 12. familiary/mcritweb (2026-09-23)
+
+`fkie-cad/mcritweb` now lives at **`familiary/mcritweb`**: identical history, PR numbers
+continuing, `master` at `e4bfa55` (1.5.0 plus CODEOWNERS). The owner asked for its open issues
+to be worked end to end, every change tested against a live mcrit and mcritweb, and every PR
+left review-ready for Daniel, with nothing merged.
+
+### 12.1 Access, and how the work is split
+
+This session's GitHub access covers the r0ny123 repositories only. Attaching `familiary/mcritweb`
+was refused ("cross-tier adds are not supported"), so a second session was started with it as its
+repository: `session_01PLUvsNgrmyijTZ3X5QJEU1`. It reads the issues, PRs and checks through the
+API. **Writes to familiary - push, comment, PR - answer 403 until the Claude GitHub App is
+installed on the familiary organisation**; the owner has been told. Messages reach that session
+through a routine that fires into it (`trig_01V1Dy7ENSSbsmxmow8AVNFH`); it answers on a private
+status page, "familiary mcritweb triage". The PRs headed by fork branches (#107 to #176, #208 to
+#212) are changed from here, since only this session can push to the fork.
+
+### 12.2 State found
+
+- **48 open issues.** 26 were filed on 2026-09-23 (#182 to #207), almost all performance
+  findings read from the code and marked as not measured. Of the 22 older ones, 21 are covered by
+  an open PR and #76 is backend-side (mcrit's search).
+- **29 open PRs**, all green on Python 3.11 to 3.14, none reviewed, all "blocked" only by the new
+  CODEOWNERS review. #208 to #212 were opened on 2026-09-23 from fork branches `codex/*` by
+  another tool: #209 to #212 port the fork's #67 to #70 (#212 tree-identical, the other three with
+  their tests cut down), and #208 fixes #201.
+- **Fork work never opened upstream: none that should be.** The four fork branches with no PR are
+  already in master (`fix/56-…` through 0eb93f1, 8573a13 and 239a17a; `fix/69-…` through 09847a6),
+  an ancestor of #119's branch (`fix/65-empty-state-map-drift`), or notes (`fix/triage-batch`,
+  which touches `work/` only).
+
+### 12.3 The live stack
+
+MongoDB 8.0.32 from the upstream tarball; mcrit 1.9.0 from PyPI, served with `--gunicorn`, since
+the waitress fallback binds `*:8000` and dies without IPv6 in this container; one mcritweb per PR
+under test. The corpus is 64 real samples: setuptools, distlib and installer launchers, pnpm's
+fastlist, clipboardy, windows-kill, mcrit's own SMDA test reports, 40 overlay variants, and
+ripgrep for Windows (8,479 functions). There are finished jobs of every kind: 1vN, 1v1, a
+40-sample cross compare, a binary query, unique blocks, and the three 1.9.0 repairs.
+
+A crawler requests 247 pages as an admin on master and on every PR, diffing status codes. Those
+pages are every listing, detail, result, download, link-hunt, CFG and admin page for that data.
+
+- **Master has five 500s.**
+  - The three repair jobs' result pages, because `data.result()`'s dispatch falls off its end.
+  - GET `/admin/change_password` and `/admin/change_username`. These are debug-mode renderings of
+    a documented 400.
+- **No PR adds one.**
+  - #107 and #212 remove the three result-page 500s.
+  - #132's 302 on `/data/jobs` is its design.
+  - #172's head is 244 commits behind master, so it was crawled on GitHub's merge ref, and that
+    matches master.
+
+### 12.4 The five ported PRs
+
+| PR | pushed | what, and the evidence |
+|---|---|---|
+| #208 | `747b377` `aab8976` | `unreleased:` lowercase and the house test header. `/api/functions` also read the ID list from `request.data`, which Flask empties for a form body, and a form body is what `curl --data 1,2` sends. Live: master 500, `1c973cd` 400, `aab8976` 200 with the functions. 990 passed. |
+| #209 | `cfa945c` | the house header; the lint names the template line instead of raising IndexError on an endif written differently. 988 passed; a reverted template still fails it. |
+| #210 | `48ed166` | the house header; a test that each ADR pattern still finds references, so the checks cannot pass on nothing. 989 passed. |
+| #211 | - | nothing needed. Live: master leaves `temp/uploads/<sha256>` behind a submit, #211 leaves nothing. 987 passed. |
+| #212 | `2f30f4d` | the comment and docstring said an unlisted maintenance job "is reported as an invalid job id". It is a 500 on master, and would be the incompatible-result page under #107. Now worded so it holds either way. Live: all three repairs schedule and render against mcrit 1.9.0. 1022 passed. |
+
+Every head passed the full suite and ruff before its push. One README area is shared: #160,
+#176, #208, #211 and #212 each add an `unreleased:` line at the same spot, so whichever lands
+later has a one-line conflict. That is the repository's convention, not a defect.
+
+### 12.5 The issues, divided
+
+This session takes the result-page and job-page issues, where its own #145, #152 and #159
+already sit: #182, #183, #184, #186, #187, #188, #194 and #195. The other session takes #189
+to #193, #196 to #200, #202, and #204 to #207. #201 is done by #208. #203 is not a bug: the
+renderer draws only unfiltered data, and live PNGs under six filters were md5-identical to the
+unfiltered ones.
