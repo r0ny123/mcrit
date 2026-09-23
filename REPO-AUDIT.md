@@ -1127,5 +1127,12 @@ familiary/mcritweb:
     sh open-prs.sh
 
 A branch that already has an open PR is skipped, so a second run only fills in what is missing.
+
+**Why no Claude session can do this step.** At 13:55 UTC a session started with familiary/mcritweb
+as its source (`session_01BAXB46p3uvEEfNa8qJ8ZCR`) tried it: every push and every PR from the
+fork was refused with `403 Resource not accessible by integration`. That is the Claude GitHub
+App's access to the familiary organisation, not r0ny123's permission on the repository. Either
+an owner of familiary installs the App there (claude.ai/connect-github), after which that
+session can simply be told to re-run, or r0ny123 runs `open-prs.sh` with their own `gh` login.
 Nothing is merged. The familiary session should not run its `apply-and-push.sh`, or the same
 branch names would be pushed twice from different commits.
