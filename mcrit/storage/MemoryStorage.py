@@ -327,8 +327,8 @@ class MemoryStorage(StorageInterface):
             for function_id, function_entry in self._functions.items():
                 if family_id == function_entry.family_id:
                     self._functions[function_id].family_id = new_family_id
-                    self._pichashes[function_entry.pichash].remove((family_id, sample_id, function_id))
-                    self._pichashes[function_entry.pichash].add((new_family_id, sample_id, function_id))
+                    self._pichashes[function_entry.pichash].remove((family_id, function_entry.sample_id, function_id))
+                    self._pichashes[function_entry.pichash].add((new_family_id, function_entry.sample_id, function_id))
         self._updateDbState()
         return True
 
