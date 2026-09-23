@@ -415,11 +415,29 @@ class LocalQueue:
             return "terminated"
         return "unknown"
 
-    def _matching_jobs(self, method=None, state=None, filter=None, username=None, ascending=False):
+    @staticmethod
+    def _has_matching_first_argument(job_document, sample_ids) -> bool:
+        # the same selection MongoQueue makes on payload.descriptor (first positional
+        # argument via rearrange_params' "0" key), applied to payload.params instead
+        first_argument = json.loads(job_document["payload"]["params"]).get("0")
+        try:
+            return int(first_argument) in sample_ids
+        except (TypeError, ValueError):
+            return False
+
+    def _matching_jobs(self, method=None, state=None, filter=None, username=None, ascending=False, sample_ids=None, job_ids=None):
         # the same selection MongoQueue._job_query makes (fkie-cad/mcritweb#57), in submission order
+        if sample_ids is not None and method is None:
+            return []
+        selected_sample_ids = set(sample_ids) if sample_ids is not None else None
+        selected_job_ids = set(job_ids) if job_ids is not None else None
         jobs = []
-        for job_document in self._jobs.values():
+        for job_id, job_document in self._jobs.items():
             if method is not None and job_document["payload"]["method"] != method:
+                continue
+            if selected_sample_ids is not None and not self._has_matching_first_argument(job_document, selected_sample_ids):
+                continue
+            if selected_job_ids is not None and job_id not in selected_job_ids:
                 continue
             if state is not None and self._identifyJobState(job_document) != state:
                 continue
@@ -433,14 +451,15 @@ class LocalQueue:
         jobs.sort(key=lambda job_document: job_document["number"], reverse=not ascending)
         return jobs
 
-    def get_jobs(self, start_index: int, limit: int, method=None, state=None, ascending=False, filter=None, username=None):
-        jobs = [Job(job_document, self) for job_document in self._matching_jobs(method=method, state=state, filter=filter, username=username, ascending=ascending)]
+    def get_jobs(self, start_index: int, limit: int, method=None, state=None, ascending=False, filter=None, username=None, sample_ids=None, job_ids=None):
+        matching = self._matching_jobs(method=method, state=state, filter=filter, username=username, ascending=ascending, sample_ids=sample_ids, job_ids=job_ids)
+        jobs = [Job(job_document, self) for job_document in matching]
         if limit:
             return jobs[start_index : start_index + limit]
         return jobs[start_index:]
 
-    def get_job_count(self, method=None, state=None, filter=None, username=None) -> int:
-        return len(self._matching_jobs(method=method, state=state, filter=filter, username=username))
+    def get_job_count(self, method=None, state=None, filter=None, username=None, sample_ids=None, job_ids=None) -> int:
+        return len(self._matching_jobs(method=method, state=state, filter=filter, username=username, sample_ids=sample_ids, job_ids=job_ids))
 
     def get_cached_job_id(self, payload):
         return self._descriptor_to_job[payload["descriptor"]]

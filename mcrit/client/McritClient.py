@@ -726,13 +726,15 @@ class McritClient:
         """The query string of the parameters that select jobs, URL-encoded (a filter is free text)."""
         params = {"method": method, "filter": filter, "state": state, "username": username, **more}
         present = {key: value for key, value in params.items() if value is not None and value is not False and value != 0}
-        return "?" + urllib.parse.urlencode(present) if present else ""
+        return "?" + urllib.parse.urlencode(present, safe=",") if present else ""
 
-    def getQueueData(self, start=0, limit=0, method=None, filter=None, state=None, ascending=False, username=None):
+    def getQueueData(self, start=0, limit=0, method=None, filter=None, state=None, ascending=False, username=None, sample_ids=None, job_ids=None):
         """
         Get queue data, optionally from <start> and <limit> many, narrowed to a <method>, a
         <state>, jobs whose parameters contain <filter> (case-insensitive) and/or jobs requested
         by <username>. The narrowing is applied before paging, so a page is a page of the matches.
+        <sample_ids> selects jobs of <method> by their first argument (the server then requires
+        <method>); <job_ids> selects jobs by id.
         Supported by mcritweb API pass-through
         """
         query_string = self._job_selection_query(
@@ -743,6 +745,8 @@ class McritClient:
             start=start if isinstance(start, int) else 0,
             limit=limit if isinstance(limit, int) else 0,
             ascending="True" if ascending else None,
+            sample_ids=None if sample_ids is None else ",".join(str(sample_id) for sample_id in sample_ids),
+            job_ids=None if job_ids is None else ",".join(str(job_id) for job_id in job_ids),
         )
         response = requests.get(f"{self.mcrit_server}/jobs/{query_string}", headers=self.headers)
         if self.raw:
@@ -751,13 +755,20 @@ class McritClient:
         if data is not None:
             return [Job(job_data, None) for job_data in data]
 
-    def getQueueCount(self, method=None, filter=None, state=None, username=None):
+    def getQueueCount(self, method=None, filter=None, state=None, username=None, sample_ids=None, job_ids=None):
         """
         How many jobs getQueueData would list for the same selection - what a paginated listing
         needs to size itself.
         Supported by mcritweb API pass-through
         """
-        query_string = self._job_selection_query(method=method, filter=filter, state=state, username=username)
+        query_string = self._job_selection_query(
+            method=method,
+            filter=filter,
+            state=state,
+            username=username,
+            sample_ids=None if sample_ids is None else ",".join(str(sample_id) for sample_id in sample_ids),
+            job_ids=None if job_ids is None else ",".join(str(job_id) for job_id in job_ids),
+        )
         response = requests.get(f"{self.mcrit_server}/jobs/count{query_string}", headers=self.headers)
         if self.raw:
             return response
