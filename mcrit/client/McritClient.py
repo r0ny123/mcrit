@@ -310,6 +310,22 @@ class McritClient:
             return FamilyEntry.fromDict(data)
         return None
 
+    def getFamiliesByIds(self, family_ids: List[int]) -> Any:
+        """
+        Get all FamilyEntry objects identified by the provided list of family_ids, in a dict with <family_id> as key.
+        Entries carry no sample lists, like getFamily(..., with_samples=False).
+        """
+        if not family_ids:
+            return {}
+        family_id_string = ",".join(["%d" % fid for fid in family_ids])
+        response = requests.post(f"{self.mcrit_server}/families/ids", data=family_id_string, headers=self.headers)
+        if self.raw:
+            return response
+        data = self._handle(response)
+        if data is not None:
+            return {int(k): FamilyEntry.fromDict(v) for k, v in data.items()}
+        return {}
+
     def getFamilies(self) -> Any:
         """
         Get all FamilyEntry objects in a dict, with <family_id> as key
@@ -391,6 +407,22 @@ class McritClient:
         data = self._handle(response)
         if data is not None:
             return SampleEntry.fromDict(data)
+
+    def getSamplesByIds(self, sample_ids: List[int]) -> Any:
+        """
+        Get all SampleEntries identified by the provided list of sample_ids, in a dict with <sample_id> as key.
+        Negative ids are resolved against query samples, like getSampleById.
+        """
+        if not sample_ids:
+            return {}
+        sample_id_string = ",".join(["%d" % sid for sid in sample_ids])
+        response = requests.post(f"{self.mcrit_server}/samples/ids", data=sample_id_string, headers=self.headers)
+        if self.raw:
+            return response
+        data = self._handle(response)
+        if data is not None:
+            return {int(k): SampleEntry.fromDict(v) for k, v in data.items()}
+        return {}
 
     def getSamples(self, start=0, limit=0):
         """

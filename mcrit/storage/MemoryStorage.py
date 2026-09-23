@@ -5,7 +5,7 @@ import operator
 import re
 import uuid
 from collections import defaultdict
-from copy import deepcopy
+from copy import copy, deepcopy
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
@@ -648,6 +648,17 @@ class MemoryStorage(StorageInterface):
         if family_id in self._families:
             return self._families[family_id]
         return None
+
+    def getFamilyEntriesByIds(self, family_ids: List[int]) -> Dict[int, "FamilyEntry"]:
+        entries = {}
+        for family_id in family_ids:
+            entry = self.getFamily(family_id)
+            if entry is not None:
+                # getFamily hands out the stored entry itself, and GET /families/<id> attaches
+                # its sample list to that; a batch entry carries none, as on MongoDbStorage
+                entries[family_id] = copy(entry)
+                entries[family_id].samples = None
+        return entries
 
     def getFamilyId(self, family_name: str) -> Optional[int]:
         for fam_id, fam_entry in self._families.items():
