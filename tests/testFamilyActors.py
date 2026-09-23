@@ -28,22 +28,23 @@ class FamilyEntryActors(unittest.TestCase):
 
 
 class FamilyActorsRoute(unittest.TestCase):
-    def _put(self, body):
+    def _put(self, body, headers=None):
         payload = json.dumps(body)
-        environ = falcon.testing.create_environ(path="/families/5", method="PUT", body=payload, headers={"Content-Type": "application/json"})
+        environ = falcon.testing.create_environ(path="/families/5", method="PUT", body=payload, headers={"Content-Type": "application/json", **(headers or {})})
         return falcon.Request(environ)
 
     def test_actors_are_validated_and_passed_on(self):
         index = MagicMock()
         index.modifyFamily.return_value = True
         resp = falcon.Response()
-        FamilyResource(index).on_put(self._put({"actors": ["Actor A", "APT-1"]}), resp, 5)
+        # the requester travels with the job, as for every other modification (#37)
+        FamilyResource(index).on_put(self._put({"actors": ["Actor A", "APT-1"]}, {"username": "alice"}), resp, 5)
         self.assertEqual(falcon.HTTP_202, resp.status)
-        index.modifyFamily.assert_called_once_with(5, {"actors": ["Actor A", "APT-1"]}, force_recalculation=True)
+        index.modifyFamily.assert_called_once_with(5, {"actors": ["Actor A", "APT-1"]}, force_recalculation=True, username="alice")
         # a comma separated string is accepted too, malformed names are not
         index.modifyFamily.reset_mock()
         FamilyResource(index).on_put(self._put({"actors": "one, two"}), falcon.Response(), 5)
-        index.modifyFamily.assert_called_once_with(5, {"actors": ["one", " two"]}, force_recalculation=True)
+        index.modifyFamily.assert_called_once_with(5, {"actors": ["one", " two"]}, force_recalculation=True, username=None)
         index.modifyFamily.reset_mock()
         resp = falcon.Response()
         FamilyResource(index).on_put(self._put({"actors": ["<script>"]}), resp, 5)
