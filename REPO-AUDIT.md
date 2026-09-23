@@ -789,7 +789,9 @@ Noted, not changed:
 ### 10.8 After the branch updates
 
 **The fork's own open PR.** Of the fork's 23 open PRs, 21 head a branch updated in §10.3 and
-one (`fix/37-show-job-owner`, #172 upstream) merges clean. The last, r0ny123/mcritweb#67
+one (`fix/37-show-job-owner`, #172 upstream) merges clean - and its merge with 1.5.0, built as
+a throwaway commit and test-run like the mcrit ones in §11.4, passes too (989, ruff clean).
+The last, r0ny123/mcritweb#67
 (`feat/schedule-maintenance-jobs`, the admin buttons for mcrit 1.9.0's three repairs), exists
 only in the fork and was 247 commits behind 1.5.0. It took `master` without a conflict, and
 review turned up two gaps in the PR itself:
@@ -808,13 +810,15 @@ review turned up two gaps in the PR itself:
 `fix/65-empty-state-map-drift`, `fix/69-duo-page-hover-and-edge-throws`, `fix/triage-batch` -
 and were left untouched, per the owner's rule about branches unrelated to a PR or issue.
 
-**New fix branches, cut from 1.5.0, no PR opened** (§10.7 has the findings):
+**New fix branches, cut from 1.5.0** (§10.7 has the findings). The owner asked for PRs;
+upstream is out of this session's reach - it accepts only repositories of the owner it was
+started with - so they are open in the fork, ready to be proposed upstream as they stand:
 
-| branch | commits | passed | what |
-|---|---|---|---|
-| `fix/close-the-check-icon-tags` | `4e5563c` | 989 | thirteen icons closed; a lint over the template tree for any conditional that closes a tag in one branch only, and a render of the sample row both ways |
-| `fix/docs-left-stale-by-the-integration` | `ec5cd42` `12c8dca` | 989 | the ADR references, with `tests/testAdrReferences.py` holding them to existing files and matching numbers; the duplicated Uploads bullet |
-| `fix/submit-keeps-no-upload-copy` | `5e47c2d` | 987 | `data.submit` keeps no copy; a test submits an unmapped and a dumped binary and finds `temp/uploads` empty |
+| PR | branch | commits | passed | what |
+|---|---|---|---|---|
+| r0ny123/mcritweb#68 | `fix/close-the-check-icon-tags` | `4e5563c` | 989 | thirteen icons closed; a lint over the template tree for any conditional that closes a tag in one branch only, and a render of the sample row both ways |
+| r0ny123/mcritweb#69 | `fix/docs-left-stale-by-the-integration` | `ec5cd42` `12c8dca` | 989 | the ADR references, with `tests/testAdrReferences.py` holding them to existing files and matching numbers; the duplicated Uploads bullet |
+| r0ny123/mcritweb#70 | `fix/submit-keeps-no-upload-copy` | `5e47c2d` | 987 | `data.submit` keeps no copy; a test submits an unmapped and a dumped binary and finds `temp/uploads` empty |
 
 The last two both edit the AGENTS.md Uploads bullets on neighbouring lines, so whichever
 lands second has a one-line conflict; the commit message says how to resolve it.
@@ -850,9 +854,9 @@ open - still parses with `handle_response` directly and ignores the mode, and no
 until someone relies on it. Found:
 
 - **on `main`**: `rebuildPicBlockHashIndex`, `repairMinHashes`, `recomputeFamilyStats`,
-  which arrived while #185 was open. Fixed on `fix/client-errors-reach-every-method` (no PR
-  opened), with a test for the three and a ratchet that fails on any client method parsing
-  outside the client's mode;
+  which arrived while #185 was open. Fixed on `fix/client-errors-reach-every-method`
+  (r0ny123/mcrit#52), with a test for the three and a ratchet that fails on any client method
+  parsing outside the client's mode;
 - **#163's `modifyFunction`, #169's typed searches, #177's `modifyFamily`**: fixed in their
   merges, each with a test that fails on the bare call;
 - **the scaling stack (#194-#200)**: its second PR adds `rebuildFunctionRangeIndex` and
@@ -863,13 +867,13 @@ until someone relies on it. Found:
 Also recorded: #169 asserts the dict search answers `None` in raw mode, and #183 makes every
 method honour raw mode. Whichever of the two lands second has to reconcile that test.
 
-### 11.3 The fork's `main`, and what that costs its PRs
+### 11.3 The fork's `main`
 
-The fork's `main` is still 13 commits behind upstream `main`, untouched per §9. Its PRs are
-opened against it, so the five branches above now show upstream's 13 commits in their fork
-PR diffs as well - until the fork is synced with upstream, which is the owner's call (one
-click, a fast-forward, nothing of the fork's lost). The upstream PRs, which are the ones
-that get merged, show only their own changes.
+**Corrected the same day.** This section first said the fork's `main` was still 13 commits
+behind upstream, so the five fork PRs above would show upstream's commits in their diffs until
+it was synced. That was read off a local ref: the fork's `main` had already been fast-forwarded
+to upstream's `e94d339` - by the owner, not here - so it is level, and every fork PR shows only
+its own change.
 
 ### 11.4 The sixteen that merge clean
 
@@ -878,8 +882,8 @@ other sixteen were not taken on git's word either. For each, the merge with upst
 was built as a throwaway commit object - no branch or ref touched - and put through ruff,
 `ruff format --check` and every test not marked `mongo` in a detached worktree.
 
-*In progress when this was committed:* #162, #168, #193 and #194 pass; the other twelve
-are still running.
+*In progress when this was committed:* #162, #168, #170, #175, #176, #193, #194, #195, #196
+and #197 pass; #178, #179, #181, #198, #199 and #200 are still running.
 
 ### 11.5 Issues
 
