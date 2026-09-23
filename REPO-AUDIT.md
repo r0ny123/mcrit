@@ -882,8 +882,25 @@ other sixteen were not taken on git's word either. For each, the merge with upst
 was built as a throwaway commit object - no branch or ref touched - and put through ruff,
 `ruff format --check` and every test not marked `mongo` in a detached worktree.
 
-*In progress when this was committed:* #162, #168, #170, #175, #176, #193, #194, #195, #196
-and #197 pass; #178, #179, #181, #198, #199 and #200 are still running.
+**All sixteen pass** - ruff and `ruff format --check` clean, every non-`mongo` test green:
+
+| upstream | head | passed | | upstream | head | passed |
+|---|---|---|---|---|---|---|
+| #162 | `0362447` | 212 | | #193 | `30f590a` | 222 |
+| #168 | `2defd5f` | 211 | | #194 | `9ebdfd6` | 218 |
+| #170 | `74afed6` | 217 | | #195 | `6d579dc` | 222 |
+| #175 | `22596e5` | 210 | | #196 | `5b48854` | 222 |
+| #176 | `a1ff15b` | 213 | | #197 | `10748bc` | 222 |
+| #178 | `499be21` | 219 | | #198 | `8b796ce` | 222 |
+| #179 | `b7dd292` | 215 | | #199 | `db02be2` | 227 |
+| #181 | `6bb9388` | 211 | | #200 | `472e3a7` | 229 |
+
+The 22nd, #204 (`ida-bulk-submit`, `65dd5e2`), already contains `main`; its head passes
+the same checks (235). So all 22 open upstream mcrit PRs are mergeable into today's `main`
+and pass there, bar the `mongo` tests, which CI ran on the five that were changed (§11.1).
+None of the sixteen was
+touched: a clean, passing merge needs nothing from the branch. The one thing a merge of theirs
+would still carry is §11.2's pair of methods in the scaling stack.
 
 ### 11.5 Issues
 
