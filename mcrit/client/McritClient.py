@@ -226,7 +226,7 @@ class McritClient:
         response = requests.get(f"{self.mcrit_server}/rebuild_function_range_index", headers=self.headers)
         if self.raw:
             return response
-        return handle_response(response)
+        return self._handle(response)
 
     def rebuildBandDfIndex(self):
         """
@@ -235,7 +235,7 @@ class McritClient:
         response = requests.get(f"{self.mcrit_server}/rebuild_band_df_index", headers=self.headers)
         if self.raw:
             return response
-        return handle_response(response)
+        return self._handle(response)
 
     def repairMinHashes(self):
         """
