@@ -1002,49 +1002,64 @@ unfiltered ones.
   library family 4 appears under two names, `''` and `MSVC`. Whether live data can produce that
   (a family whose samples carry different names, e.g. after a rename) is not established.
 
-## 13. Handoff to the familiary session (2026-09-23, from 12:10 UTC; last updated 14:00 UTC)
+## 13. The PR set for familiary (2026-09-23, from 12:10 UTC; last updated 16:57 UTC)
 
 Daniel has granted write access to branches on familiary/mcritweb; `master` is protected, so
 every change goes through a PR. This session cannot push there: it is bound to the r0ny123
 repositories, and adding familiary is refused as "cross-tier". The familiary session
 (`session_01PLUvsNgrmyijTZ3X5QJEU1`) built most of the fixes below and publishes them as
-patches on its status page, because its own writes were refused too.
+patches on its status page, because its own writes were refused too. r0ny123 opens the PRs
+with their own login, following the handoff prompt given with this update; `pr-text/open-prs.sh`
+does the pushing and opening (13.6).
 
 ### 13.1 One set of branches
 
-Every open issue with a fix is now one branch on **r0ny123/mcritweb**, one commit on master
-`e4bfa55`, with its PR text in `pr-text/` here. `pr-text/open-prs.sh` pushes each branch to
-familiary/mcritweb and opens its PR (see 13.6). These branches supersede the status page's
+Every open issue with a fix is one branch on **r0ny123/mcritweb**, with its PR text in
+`pr-text/` here. Each is one commit on master `e4bfa55`, except #198's, which is one commit on
+#182's branch and is proposed as a PR on it (13.4). These branches supersede the status page's
 patches and its `apply-and-push.sh`: several differ from the patches after review.
 
 Every branch was put through the full offline suite with Playwright's Chromium present (master:
-985 passed) and `ruff check .`. Each was checked live against mcrit 1.9.0 with 66 samples, 16
-families and 193 jobs. That is five times the familiary session's instance, and it reaches
-cases that one could not. No two branches in the set conflict with each other.
+985 passed) and `ruff check .`, checked live against mcrit 1.9.0 with 66 samples, 16 families
+and about 250 jobs, and reviewed adversarially until the review came back clean.
 
 | issue | branch @ commit | suite | checked live here |
 |---|---|---|---|
 | #182 | `fix/182-cross-compare-lazy-tabs` @ `9185764` | 1001 | the real 40-sample cross compare: 4.12 MB → 0.81 MB, 561 → 182 ms; 19,254 cells identical to master in a browser |
-| #183 (part) | `fix/183-job-page-poll` @ `2fd7ef5` | 1000 | 40-sample cross compare: a render is 81 backend calls, a poll is 1; watched live, 63 calls → 24 |
+| #183 (part) | `fix/183-poll-job-status` @ `633ae00` | 996 | a 66-sample cross compare and a 1vN queued behind it, watched in Chromium: 1,230 backend calls on master, 850 here; the 1vN page 12 loads → 3 loads and 11 polls |
 | #184 | `fix/184-unique-blocks-cache` @ `5d2859a` | 1007 | 35 MB unique blocks job: repeat 4.6-7.0 s → 1.6-2.5 s, `required_per_sample=100` 36-52 s → 1.9 s; byte-identical; the first-render fix reproduced |
 | #186 | `fix/186-function-diff-cache` @ `3d61cc1` | 1004 | 36 page/graph pairs byte-identical; gains within noise at these function sizes |
 | #187 | `fix/187-link-hunt-clusters` @ `be32d50` | 1009 | 11.6k-function link hunt: a page turn 26.6 s → 0.07 s; ~50 page pairs identical |
 | #188 | `fix/188-diagram-drawing` @ `a99c64a` | 1003 | 261 diagrams byte-identical; the 11.6k-function diagram renders in 0.43 s instead of 7.1 s |
 | #189 | `fix/189-explore-sleeps` @ `9bb08a0` | 1004 | modify POST 319 → 76 ms, 1320 → 75 ms to a cross compare; landing page current 5/5 |
 | #190 | `fix/190-request-row-reads` @ `9eaa3b4` | 1006 | SQL per request: `/` 6 → 3, `/explore/samples` 8 → 4, `/admin/server` 6 → 3; pages identical |
+| #191 (part) | `fix/191-serial-entry-fetches` @ `a25e2df` | 1001 | 23 pages byte-identical; a sample page 5 → 4 calls, a selection page 5 → 2, the index 7 → 3 when its latest samples were just matched |
 | #192 (part) | `fix/192-bounded-collections` @ `59c7da1` | 998 | `/data/submit` loses `GET /families`; the type-ahead matches master's; the upload overlay's dead type-ahead now works |
 | #193 | `fix/193-jobs-for-sample-once` @ `a94c27b` | 988 | 17 pages byte-identical, whitespace included |
 | #194 (part) | `fix/194-result-view-passes` @ `1236323` | 998 | 45 result pages byte-identical, past-the-end page included; the 11.6k-function page 174 → 130 ms |
 | #197 | `fix/197-link-hunt-links` @ `96978e3` | 989 | 7 jobs have 11-42 clusters, so paging runs for real; links identical once unfolded |
+| #198 | `fix/198-cross-tooltips-job-grouping` @ `879a54c`, on #182 | 1009 | with #182, the 66-sample result page 2.09 MB → 1.45 MB and 465-470 → 366 ms; 48,762 cell tooltips identical to master in Chromium |
 | #199 | `fix/199-users-page-single-pass` @ `0c321e9` | 987 | every tab's rows identical for 11 users of every role |
 | #200 | `fix/200-api-passthrough-bytes` @ `e80b957` | 999 | 10 `/api` endpoints byte-identical to master and to the backend; 66 MB listing 18.9 s → 11.1 s |
 | #202 (part) | `fix/202-result-cache-size` @ `125b90c` | 1015 | cache 35% smaller; downloads parse-equal; a 3-file bound holds and refetches |
+| #204 | `fix/204-cfg-loops` @ `792df75` | 992 | the 971-block function: `fetchDotGraph` 250 → 77 ms, `findLoops` 1.57 → 1.06 s; 949 functions answer byte for byte as on master |
 | #206 | `fix/206-admin-account-handlers` @ `9252805` | 997 | as in its PR text |
 | #207 | `fix/207-check-then-fetch` @ `4cb8db7` | 1006 | backend calls 8 → 6, 3 → 2, 5 → 4; the empty family 0 no longer exports the corpus; exports identical once decoded |
 | new issue | `fix/linkhunt-empty-family-count` @ `9508923` | 988 | a link hunt filter with the family count empty: master 500, here 200 |
+| new issue | `fix/cross-job-unnamed-family` @ `947b423` | 988 | a sample submitted without a family and cross-compared: master's row lists only the other sample, the branch's both (sample and jobs deleted after) |
 
 What differs from the status page's patches, all after an adversarial review here:
+- **#183**: two versions existed, this session's and the familiary session's. Both cut the
+  backend calls alike; the familiary session's also polls jobs without sub-jobs and updates
+  their progress in place, reads the job document defensively, and has Chromium tests that
+  fail with the fix reverted. It is the one proposed, as `fix/183-poll-job-status`; this
+  session's `fix/183-job-page-poll` stays on the fork, unused. Its PR text now gives the
+  failure path's real mechanism (a redirect `fetch` follows, then a failed JSON read).
 - **#189**: the commit subject loses an `explore:` prefix no other commit uses.
+- **#191**: unchanged. Its PR text adds the second instance's numbers, and says how to resolve
+  the two merges that need thought: #115, where `describable_jobs()` must stay in front of the
+  lookups, and #174, where keeping this PR's `client.search_samples` lines fails with an
+  `AttributeError`. Both resolutions pass the full suite (1,087 and 1,019 passed).
 - **#193**: the new test file gets the shebang and `LOG` header every other test file has.
 - **#194**: a trailing space carried over from master on the changed line is gone.
 - **#197**: the stray blank line at the end of the new test file is gone.
@@ -1058,6 +1073,13 @@ What differs from the status page's patches, all after an adversarial review her
   plus one `AGENTS.md` sentence: its rule to probe with `is*Id` first now says when the fetch
   itself is the check. It supersedes `fix/specific-export-unknown-id`, which stays on the fork
   unused.
+- **#198 and #204** were left to this session by the familiary session's split, and are not on
+  its status page. #204's fallback for a caller without the shared reversed graph gained a
+  test in review.
+
+Within the set, only #182's and #191's branches conflict with each other, on adjacent import
+lines of `data.py`; keep both names. #198's branch carries #182's commit, so it shows the same
+conflict with #191 until #182 is merged.
 
 ### 13.2 Issues left without a PR
 
@@ -1065,12 +1087,17 @@ What differs from the status page's patches, all after an adversarial review her
   PR says so and is "Part of #194".
 - **#195**: not actionable, measured by the familiary session: the suggested maps cost more than
   the lookups they replace.
+- **#196**: its DataTables half is already in #126, which removes the initializer; that
+  initializer selected `#job-table`, an id the jobs page never renders. Its row-handler half
+  was measured in Chromium and is not worth a change: binding the four row templates' click
+  handlers takes under 0.5 ms, under 0.2% of the page, at the 250 rows a page can show at most,
+  and no table gains rows after load on master. ADR 0014 lists delegating them only as a
+  precondition for partial table reloads, which it declined.
 - **#203**: not a bug. The renderer draws only unfiltered data, and live PNGs under six filters
   were md5-identical.
 - **#205**: mostly moot once #192's PR lands, because no page embeds the whole family list after
   it. Rescoping or closing it is Daniel's call.
 - **#76**: mcrit's search, not mcritweb's.
-- **Still open**, with the familiary session: #191, #196, #198 and #204.
 
 ### 13.3 Bugs found live
 
@@ -1079,36 +1106,57 @@ What differs from the status page's patches, all after an adversarial review her
   empty here and has an export button on `/explore/families`, so one click downloads everything.
   Fixed in #207's PR.
 - **The link hunt** answered 500 for a filter submitted with the family count empty. Fixed by
-  `fix/linkhunt-empty-family-count`. `open-prs.sh` files its issue first, from
+  `fix/linkhunt-empty-family-count`, with its issue drafted in
   `pr-text/issue-new-linkhunt-family-count.md`.
+- **A cross compare's job row** left out every sample of family 0. Fixed by
+  `fix/cross-job-unnamed-family`, with its issue drafted in
+  `pr-text/issue-new-cross-job-unnamed-family.md`.
+- **Pages that answer 500 on master, already fixed by open PRs**: `GET /admin/change_password`
+  and `/admin/change_username` (the #206 branch), the result pages of the three 1.9.0 repair
+  jobs (#212), and `/` for a logged-in user while the backend is down (#130).
 - **In the mcrit backend**, for mcrit's own tracker:
   - `SampleResource.on_put` checks a version against `^[ -~]{1,64}$` but says "0-64 printable
     characters", so clearing a version is refused with a 400. Master ignores the refusal; #189
     reports it.
   - `GET /complete_minhashes` with nothing left to hash raises `UnboundLocalError` in
     `Worker.updateMinHashes`, and the job never finishes.
+  - `SampleResource.on_put` also checks a family name against a pattern that needs at least two
+    characters, though its message says "0-64", so no sample can be moved into the unnamed
+    family, or into a one-character family, through the API.
   - #192's other half needs a sample selector on mcrit's job queue. The familiary session
     drafted that issue as `pr/mcrit-issue-queue-sample-selector.md` on its status page.
+  - #191's rest needs a batch sample lookup, which mcrit's storage already has
+    (`getSampleEntriesByIds`) without a route or client method. Drafted in
+    `pr-text/issue-mcrit-batch-sample-lookup.md`, for danielplohmann/mcrit.
 
 ### 13.4 Conflicts with the open PRs
 
 Each PR text ends with its conflicts against the 29 open PRs and how to resolve them. Most are
 adjacent lines or import lines to keep from both sides. The ones that need thought:
-- **#176 and the changelog lines.** #160, #208, #211, #212 and #183 each add an `* unreleased:`
-  line to README's version history, so any two of them conflict; keep every line. #176 moves
-  that history into `CHANGELOG.md` and makes CI fail any PR touching `mcritweb/` without a
-  `CHANGELOG.md` entry or the `no-changelog` label. If #176 lands first, those five lines move to
-  `CHANGELOG.md`, and every other open PR needs an entry or the label.
+- **#198 is stacked on #182.** It changes the cell tooltips that #182's tab filling clones, and
+  adapts that script. Proposed on master, it would merge with #182 without a textual conflict and
+  still break it: the filled tabs' tooltips would gain a doubled space, and #182's shape test
+  would fail. So its PR's base is #182's branch, and it becomes a PR on master once #182 is in.
+- **#191 and #115, #174**: see 13.1.
+- **#183 and #149.** #149 shows a job's sub-job average in the progress cell #183's script writes
+  into. #183's text says to pass `progress_id` only when `child_progress is none`.
+- **#176 and the changelog lines.** #160, #208, #211 and #212 each add an `* unreleased:` line
+  to README's version history, so any two of them conflict; keep every line. None of this set's
+  branches adds one: AGENTS.md reserves the version history for releases. #176 moves that
+  history into `CHANGELOG.md` and makes CI fail any PR touching `mcritweb/` without a
+  `CHANGELOG.md` entry or the `no-changelog` label. If #176 lands first, every other open PR
+  needs an entry or the label.
 - **#194 and #152** conflict in meaning. #152 sorts the whole function table by the column the
   user picks. #194 aggregates one page alone, which only works in function-id order.
 - **#192 and #126** both rework the submit form's type-ahead scripts.
 - **#130** meets #187, #189, #192 and #207 where a backend `None` is handled. Keep the handling
   in the PR that has its own branch for it, as `require_result`'s own docstring asks.
 - **#202 needs #145** first, or together with it.
+- **#204 and #142**: `tests/fixtures/README.md`, keep both.
 
 ### 13.5 Verified live since the last update
 
-All 24 older PRs, the familiary session's 17 branches, and this session's own were verified
+All 24 older PRs, the familiary session's branches, and this session's own were verified
 against the live backend, with no regressions. Of note from the older ones:
 - #145's cold result page for the 11.6k-function sample went from 45.6 s to 157 ms;
 - two of #119's new sentences cannot be reached, as before;
@@ -1126,13 +1174,8 @@ familiary/mcritweb:
     DRY_RUN=1 sh open-prs.sh   # prints every push and PR, changes nothing
     sh open-prs.sh
 
-A branch that already has an open PR is skipped, so a second run only fills in what is missing.
-
-**Why no Claude session can do this step.** At 13:55 UTC a session started with familiary/mcritweb
-as its source (`session_01BAXB46p3uvEEfNa8qJ8ZCR`) tried it: every push and every PR from the
-fork was refused with `403 Resource not accessible by integration`. That is the Claude GitHub
-App's access to the familiary organisation, not r0ny123's permission on the repository. Either
-an owner of familiary installs the App there (claude.ai/connect-github), after which that
-session can simply be told to re-run, or r0ny123 runs `open-prs.sh` with their own `gh` login.
-Nothing is merged. The familiary session should not run its `apply-and-push.sh`, or the same
-branch names would be pushed twice from different commits.
+It pushes each branch under the same name, files the two new issues before their PRs, opens
+every PR against master, and #198's against #182's branch. A branch that already has an open
+PR is skipped, so a second run only fills in what is missing. Nothing is merged. The familiary
+session should not run its `apply-and-push.sh`, or the same issues would get branches from two
+different commits.
