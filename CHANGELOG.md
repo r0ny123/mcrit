@@ -79,11 +79,12 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   defaults to `0` (off) and keeps the single-document shape byte for byte.
 
   A posting list is a `function_ids` array inside one document and MongoDB caps a document at
-  16 MB. Measured on a 7,244-sample real corpus: the largest `band_0` document held **18,968
-  postings in 197,606 bytes** - 10.42 bytes each, so about **1,610,427 fit**, which is 84.9x that
-  corpus and puts the wall near **615,000 samples**. Verified rather than projected - ten `$push`
-  calls of 100,000 ids succeeded and the eleventh raised `BSONObj size: 17588958 is invalid`. The
-  write **fails** rather than slowing down, so indexing stops for any sample holding a function
+  16 MB. Measured directly by pushing ids into one document until the write is refused: it holds
+  about **1.35 million ids** while they fit in 32 bits (12.2 bytes each) and about **1.05
+  million** once they need BSON int64 (15.9 bytes each), after which `$push` raises `BSONObj
+  size ... is invalid`. On a 7,244-sample real corpus the longest posting list across all 20
+  bands held **36,183 ids** (in `band_14`), so extrapolating it linearly puts the wall near
+  **270,000 samples**. The write **fails** rather than slowing down, so indexing stops for any sample holding a function
   whose band hash is already at the cap. **Sharding does not move this**: a document cannot span
   shards.
 
