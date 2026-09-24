@@ -74,7 +74,7 @@ class StorageConfig(ConfigInterface):
     # STORAGE_MATCHING_CACHE_MAX_BYTES to 0 disables the ceiling entirely.
     STORAGE_MATCHING_CACHE_MAX_ENTRIES: int = 0
     # How getCandidatesForMinHashes accumulates band hits:
-    #  * "numpy": per-query-function int32 hit arrays + np.unique(return_counts) (default)
+    #  * "numpy": per-query-function int64 hit arrays + np.unique(return_counts) (default)
     #  * "dict":  dict[query_fid][candidate_fid] -> count  (legacy fallback, deprecated)
     # Same results either way; "numpy" avoids the ~100 B/pair Python dict and the O(pairs) loop.
     STORAGE_CANDIDATE_ACCUMULATION: str = "numpy"
@@ -114,9 +114,10 @@ class StorageConfig(ConfigInterface):
     # (band_hash, bucket) documents once it would exceed that. 0 keeps the single-document shape.
     #
     # This exists because MongoDB caps a document at 16 MB and a posting list is an array inside
-    # one. Measured on a 7,244-sample real corpus: the largest band_0 document held 18,968
-    # postings in 197,606 bytes - 10.42 bytes each - so about 1,610,427 fit, which is 84.9x the
-    # corpus and puts the wall near 615,000 samples. Past it the $push does not slow down, it
+    # one. Measured directly, a document holds about 1.35 million ids while they fit in 32 bits
+    # and about 1.05 million once they need BSON int64. On a 7,244-sample real corpus the longest
+    # posting list across all 20 bands held 36,183 ids, which puts the wall near 270,000 samples
+    # if it grows linearly. Past it the $push does not slow down, it
     # fails ("BSONObj size ... is invalid"), and indexing stops for any sample holding a function
     # whose band hash is already at the cap. Sharding does not move this: a document cannot span
     # shards.
