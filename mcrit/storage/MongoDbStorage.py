@@ -1339,10 +1339,10 @@ class MongoDbStorage(StorageInterface):
         """Append postings, splitting a band hash across (band_hash, bucket) documents.
 
         A posting list is an array inside one document and MongoDB caps a document at 16 MB, so a
-        band hash common enough to accumulate ~1.6M postings stops being writable at all - the
-        $push fails rather than slowing down, and indexing halts. Measured on a 7,244-sample real
-        corpus that wall sits near 615,000 samples, and no amount of sharding moves it, because a
-        document cannot span shards.
+        band hash common enough to accumulate ~1.35M postings (~1.05M once ids need int64) stops
+        being writable at all - the $push fails rather than slowing down, and indexing halts.
+        Extrapolated from a 7,244-sample real corpus that wall sits near 270,000 samples, and no
+        amount of sharding moves it, because a document cannot span shards.
 
         Shape: bucket 0 carries the bookkeeping for the whole hash - `df` (the total across every
         bucket, which is what STORAGE_BAND_DF_CUTOFF filters on), `tail` (the highest bucket in

@@ -147,13 +147,14 @@ Tuning the cutoff at 12,500 samples, shortlist held at 100: cutoff 1000 gives a 
 200 gives 0.374 s, 100 gives 0.332 s — all three at top-10 and top-25 recall of 1.000. 200 is
 where the traversal stops scaling; below that there is little left to win.
 
-## Growing past ~615,000 samples: `STORAGE_BAND_BUCKET_SIZE`
+## Growing past ~270,000 samples: `STORAGE_BAND_BUCKET_SIZE`
 
 Separate from latency, and a hard stop rather than a slowdown. A band posting list is a
-`function_ids` array inside one document, and MongoDB caps a document at 16 MB. On a 7,244-sample
-real corpus the largest band document held 18,968 postings in 197,606 bytes - 10.42 bytes each -
-so roughly **1.6M postings fit, about 84.9x that corpus**. Extrapolating the hottest posting list
-linearly puts the ceiling near **615,000 samples**.
+`function_ids` array inside one document, and MongoDB caps a document at 16 MB. Measured by
+pushing ids into one document until the write is refused, a document holds about **1.35 million
+ids** while they fit in 32 bits and about **1.05 million** once they need BSON int64. On a
+7,244-sample real corpus the longest posting list across all 20 bands held 36,183 ids, so
+extrapolating it linearly puts the ceiling near **270,000 samples**.
 
 What happens there is not gradual: `$push` raises `BSONObj size ... is invalid` and the write
 fails, so indexing stops for any sample containing a function whose band hash is already at the
