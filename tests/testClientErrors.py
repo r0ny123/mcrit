@@ -107,6 +107,15 @@ class ClientModesTest(unittest.TestCase):
             with self.assertRaises(McritBadRequest):
                 client.deleteFamily(1)
 
+    def test_modify_function_raises_through_the_client_mode_too(self):
+        """modifyFunction was written before these modes existed, on a branch that merged them
+        in later - a method that calls handle_response directly answers None whatever mode the
+        client is in."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True)
+        with patch("mcrit.client.McritClient.requests.put", return_value=answer(404, FAILED, url="http://mcrit.test/functions/7")):
+            with self.assertRaises(McritNotFound):
+                client.modifyFunction(7, "decrypt_config")
+
     def test_one_mode_does_not_imply_the_other(self):
         server_only = McritClient("http://mcrit.test", raise_server_errors=True)
         with patch("mcrit.client.McritClient.requests.get", return_value=answer(404, FAILED)):

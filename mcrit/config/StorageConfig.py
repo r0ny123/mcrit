@@ -110,6 +110,24 @@ class StorageConfig(ConfigInterface):
     # unaffected, and benchmarks/compare_quality.py measures what a given cutoff costs against
     # the uncapped result on a real corpus. See docs/scaling/ for measured numbers.
     STORAGE_BAND_DF_CUTOFF: int = 0
+    # Cap on how many function ids one band document may hold, splitting a posting list across
+    # (band_hash, bucket) documents once it would exceed that. 0 keeps the single-document shape.
+    #
+    # This exists because MongoDB caps a document at 16 MB and a posting list is an array inside
+    # one. Measured directly, a document holds about 1.35 million ids while they fit in 32 bits
+    # and about 1.05 million once they need BSON int64. On a 7,244-sample real corpus the longest
+    # posting list across all 20 bands held 36,183 ids, which puts the wall near 270,000 samples
+    # if it grows linearly. Past it the $push does not slow down, it
+    # fails ("BSONObj size ... is invalid"), and indexing stops for any sample holding a function
+    # whose band hash is already at the cap. Sharding does not move this: a document cannot span
+    # shards.
+    #
+    # 100,000 leaves a wide margin under the cap even if postings grow heavier than measured, and
+    # keeps a single document small enough to be cheap to ship. It must stay comfortably above
+    # STORAGE_BAND_DF_CUTOFF: the cutoff selects hashes by the total df stored on bucket 0, and
+    # that stays exact only while an under-cutoff posting list still fits in one bucket, so
+    # MongoDbStorage refuses to start with a cutoff above the bucket size.
+    STORAGE_BAND_BUCKET_SIZE: int = 0
     # limit maximum export size to protect the system against running OOM, default: 1 GB
     STORAGE_MAX_EXPORT_SIZE = 1024 * 1024 * 1024
 

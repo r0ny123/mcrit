@@ -75,6 +75,37 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   It is now an indexed lookup of the samples that received a vote (a few thousand at most).
   Callers passing nothing still get the whole-corpus map, so no consumer breaks. **Ranking
   behaviour is unchanged.**
+- **Band posting lists can be split across documents**, behind `STORAGE_BAND_BUCKET_SIZE`, which
+  defaults to `0` (off) and keeps the single-document shape byte for byte.
+
+  A posting list is a `function_ids` array inside one document and MongoDB caps a document at
+  16 MB. Measured directly by pushing ids into one document until the write is refused: it holds
+  about **1.35 million ids** while they fit in 32 bits (12.2 bytes each) and about **1.05
+  million** once they need BSON int64 (15.9 bytes each), after which `$push` raises `BSONObj
+  size ... is invalid`. On a 7,244-sample real corpus the longest posting list across all 20
+  bands held **36,183 ids** (in `band_14`), so extrapolating it linearly puts the wall near
+  **270,000 samples**. The write **fails** rather than slowing down, so indexing stops for any sample holding a function
+  whose band hash is already at the cap. **Sharding does not move this**: a document cannot span
+  shards.
+
+  Bucket 0 carries the bookkeeping for the whole hash - `df` as the total across every bucket,
+  plus `tail`/`tail_n` for placement - and higher buckets carry only postings. That is what keeps
+  the cutoff filter and its `(band_hash, df)` index unchanged: a hash under the cutoff is far
+  below one bucket's worth so it never spills, and a hash that spilled has a `df` that rejects it.
+  Buckets fill in order rather than by hashing the function id, so a short posting list stays in
+  one document instead of being scattered across many.
+
+  **Migration**: enabling the knob on an existing database requires running
+  `rebuild_band_df_index` before the next write. Documents written earlier have no `bucket` field,
+  so the upsert filter `{band_hash, bucket: 0}` would not match them and would insert a *second*
+  document for the hash, splitting the posting list invisibly. The rebuild stamps `bucket: 0` and
+  is what makes them addressable. Matching results are unchanged either way - the tests assert
+  identical matches with bucketing on and off, against a corpus where the split is forced.
+
+  Deleting a sample reaches every bucket of a hash, and keeps bucket 0 (the only holder of
+  `df`/`tail`/`tail_n`) for as long as any other bucket of that hash still holds postings.
+  `STORAGE_BAND_DF_CUTOFF` above `STORAGE_BAND_BUCKET_SIZE` is refused at startup, since only
+  bucket 0 carries `df` and such a cutoff would serve a spilled hash as bucket 0 alone.
 
 ### Fixed
 
