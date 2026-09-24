@@ -146,6 +146,11 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   is what makes them addressable. Matching results are unchanged either way - the tests assert
   identical matches with bucketing on and off, against a corpus where the split is forced.
 
+  Deleting a sample reaches every bucket of a hash, and keeps bucket 0 (the only holder of
+  `df`/`tail`/`tail_n`) for as long as any other bucket of that hash still holds postings.
+  `STORAGE_BAND_DF_CUTOFF` above `STORAGE_BAND_BUCKET_SIZE` is refused at startup, since only
+  bucket 0 carries `df` and such a cutoff would serve a spilled hash as bucket 0 alone.
+
 ### Fixed
 
 - **`LogBucket` raised `KeyError` for any value past its precomputed table**, which aborts the
