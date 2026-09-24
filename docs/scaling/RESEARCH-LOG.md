@@ -623,3 +623,141 @@ the `aggregated` strategy: **slower** (2.807 s against 1.538 s at 126k ids; 6.26
 the wire saving is real and simply smaller than what the aggregation costs. The comparison is
 also not clean - the aggregation runs as one unsliced cursor against a sliced, threaded find - so
 what is rejected is this implementation of the idea, not the idea. The find path stays.
+
+## 10. An outside review, checked against the code, and the ceiling it moved
+
+On 2026-09-24 a ten-item review of mcrit, mcritweb and docker-mcrit came in from another model
+run. Every claim was checked against the current upstream heads (familiary/mcrit `ab56c34`,
+familiary/mcritweb `e4bfa55`, familiary/docker-mcrit `aac38ad`), the scaling stack, and the live
+7,244-sample corpus, read-only. The review was mostly right about what the code says and mostly
+wrong about what to do first.
+
+| # | Claim | Verdict | Evidence |
+|---|---|---|---|
+| 1 | band posting lists grow without limit | true, already fixed on the stack | `STORAGE_BAND_BUCKET_SIZE` (fork #45, upstream #196) and the df cutoff (fork #44, upstream #195); both default off |
+| 2 | posting lists read as int32 | true, fixed here (section 11) | `np.array(hit["function_ids"], dtype=np.int32)` on upstream main and every stack branch |
+| 3 | minhash stored as hex text | true, not worth a migration | 93.8 of 906.7 bytes of an average function document (10.3%); binary would save about 5% |
+| 4 | McritClient has no timeouts or session | true | 55 bare `requests.*` calls on upstream main, no `Session(`, no `timeout=`, no branch adds either; gunicorn's `-t 300` does not reach a stuck thread under `gthread` |
+| 5 | mcritweb fetches samples one by one | true, half done | server side is upstream #213 (issue #207); mcritweb side is mcritweb #221, both open |
+| 6 | fixed sleeps after edits | true, low value | three sleeps of 0.3-1 s, only on the family and sample edit forms |
+| 7 | SQLite has no WAL or busy timeout | half true | no WAL; Python's `sqlite3.connect` already waits 5 s by default |
+| 8 | secret-key creation races | true but narrow | `O_CREAT \| O_TRUNC` without `O_EXCL`; only bites on a first boot with no key configured, gunicorn runs without `--preload` |
+| 9 | jQuery UI 1.13.1 carries CVE-2022-31160 | true, not exploitable here | the CVE is in the checkboxradio widget, which mcritweb never initialises; bump anyway |
+| 10 | docker-mcrit lacks healthchecks and worker scaling | true | no healthcheck on `mcritweb` or `nginx`; `mcrit-worker` has a fixed `container_name`, so `--scale` fails |
+
+What the review missed is the thing the rest of this log is about: the one-stage match cost grows
+as corpus^1.40 on real data and two-stage stays flat, and upstream still runs one-stage. Merging
+the stack is worth more than anything on the list.
+
+### The 16 MB wall was measured on one band out of twenty
+
+Checking claim 1 meant reading posting-list sizes off the live corpus, and they did not agree with
+the ceiling quoted in SUMMARY.md, TUNING.md, the changelog and three code comments.
+That figure took the longest list in `band_0` - 18,968 ids - and extrapolated. Across all twenty
+bands the longest list holds **36,183 ids** (386,971 bytes, `band_14`), nearly twice as many
+(`benchmarks/measure_id_and_list_headroom.py`, `measurements/headroom_7k.json`). The per-band
+maxima range from 18,968 to 36,183; `band_0` happens to sit at the bottom.
+
+The capacity side was off too. 10.42 bytes per id came from that short list, but every BSON array
+element carries its own index as a string key, and the keys lengthen as the list grows. Measured
+directly instead, by pushing ids into one document on a throwaway mongod until the write is
+refused (`benchmarks/measure_posting_capacity.py`, `measurements/posting_capacity.json`):
+
+| ids stored as | held before refusal | bytes per id |
+|---|---|---|
+| int32 (ids below `2**31`) | 1,350,000 | 12.18 |
+| int64 (ids past `2**31`) | 1,050,000 | 15.94 |
+
+The earlier "ten pushes of 100,000 succeeded, the eleventh was refused" check reproduces the int64
+row exactly (refused at 17,588,946 bytes against 17,588,958 then), so it had used ids past
+`2**31` without noticing. Put together, 1.35 million over 36,183 is 37x the corpus: **the wall is
+near 270,000 samples, not 615,000.** Corrected on pr3 (`57079ee`) and pr4 (`d7283e5`) and on this
+branch. `STORAGE_BAND_BUCKET_SIZE = 100,000` is unaffected - it sits under either capacity.
+
+The lesson is the one from section 5c in a new place: a maximum was read from the first partition
+instead of all of them, and a per-element cost was measured on a small instance of a structure
+whose per-element cost grows with size. Both errors pointed the same way, which is why neither
+was caught by the other.
+
+### Function-id headroom is set by the counter, not by the count
+
+The live corpus has 8,657,357 functions but its highest function id is **12,003,563**. Ids come
+from a counter that is never reused, and earlier bulk deletions burned 3.3 million of them. At the
+observed burn of about 1,660 ids per sample kept, `2**31 - 1` is reached at around **1.3 million
+samples**; at the stored density of 1,195 functions per sample it would be 1.8 million. Either is
+well short of a billion, which is what made claim 2 worth fixing now.
+
+## 11. 64-bit posting arrays in the candidate accumulator
+
+`_getCandidatesForMinHashesNumpy` - the default accumulation since `STORAGE_CANDIDATE_ACCUMULATION
+= "numpy"` - turned every posting list into an int32 array. Past `2**31 - 1` the failure depends on
+the numpy that `pyproject.toml` allows (`numpy>=1.26`), and both versions were run to see it:
+
+- numpy 2.4.6: `OverflowError: Python integer 2147483648 out of bounds for int32`. Matching fails.
+- numpy 1.26.4: a `DeprecationWarning` that Python hides by default, and then
+  `[3, 2**31, 2**32 + 3]` becomes `[3, -2147483648, 3]`. The first wrapped id lands in the negative
+  range query functions use; the second becomes function 3, so a candidate is attributed to the
+  wrong function and can be counted twice against `BAND_MATCHES_REQUIRED`. Silent and wrong.
+
+The fix is one dtype, on pr2 (`9c8e930`) because pr2 is the lowest stack branch still open and the
+accumulator is the stage it restructures. Tests first (`tests/testCandidateAccumulation.py`): a
+subclass of `MongoDbStorage` answers the band lookups from canned posting lists, so the test runs
+in the unit suite and exercises only the accumulation. Both tests failed on the int32 code with
+the OverflowError above and pass on int64. A first version patched `_getDb` on the instance and
+failed `ty` with two `invalid-assignment` errors; CI enforces zero, so the subclass replaced it.
+
+Always-int64 was chosen over choosing the width per corpus. The cost was measured on the live
+corpus, read-only - the storage object is handed a plain `MongoClient` database so `_initDb`, which
+ensures indexes, never runs - with the three standing queries, median of three, time and memory in
+separate passes (`benchmarks/bench_accumulator_dtype.py`, `measurements/dtype_int32.json`,
+`measurements/dtype_int64.json`):
+
+| configuration | query | candidate pairs | time, int32 (3 runs) | time, int64 (3 runs) | peak, int32 | peak, int64 |
+|---|---|---|---|---|---|---|
+| one-stage | win.zloader | 183,621 | 0.46-0.54 s | 0.47-0.55 s | 19.0 MB | 26.4 MB |
+| one-stage | win.blackpos | 865,854 | 1.02-1.06 s | 1.12-1.15 s | 38.7 MB | 60.5 MB |
+| one-stage | win.acidbox | 129,307 | 0.21-0.24 s | 0.20-0.21 s | 7.3 MB | 11.5 MB |
+| df cutoff 200 | win.zloader | 5,518 | 0.18-0.21 s | 0.20-0.25 s | 5.2 MB | 5.8 MB |
+| df cutoff 200 | win.blackpos | 23,795 | 0.16-0.21 s | 0.17-0.18 s | 4.7 MB | 5.5 MB |
+| df cutoff 200 | win.acidbox | 3,767 | 0.08-0.10 s | 0.08-0.10 s | 1.6 MB | 1.8 MB |
+
+Only the widest query pays in time consistently: about 8%, some 90 ms, the one row where the
+three runs of each variant do not overlap. Every other row's ranges overlap. The pushed commit
+message says "time within noise"; that came from a first pass that timed under `tracemalloc`
+while the test suite ran on the same four CPUs - the confound section 9 warns about - and it read
+2.8 s and 6.8 s for the first two rows. The rerun above, on a quiet machine with time and memory
+in separate passes (`dtype_int32*.json`, `dtype_int64*.json`, three files each), is the one to
+trust, and it agrees except for that one query.
+
+Candidates are identical, and every query finds all of its own functions in one-stage. The worst
+memory cost is 22 MB on the widest one-stage query, against a measured whole-process peak of
+766 MB for that configuration at this size; two-stage pays under 1 MB. An adaptive width would
+save that and add a code path that is only exercised past two billion ids - the one place a
+narrowing bug would stay hidden longest.
+
+### Repository state on 2026-09-24, before this push
+
+Upstream merged #194 (pr1) today as `ab56c34`, along with #163, #168 and #169. #195-#200 (pr2-pr7)
+are open against `main`, with heads `e9f3c03`, `a1afe24`, `e50087c`, `a071e50`, `6356282` and
+`1f4c3e1`, identical to fork PRs #44-#49. Nothing in familiary/mcrit, familiary/mcritweb or either
+fork covers 32-bit function ids, client timeouts, SQLite WAL, the jQuery UI CVE or docker-mcrit
+healthchecks. Batch sample lookup is covered by mcrit #213 and mcritweb #221, and the adaptive
+cutoff and the LogBucket cache key by the two issues already filed (#201, #202 and #215).
+
+### Operational notes from this round
+
+- **The box reboots, and docker does not come back by itself.** Three reboots in one day. After
+  each, `dockerd` refused to start because `/var/run/docker.pid` survived and named a PID that no
+  longer existed ("process with PID 393 is still running" - it was not). Check that the PID is
+  gone, delete the file, start `dockerd`, then `docker start mcrit-mongo3`. The corpus fingerprint
+  compared unchanged after every one (`db_fingerprint.py compare`, 35 collections, 28,716,568
+  objects).
+- **The container `nofile` ceiling is now 20,000.** `--ulimit nofile=200000:200000`, which AGENTS.md
+  suggests, is refused by the runtime here (`error setting rlimit type 7: operation not
+  permitted`); 20,000 matches the host hard limit and is what `mcrit-mongo3` already runs with.
+- **`pkill -f` matches the shell that runs it.** Stopping a background harness with
+  `pkill -f cascade.sh` killed the invoking shell too, because the pattern is in its own command
+  line. Kill by PID taken from a pattern that cannot match itself (`grep "[c]ascade"`).
+- **Test runs go to a throwaway server.** Every test run in this round used a tmpfs mongod on
+  27018 (`TEST_MONGODB=127.0.0.1:27018`), and the capacity measurement, which writes, a second one
+  on 27019. The live server's database list was recorded before and compared after.

@@ -1,0 +1,191 @@
+{
+  "db": "real",
+  "measured_at": "2026-09-24T11:46:52Z",
+  "bands": {
+    "bands": {
+      "band_0": {
+        "documents": 337570,
+        "postings": 5588648,
+        "max_ids": 18968,
+        "max_bytes": 197606,
+        "over_200": 4261,
+        "over_10000": 15
+      },
+      "band_1": {
+        "documents": 532744,
+        "postings": 5588648,
+        "max_ids": 18968,
+        "max_bytes": 197606,
+        "over_200": 3978,
+        "over_10000": 3
+      },
+      "band_2": {
+        "documents": 446699,
+        "postings": 5588648,
+        "max_ids": 25087,
+        "max_bytes": 264915,
+        "over_200": 4098,
+        "over_10000": 6
+      },
+      "band_3": {
+        "documents": 485755,
+        "postings": 5588648,
+        "max_ids": 30634,
+        "max_bytes": 325932,
+        "over_200": 3877,
+        "over_10000": 10
+      },
+      "band_4": {
+        "documents": 586447,
+        "postings": 5588648,
+        "max_ids": 24675,
+        "max_bytes": 260379,
+        "over_200": 3885,
+        "over_10000": 5
+      },
+      "band_5": {
+        "documents": 494671,
+        "postings": 5588648,
+        "max_ids": 18977,
+        "max_bytes": 197701,
+        "over_200": 4027,
+        "over_10000": 8
+      },
+      "band_6": {
+        "documents": 338062,
+        "postings": 5588648,
+        "max_ids": 34891,
+        "max_bytes": 372755,
+        "over_200": 4018,
+        "over_10000": 29
+      },
+      "band_7": {
+        "documents": 420717,
+        "postings": 5588648,
+        "max_ids": 33905,
+        "max_bytes": 361909,
+        "over_200": 4237,
+        "over_10000": 7
+      },
+      "band_8": {
+        "documents": 518105,
+        "postings": 5588648,
+        "max_ids": 26513,
+        "max_bytes": 280597,
+        "over_200": 3764,
+        "over_10000": 10
+      },
+      "band_9": {
+        "documents": 468341,
+        "postings": 5588648,
+        "max_ids": 18968,
+        "max_bytes": 197602,
+        "over_200": 4050,
+        "over_10000": 7
+      },
+      "band_10": {
+        "documents": 391486,
+        "postings": 5588648,
+        "max_ids": 18974,
+        "max_bytes": 197668,
+        "over_200": 4391,
+        "over_10000": 7
+      },
+      "band_11": {
+        "documents": 422308,
+        "postings": 5588648,
+        "max_ids": 18968,
+        "max_bytes": 197602,
+        "over_200": 4410,
+        "over_10000": 3
+      },
+      "band_12": {
+        "documents": 217144,
+        "postings": 5588648,
+        "max_ids": 23070,
+        "max_bytes": 242728,
+        "over_200": 4648,
+        "over_10000": 10
+      },
+      "band_13": {
+        "documents": 462560,
+        "postings": 5588648,
+        "max_ids": 18968,
+        "max_bytes": 197602,
+        "over_200": 4230,
+        "over_10000": 3
+      },
+      "band_14": {
+        "documents": 505026,
+        "postings": 5588648,
+        "max_ids": 36183,
+        "max_bytes": 386971,
+        "over_200": 3857,
+        "over_10000": 13
+      },
+      "band_15": {
+        "documents": 346942,
+        "postings": 5588648,
+        "max_ids": 25660,
+        "max_bytes": 271218,
+        "over_200": 4398,
+        "over_10000": 5
+      },
+      "band_16": {
+        "documents": 442095,
+        "postings": 5588648,
+        "max_ids": 34834,
+        "max_bytes": 372128,
+        "over_200": 4220,
+        "over_10000": 9
+      },
+      "band_17": {
+        "documents": 275114,
+        "postings": 5588648,
+        "max_ids": 25370,
+        "max_bytes": 268024,
+        "over_200": 4470,
+        "over_10000": 21
+      },
+      "band_18": {
+        "documents": 375989,
+        "postings": 5588648,
+        "max_ids": 18969,
+        "max_bytes": 197613,
+        "over_200": 4316,
+        "over_10000": 9
+      },
+      "band_19": {
+        "documents": 470537,
+        "postings": 5588648,
+        "max_ids": 18970,
+        "max_bytes": 197624,
+        "over_200": 4100,
+        "over_10000": 4
+      }
+    },
+    "largest_ids": 36183,
+    "largest_bytes": 386971,
+    "largest_share_of_16mb": 0.023065268993377686,
+    "bytes_per_id_in_largest": 10.694829063372302,
+    "ids_that_fit_in_16mb": 1568722
+  },
+  "functions": {
+    "samples": 7244,
+    "functions": 8657357,
+    "max_function_id": 12003563,
+    "functions_per_sample": 1195.1072611816676,
+    "int32_headroom_ids": 2135480084,
+    "samples_until_int32_at_this_density": 1796896,
+    "sampled_documents": {
+      "n": 20000,
+      "avg_document_bytes": 906.6895,
+      "avg_minhash_hex_bytes": 93.8368,
+      "with_minhash": 14662
+    },
+    "minhash_share_of_average_document": 0.10349386421702247,
+    "functions_data_bytes": 6306081879,
+    "functions_storage_bytes": 2430074880
+  },
+  "seconds": 35.9
+}
