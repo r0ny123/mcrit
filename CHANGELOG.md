@@ -56,6 +56,14 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - `benchmarks/` - the harness behind every number above: Malpedia fetch, SMDA report cache,
   per-stage 1-vs-N timing, corpus-structure analysis, Heaps' law fit, synthetic corpus growth
   fitted to a real corpus, quality comparison, and a scaling sweep.
+- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
+  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
+  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
+  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
+  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
+  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
+  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
+  selector that keeps no parseable id selects nothing, never everything ([#210]).
 
 ### Changed
 
@@ -384,3 +392,4 @@ date, the version, and what changed.
 [#157]: https://github.com/danielplohmann/mcrit/issues/157
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
+[#210]: https://github.com/danielplohmann/mcrit/issues/210
