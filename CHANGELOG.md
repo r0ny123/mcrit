@@ -78,6 +78,15 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Fixed
 
+- **The PicHash cutoff (`MINHASH_PICHASH_MAX_MATCHES`) and zero-padded pichashes ([#145]) now
+  compose.** On an instance not yet migrated, a value may be stored in both spellings, and the
+  cutoff counted each separately, so a value over it could pass; counts are now summed over the
+  spellings of a value, which is kept or dropped as a unit. `migrate_pichash_padding` (`pad` and
+  `unpad`) clears `pichash_counts` and marks it incomplete, since its keys are the stored
+  spelling: left in place, every lookup would miss its count and the cutoff would drop every
+  PicHash match. Until `rebuildPicHashCountIndex()` runs again, the cutoff counts holders the
+  slow way and logs a warning - results are unaffected.
+
 - **`LogBucket` raised `KeyError` for any value past its precomputed table**, which aborts the
   whole indexing job. The table covers `0..SHINGLER_LOGBUCKETS-1` (100,000 by default) and
   `FuzzyStatPairShingler` buckets `max_block_size`, `num_ins_C`, `num_ins_S` and `num_calls`
@@ -373,6 +382,7 @@ date, the version, and what changed.
 [1.9.0]: https://github.com/danielplohmann/mcrit/compare/v1.8.1...v1.9.0
 [#44]: https://github.com/danielplohmann/mcrit/issues/44
 [#142]: https://github.com/danielplohmann/mcrit/issues/142
+[#145]: https://github.com/danielplohmann/mcrit/issues/145
 [#147]: https://github.com/danielplohmann/mcrit/pull/147
 [#149]: https://github.com/danielplohmann/mcrit/issues/149
 [#150]: https://github.com/danielplohmann/mcrit/issues/150

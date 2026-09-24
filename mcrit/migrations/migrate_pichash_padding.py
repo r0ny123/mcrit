@@ -21,7 +21,9 @@ Modes:
 Stop the mcrit server and its workers before `pad`: while the flag is unset they keep
 writing unpadded values, which `pad` would have to be re-run for (it is idempotent, and
 `verify` reports leftovers). Storage reads the flag once per process, so restart them
-afterwards. Until the flag is set, all readers accept both widths, so the instance keeps
+afterwards. `pad` and `unpad` clear the PicHash count index (`pichash_counts`), whose keys are
+the stored spelling; with MINHASH_PICHASH_MAX_MATCHES on, the cutoff then counts holders the
+slow way (and warns) until rebuildPicHashCountIndex has run again. Until the flag is set, all readers accept both widths, so the instance keeps
 answering correctly during the walk; only range and sort by pichash stay rejected.
 
 Usage:
@@ -41,9 +43,11 @@ from urllib.parse import quote_plus
 from pymongo import ASCENDING, MongoClient, UpdateOne
 
 from mcrit.config.McritConfig import McritConfig
-from mcrit.storage.MongoDbStorage import PICHASH_HEX_DIGITS, encode_pichash_value
+from mcrit.storage.MongoDbStorage import PICHASH_HEX_DIGITS, MongoDbStorage, encode_pichash_value
 
 STATE_COLLECTION = "pichash_padding_state"
+PICHASH_COUNT_COLLECTION = MongoDbStorage._PICHASH_COUNT_COLLECTION
+PICHASH_COUNT_SETTING = MongoDbStorage._PICHASH_COUNT_SETTING
 COLLECTIONS = ("functions", "query_functions")
 PROJECTION = {"function_id": 1, "_pichash": 1, "_picblockhashes.hash": 1, "_id": 0}
 
@@ -152,6 +156,12 @@ def set_flag(db, padded: bool) -> None:
     # clear the walk state so a later run of the other mode starts from the top
     db[STATE_COLLECTION].delete_many({})
     log("settings.pichash_padded = %s" % padded)
+    # pichash_counts (MINHASH_PICHASH_MAX_MATCHES) is keyed on the stored spelling, which the
+    # walk has just changed. Left as it is, every lookup would miss its count and the cutoff would
+    # drop every PicHash match; marked incomplete, the cutoff falls back to counting instead.
+    db.settings.update_one({}, {"$set": {PICHASH_COUNT_SETTING: False}})
+    db[PICHASH_COUNT_COLLECTION].delete_many({})
+    log("pichash_counts cleared; run rebuildPicHashCountIndex() to restore the fast cutoff path")
 
 
 def verify(db) -> Dict[str, Any]:

@@ -1266,19 +1266,28 @@ class MongoDbStorage(StorageInterface):
             return encoded_pichashes
         if self.isPicHashCountIndexComplete():
             # one indexed probe per queried hash, instead of one index entry per holder
-            kept = [
-                document["_pichash"]
-                for document in self._getDb()[self._PICHASH_COUNT_COLLECTION].find({"_pichash": {"$in": encoded_pichashes}, "df": {"$lte": cutoff}}, {"_pichash": 1, "_id": 0})
-            ]
+            counts = {
+                document["_pichash"]: document["df"]
+                for document in self._getDb()[self._PICHASH_COUNT_COLLECTION].find({"_pichash": {"$in": encoded_pichashes}}, {"_pichash": 1, "df": 1, "_id": 0})
+            }
         else:
             # no counts stored yet: fall back to counting, which is correct but pays the very
             # cost the cutoff is meant to avoid
+            LOGGER.warning("PicHash count index incomplete, counting holders instead; run MongoDbStorage.rebuildPicHashCountIndex() to restore the fast path.")
             pipeline = [
                 {"$match": {"_pichash": {"$in": encoded_pichashes}}},
                 {"$group": {"_id": "$_pichash", "num_holders": {"$sum": 1}}},
-                {"$match": {"num_holders": {"$lte": cutoff}}},
             ]
-            kept = [group["_id"] for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True)]
+            counts = {group["_id"]: group["num_holders"] for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True)}
+        # Until migrate_pichash_padding has run, one value may be stored in both spellings
+        # ("0x4d2" and its zero-padded form), each counted separately (#145). Sum over the
+        # spellings of a value and keep or drop them together, so that a value over the cutoff
+        # cannot pass by being split. A spelling nobody holds counts 0.
+        totals: Dict[int, int] = {}
+        for encoded_pichash in set(encoded_pichashes):
+            value = int(encoded_pichash, 16)
+            totals[value] = totals.get(value, 0) + counts.get(encoded_pichash, 0)
+        kept = [encoded_pichash for encoded_pichash in encoded_pichashes if totals[int(encoded_pichash, 16)] <= cutoff]
         if len(kept) != len(encoded_pichashes):
             LOGGER.info("PicHash cutoff %d dropped %d of %d hashes as too common", cutoff, len(encoded_pichashes) - len(kept), len(encoded_pichashes))
         return kept

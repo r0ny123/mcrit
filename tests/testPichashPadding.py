@@ -254,3 +254,39 @@ class PichashPaddingTest(TestCase):
         self.db.settings.update_one({}, {"$set": {"pichash_padded": True}})
         self.db.functions.update_one({"function_id": self.functions[0]["function_id"]}, {"$set": {"_pichash": "0x1"}})
         self.assertEqual(1, migrate_pichash_padding.main(["--mode", "verify", "--host", server, "--port", str(port), "--db", DB_NAME]))
+
+    def _leading_zero_function(self):
+        return next(d for d in self.functions if short_form(d["_pichash"]) != d["_pichash"])
+
+    def test_the_pichash_cutoff_counts_both_spellings_of_a_value_together(self):
+        """An unpadded instance may hold a value in both spellings; the cutoff must see one total."""
+        self._make_legacy()
+        target = self._leading_zero_function()
+        # a second holder of the same value, written in the other (padded) spelling
+        other = next(d for d in self.functions if d["function_id"] != target["function_id"])
+        self.db.functions.update_one({"function_id": other["function_id"]}, {"$set": {"_pichash": target["_pichash"]}})
+        self.storage.rebuildPicHashCountIndex()
+        value = int(target["_pichash"], 16)
+        for index_complete in (True, False):
+            self.storage._setPicHashCountIndexComplete(index_complete)
+            self.storage._minhash_config.MINHASH_PICHASH_MAX_MATCHES = 1
+            self.assertEqual(set(), self.storage.getPicHashMatchesByFunctionIds([target["function_id"]])[value], index_complete)
+            self.storage._minhash_config.MINHASH_PICHASH_MAX_MATCHES = 2
+            holders = {function_id for _, _, function_id in self.storage.getPicHashMatchesByFunctionIds([target["function_id"]])[value]}
+            self.assertEqual({target["function_id"], other["function_id"]}, holders, index_complete)
+
+    def test_padding_invalidates_the_pichash_counts_instead_of_dropping_matches(self):
+        """After a migration the stored counts are keyed on the old spelling; they must not be trusted."""
+        self._make_legacy()
+        self.storage.rebuildPicHashCountIndex()
+        self.assertTrue(self.storage.isPicHashCountIndexComplete())
+        migrate_pichash_padding.run(self.db, "pad")
+        self.storage._pichash_padded = None
+        self.assertFalse(self.storage.isPicHashCountIndexComplete())
+        self.storage._minhash_config.MINHASH_PICHASH_MAX_MATCHES = 1000
+        target = self._leading_zero_function()
+        matches = self.storage.getPicHashMatchesByFunctionIds([target["function_id"]])
+        self.assertIn(target["function_id"], {function_id for _, _, function_id in matches[int(target["_pichash"], 16)]})
+        # a rebuild restores the index, keyed on the new spelling
+        self.storage.rebuildPicHashCountIndex()
+        self.assertEqual(matches, self.storage.getPicHashMatchesByFunctionIds([target["function_id"]]))
