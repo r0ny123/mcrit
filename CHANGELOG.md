@@ -103,7 +103,9 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   MCRITweb sorts families, samples and functions by, and the tie-break follows the sort
   direction so one index serves both; `explain()` on a real database went from
   `SORT -> FETCH -> IXSCAN` to `LIMIT -> FETCH -> IXSCAN`. NOTE that the first start after
-  upgrading builds these indexes. Also fixed: **paging stopped early whenever a page ended on
+  upgrading builds these indexes - six of them on `functions` - which on a large corpus takes
+  noticeable time before the server is ready (for scale: one instance holds 11.6M function
+  documents and 2.38 GB of indexes). Also fixed: **paging stopped early whenever a page ended on
   id 0** (function 0, sample 0, the unknown family), as the cursor was tested for truthiness
   ([mcritweb#59]).
 
