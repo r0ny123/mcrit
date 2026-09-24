@@ -56,6 +56,12 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - `benchmarks/` - the harness behind every number above: Malpedia fetch, SMDA report cache,
   per-stage 1-vs-N timing, corpus-structure analysis, Heaps' law fit, synthetic corpus growth
   fitted to a real corpus, quality comparison, and a scaling sweep.
+- **`GET /samples/{id}/smda` and `McritClient.getSmdaReportForSample` rebuild a sample's SMDA
+  report from storage.** `SampleEntry` keeps `smda_extras` - the report's top-level fields and
+  metadata it holds no field for, minus `xcfg` - and the disassembly comes from the functions'
+  blobs in one batched fetch. The example report round-trips byte for byte. NOTE that entries
+  stored before this carry no extras and rebuild with an empty report's defaults for them, and
+  functions whose disassembly was dropped are absent from the rebuilt xcfg ([#94]).
 
 ### Changed
 
@@ -384,3 +390,4 @@ date, the version, and what changed.
 [#157]: https://github.com/danielplohmann/mcrit/issues/157
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
+[#94]: https://github.com/danielplohmann/mcrit/issues/94
