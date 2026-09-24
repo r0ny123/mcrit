@@ -1504,7 +1504,7 @@ class MongoDbStorage(StorageInterface):
         ]
 
     def _getCandidatesForMinHashesNumpy(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1, as_arrays=False):
-        """Variant C: accumulate band hits as int32 arrays instead of dict[qid][cid] -> count.
+        """Variant C: accumulate band hits as int64 arrays instead of dict[qid][cid] -> count.
 
         Semantically identical to the dict version (np.unique(..., return_counts=True) counts
         repeated ids exactly like the += 1 loop did), but it never builds the per-pair Python
@@ -1518,7 +1518,10 @@ class MongoDbStorage(StorageInterface):
             cursor = self._getDb()["band_%d" % band_number].aggregate(self._bandLookupPipeline(list(band_hashes)))
             for hit in cursor:
                 reference_function_ids = band_hash_to_function_ids[band_number][hit["band_hash"]]
-                posting_list = np.array(hit["function_ids"], dtype=np.int32)
+                # int64, not int32: function ids come from a counter that never reuses an id, so they
+                # pass 2**31 - 1 within a few million samples. numpy 2 then raises OverflowError, and
+                # numpy 1.x silently wraps the id onto a different function.
+                posting_list = np.array(hit["function_ids"], dtype=np.int64)
                 for function_id in reference_function_ids:
                     if function_id not in hit_chunks:
                         hit_chunks[function_id] = [posting_list]

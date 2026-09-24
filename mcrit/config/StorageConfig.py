@@ -74,7 +74,7 @@ class StorageConfig(ConfigInterface):
     # STORAGE_MATCHING_CACHE_MAX_BYTES to 0 disables the ceiling entirely.
     STORAGE_MATCHING_CACHE_MAX_ENTRIES: int = 0
     # How getCandidatesForMinHashes accumulates band hits:
-    #  * "numpy": per-query-function int32 hit arrays + np.unique(return_counts) (default)
+    #  * "numpy": per-query-function int64 hit arrays + np.unique(return_counts) (default)
     #  * "dict":  dict[query_fid][candidate_fid] -> count  (legacy fallback, deprecated)
     # Same results either way; "numpy" avoids the ~100 B/pair Python dict and the O(pairs) loop.
     STORAGE_CANDIDATE_ACCUMULATION: str = "numpy"
