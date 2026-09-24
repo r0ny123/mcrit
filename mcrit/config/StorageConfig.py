@@ -74,7 +74,7 @@ class StorageConfig(ConfigInterface):
     # STORAGE_MATCHING_CACHE_MAX_BYTES to 0 disables the ceiling entirely.
     STORAGE_MATCHING_CACHE_MAX_ENTRIES: int = 0
     # How getCandidatesForMinHashes accumulates band hits:
-    #  * "numpy": per-query-function int32 hit arrays + np.unique(return_counts) (default)
+    #  * "numpy": per-query-function int64 hit arrays + np.unique(return_counts) (default)
     #  * "dict":  dict[query_fid][candidate_fid] -> count  (legacy fallback, deprecated)
     # Same results either way; "numpy" avoids the ~100 B/pair Python dict and the O(pairs) loop.
     STORAGE_CANDIDATE_ACCUMULATION: str = "numpy"
@@ -91,6 +91,25 @@ class StorageConfig(ConfigInterface):
     # function_ids per $in query. Must stay well under Mongo's 16 MB command limit; smaller
     # slices also give the thread pool something to overlap.
     STORAGE_CACHE_FETCH_SLICE_SIZE: int = 500000
+    # Skip band hashes whose posting list is longer than this when generating candidates.
+    # 0 (the default) keeps every posting list, i.e. the behaviour this knob was added to.
+    #
+    # A band hash held by a large fraction of the corpus says almost nothing about *which*
+    # samples resemble the query - it is the binary-similarity equivalent of a stopword, and
+    # it is also exactly the posting list that is expensive to read and turns into candidate
+    # pairs. Measured on 257 real Malpedia samples: band posting lists are p50=1, p99=42, but
+    # max=3598, and that tail grows with the corpus while the median does not. Capping it
+    # bounds candidate volume by (query functions x bands x cutoff) instead of by corpus size.
+    #
+    # Measured starting point: 200. At 12,500 samples that is where the traversal stops scaling
+    # with the corpus while top-10 and top-25 sample recall against the uncapped result are still
+    # 1.000 (median 1.172 s at cutoff 1000 -> 0.374 s at 200; tightening to 100 buys little more).
+    #
+    # This is a recall/latency trade: a match findable *only* through a band hash that common
+    # is no longer found by the fuzzy path. It is not a silent one - PicHash matching is
+    # unaffected, and benchmarks/compare_quality.py measures what a given cutoff costs against
+    # the uncapped result on a real corpus. See docs/scaling/ for measured numbers.
+    STORAGE_BAND_DF_CUTOFF: int = 0
     # limit maximum export size to protect the system against running OOM, default: 1 GB
     STORAGE_MAX_EXPORT_SIZE = 1024 * 1024 * 1024
 
