@@ -87,6 +87,23 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 ### Changed
 
 
+- The **matching-cache fetch decodes one MinHash per distinct signature**, not one per candidate
+  function, and every function carrying a signature shares that one decoded object. Exact, not
+  approximate: the decode is a pure function of the stored hex string. Candidate sets repeat
+  signatures far more than the corpus does, because they are assembled by band collision -
+  measured **3.99x to 29.59x** on the candidate sets of three query samples against a 7,244-sample
+  real corpus, where the corpus-wide figure is 2.46x. The fetch logs its own factor. In isolation
+  this is 7%-50% off the fetch and 0%-24% off its allocation, growing with the candidate set;
+  **end to end it is not measurable** at this corpus size (fetch stage 10.193 s -> 10.487 s with
+  the two-stage knobs off, 0.269 s -> 0.270 s with them on, summed over three queries, three
+  repeats - a run-to-run spread several times larger than the effect), because the stage is
+  dominated by per-function cache-object construction that this does not touch. It is worth having
+  as a reduction in work proportional to the candidate set, which is what grows with the corpus,
+  and not as a speed-up anybody will notice today. The fetch still *reads* one document per
+  candidate function: each carries per-function attribution (`sample_id`), and reading fewer would
+  need a signature-keyed index, i.e. a schema change. Match reports are unchanged, asserted by a
+  test that replays a query with the deduplication defeated and compares the whole report.
+
 - Pairwise scoring now compares each **distinct** MinHash signature once rather than once per
   function holding it. This is exact, not approximate: a score depends only on the two
   signatures, so functions sharing one score identically against any query. Worth 2.46x on 257
