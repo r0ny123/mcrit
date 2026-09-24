@@ -98,6 +98,14 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   runs - it assigned each run's size in turn, keeping only the last. Such samples were
   undercounted, distorting their coverage ranking in the shortlist. Both the whole-corpus and the
   per-sample paths now sum.
+- **A document over MongoDB's 16 MiB limit lost the whole sample behind a bare
+  `ValueError("Database insert failed.")`** that named nothing - reported 4 times in 120k files,
+  typically one giant function's `xcfg` blob. `_dbInsertMany` now recognises both shapes of the
+  error (pymongo's `DocumentTooLarge` and the server's write error after an ordered insert) and
+  logs the offending documents with their ids and byte sizes. An oversized `xcfg` / `query_xcfg`
+  blob is dropped with a warning and the rest stored, so the sample survives; NOTE that the
+  affected function then has no disassembly and so no MinHash. An oversized document in any other
+  collection still fails, now naming it ([#42]).
 
 
 ## [1.9.0] - 2026-09-08
@@ -384,3 +392,4 @@ date, the version, and what changed.
 [#157]: https://github.com/danielplohmann/mcrit/issues/157
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
+[#42]: https://github.com/danielplohmann/mcrit/issues/42
