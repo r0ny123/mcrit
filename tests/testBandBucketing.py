@@ -33,9 +33,9 @@ class BandBucketingTest(unittest.TestCase):
     """A band posting list must be able to outgrow one MongoDB document.
 
     A posting list is a `function_ids` array inside a single document and MongoDB caps a document
-    at 16 MB. Measured on a 7,244-sample real corpus the largest band document held 18,968
-    postings in 197,606 bytes, so roughly 1.6M fit - 84.9x the corpus, putting the wall near
-    615,000 samples. The $push does not degrade there, it raises, and indexing stops. Sharding
+    at 16 MB, which is about 1.35M ids (1.05M once they need int64). On a 7,244-sample real corpus
+    the longest posting list across all 20 bands held 36,183 ids, putting the wall near 270,000
+    samples. The $push does not degrade there, it raises, and indexing stops. Sharding
     cannot move it, because a document cannot span shards.
 
     What matters for correctness is that splitting a posting list changes nothing a caller sees.

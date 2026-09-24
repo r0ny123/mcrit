@@ -1344,10 +1344,10 @@ class MongoDbStorage(StorageInterface):
         """Append postings, splitting a band hash across (band_hash, bucket) documents.
 
         A posting list is an array inside one document and MongoDB caps a document at 16 MB, so a
-        band hash common enough to accumulate ~1.6M postings stops being writable at all - the
-        $push fails rather than slowing down, and indexing halts. Measured on a 7,244-sample real
-        corpus that wall sits near 615,000 samples, and no amount of sharding moves it, because a
-        document cannot span shards.
+        band hash common enough to accumulate ~1.35M postings (~1.05M once ids need int64) stops
+        being writable at all - the $push fails rather than slowing down, and indexing halts.
+        Extrapolated from a 7,244-sample real corpus that wall sits near 270,000 samples, and no
+        amount of sharding moves it, because a document cannot span shards.
 
         Shape: bucket 0 carries the bookkeeping for the whole hash - `df` (the total across every
         bucket, which is what STORAGE_BAND_DF_CUTOFF filters on), `tail` (the highest bucket in
@@ -1509,7 +1509,7 @@ class MongoDbStorage(StorageInterface):
         ]
 
     def _getCandidatesForMinHashesNumpy(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1, as_arrays=False):
-        """Variant C: accumulate band hits as int32 arrays instead of dict[qid][cid] -> count.
+        """Variant C: accumulate band hits as int64 arrays instead of dict[qid][cid] -> count.
 
         Semantically identical to the dict version (np.unique(..., return_counts=True) counts
         repeated ids exactly like the += 1 loop did), but it never builds the per-pair Python
@@ -1523,7 +1523,10 @@ class MongoDbStorage(StorageInterface):
             cursor = self._getDb()["band_%d" % band_number].aggregate(self._bandLookupPipeline(list(band_hashes)))
             for hit in cursor:
                 reference_function_ids = band_hash_to_function_ids[band_number][hit["band_hash"]]
-                posting_list = np.array(hit["function_ids"], dtype=np.int32)
+                # int64, not int32: function ids come from a counter that never reuses an id, so they
+                # pass 2**31 - 1 within a few million samples. numpy 2 then raises OverflowError, and
+                # numpy 1.x silently wraps the id onto a different function.
+                posting_list = np.array(hit["function_ids"], dtype=np.int64)
                 for function_id in reference_function_ids:
                     if function_id not in hit_chunks:
                         hit_chunks[function_id] = [posting_list]
