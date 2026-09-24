@@ -40,6 +40,8 @@ Every response is a JSON document `{"status": "successful" | "failed", "data": .
 | `GET` | `/query/picblockhash/{picblockhash}/summary` | Counts of families, samples and functions containing a basic block with the given picblockhash (16 hex digits). | `getMatchesForPicBlockHash` |
 | `GET` | `/query/pichash/{pichash}` | The functions with the given pichash (16 hex digits) as (family_id, sample_id, function_id) tuples. Malformed hashes answer 400. | `getMatchesForPicHash` |
 | `GET` | `/query/pichash/{pichash}/summary` | Counts of families, samples and functions with the given pichash (16 hex digits). | `getMatchesForPicHash` |
+| `GET` | `/rebuild_band_df_index` | Schedule a job that stores and indexes each band's posting-list length, so STORAGE_BAND_DF_CUTOFF can skip from the index. Answers the job id. | `rebuildBandDfIndex` |
+| `GET` | `/rebuild_function_range_index` | Schedule a job that rebuilds the function->sample range index two-stage matching needs. Answers the job id. | `rebuildFunctionRangeIndex` |
 | `GET` | `/rebuild_index` | Schedule a job that drops the band index and rebuilds it from the stored minhashes. Answers the job id. | `rebuildIndex` |
 | `GET` | `/rebuild_picblockhash_index` | Schedule a job that rebuilds the inverted picblockhash index getUniqueBlocks reads. Answers the job id. | `rebuildPicBlockHashIndex` |
 | `GET` | `/recalculate_minhashes` | Schedule a job that drops every minhash and recalculates all of them. Answers the job id. | `recalculateMinHashes` |

@@ -256,6 +256,20 @@ class McritClient:
             return self._passthrough(response)
         return self._handle(response)
 
+    def rebuildFunctionRangeIndex(self) -> Optional[str]:
+        """GET /rebuild_function_range_index: schedule a job that rebuilds the function->sample range index two-stage matching needs. Answers the job id."""
+        response = requests.get(f"{self.mcrit_server}/rebuild_function_range_index", headers=self.headers)
+        if self.raw:
+            return self._passthrough(response)
+        return self._handle(response)
+
+    def rebuildBandDfIndex(self) -> Optional[str]:
+        """GET /rebuild_band_df_index: schedule a job that stores and indexes each band's posting-list length, so STORAGE_BAND_DF_CUTOFF can skip from the index. Answers the job id."""
+        response = requests.get(f"{self.mcrit_server}/rebuild_band_df_index", headers=self.headers)
+        if self.raw:
+            return self._passthrough(response)
+        return self._handle(response)
+
     def repairMinHashes(self) -> Optional[str]:
         """POST /repair_minhashes: schedule a job that rehashes only the samples whose minhashes an older smda escaper produced (#142). Answers the job id."""
         response = requests.post(f"{self.mcrit_server}/repair_minhashes", headers=self.headers)
