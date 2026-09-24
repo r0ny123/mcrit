@@ -4,7 +4,7 @@ import re
 import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
-from mcrit.server.utils import db_log_msg, jsonify, timing
+from mcrit.server.utils import db_log_msg, get_username, jsonify, timing
 
 
 class StatusResource:
@@ -82,14 +82,14 @@ class StatusResource:
 
     @timing
     def on_get_complete_minhashes(self, req, resp):
-        minhash_report = self.index.updateMinHashes(None, force_recalculation=True)
+        minhash_report = self.index.updateMinHashes(None, force_recalculation=True, username=get_username(req))
         resp.data = jsonify({"status": "successful", "data": minhash_report})
         db_log_msg(self.index, req, "StatusResource.on_get_complete_minhashes - success.")
         return
 
     @timing
     def on_get_rebuild_index(self, req, resp):
-        index_report = self.index.rebuildIndex(force_recalculation=True)
+        index_report = self.index.rebuildIndex(force_recalculation=True, username=get_username(req))
         resp.data = jsonify({"status": "successful", "data": index_report})
         db_log_msg(self.index, req, "StatusResource.on_get_rebuild_index - success.")
         return
@@ -102,6 +102,22 @@ class StatusResource:
         db_log_msg(self.index, req, "StatusResource.on_get_rebuild_picblockhash_index - success.")
         return
 
+    @timing
+    def on_get_rebuild_function_range_index(self, req, resp):
+        """Schedule a job that rebuilds the function->sample range index two-stage matching needs. Answers the job id."""
+        index_report = self.index.rebuildFunctionRangeIndex(force_recalculation=True)
+        resp.data = jsonify({"status": "successful", "data": index_report})
+        db_log_msg(self.index, req, "StatusResource.on_get_rebuild_function_range_index - success.")
+        return
+
+    @timing
+    def on_get_rebuild_band_df_index(self, req, resp):
+        """Schedule a job that stores and indexes each band's posting-list length, so STORAGE_BAND_DF_CUTOFF can skip from the index. Answers the job id."""
+        index_report = self.index.rebuildBandDfIndex(force_recalculation=True)
+        resp.data = jsonify({"status": "successful", "data": index_report})
+        db_log_msg(self.index, req, "StatusResource.on_get_rebuild_band_df_index - success.")
+        return
+
     def on_post_recompute_family_stats(self, req, resp):
         """Schedule a job that sets every family's sample, function and library counters from the collections, recreating missing family documents. Answers the job id."""
         job_id = self.index.recomputeFamilyStats(force_recalculation=True)
@@ -111,7 +127,7 @@ class StatusResource:
 
     @timing
     def on_get_recalculate_pichashes(self, req, resp):
-        index_report = self.index.recalculatePicHashes(force_recalculation=True)
+        index_report = self.index.recalculatePicHashes(force_recalculation=True, username=get_username(req))
         resp.data = jsonify({"status": "successful", "data": index_report})
         db_log_msg(self.index, req, "StatusResource.on_get_recalculate_pichashes - success.")
         return
@@ -126,7 +142,7 @@ class StatusResource:
 
     @timing
     def on_get_recalculate_minhashes(self, req, resp):
-        index_report = self.index.recalculateMinHashes(force_recalculation=True)
+        index_report = self.index.recalculateMinHashes(force_recalculation=True, username=get_username(req))
         resp.data = jsonify({"status": "successful", "data": index_report})
         db_log_msg(self.index, req, "StatusResource.on_get_recalculate_minhashes - success.")
         return
