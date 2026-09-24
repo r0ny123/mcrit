@@ -98,6 +98,12 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   runs - it assigned each run's size in turn, keeping only the last. Such samples were
   undercounted, distorting their coverage ranking in the shortlist. Both the whole-corpus and the
   per-sample paths now sum.
+- **A repeated request could be served by a queued or running force rematch** instead of the
+  finished job whose result it could use, because the cache picked the newest job with the same
+  descriptor whatever its state. Both queues now prefer a finished job, then the newest, and
+  never reuse a failed or terminated one. NOTE that this changes which job answers: a pending
+  forced rematch no longer shadows an earlier finished result, verified against a running
+  instance ([mcritweb#47]).
 
 
 ## [1.9.0] - 2026-09-08
@@ -384,3 +390,4 @@ date, the version, and what changed.
 [#157]: https://github.com/danielplohmann/mcrit/issues/157
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
+[mcritweb#47]: https://github.com/fkie-cad/mcritweb/issues/47
