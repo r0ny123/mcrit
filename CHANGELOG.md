@@ -56,6 +56,12 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - `benchmarks/` - the harness behind every number above: Malpedia fetch, SMDA report cache,
   per-stage 1-vs-N timing, corpus-structure analysis, Heaps' law fit, synthetic corpus growth
   fitted to a real corpus, quality comparison, and a scaling sweep.
+- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
+  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
+  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
+  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
+  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
+  Family entries carry no sample lists ([#207]).
 
 ### Changed
 
@@ -384,3 +390,4 @@ date, the version, and what changed.
 [#157]: https://github.com/danielplohmann/mcrit/issues/157
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
+[#207]: https://github.com/danielplohmann/mcrit/issues/207
