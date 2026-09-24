@@ -98,6 +98,14 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   runs - it assigned each run's size in turn, keeping only the last. Such samples were
   undercounted, distorting their coverage ranking in the shortlist. Both the whole-corpus and the
   per-sample paths now sum.
+- **Renaming a family to its own name deleted it on MongoDB**, while its samples and functions
+  kept its id, and raised `KeyError` on MemoryStorage; for family 0, named `""`, it doubled the
+  counters. `modifyFamily` merges into whatever family the new name resolves to, which here was
+  the family itself. The rename now runs only when the name differs from the stored one -
+  compared, not looked up, since names are not unique in storage - and the rest of the update
+  still applies. MemoryStorage also failed an ordinary rename with `KeyError` whenever the
+  renamed family's samples were not the last ones stored. NOTE that a same-name rename now writes
+  nothing on MongoDB and so no longer advances `db_state` there ([#208]).
 
 
 ## [1.9.0] - 2026-09-08
@@ -384,3 +392,4 @@ date, the version, and what changed.
 [#157]: https://github.com/danielplohmann/mcrit/issues/157
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
+[#208]: https://github.com/danielplohmann/mcrit/issues/208
