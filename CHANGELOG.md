@@ -98,6 +98,14 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   runs - it assigned each run's size in turn, keeping only the last. Such samples were
   undercounted, distorting their coverage ranking in the shortlist. Both the whole-corpus and the
   per-sample paths now sum.
+- **`PUT /samples/<id>` and `PUT /families/<id>` refused `""` and every one-character family
+  name**, although their messages allow 0-64 characters, so a version or component could not be
+  cleared once set and no sample could be moved into family 0, whose name is `""`. The patterns
+  now accept what the messages describe, and end in `\Z` rather than `$`, which also matched
+  before a trailing newline: `"ab\n"` as a family name and `"1.0\n"` as a version are now
+  refused. Checked over 37,210 generated strings against the old patterns: nothing else changes.
+  **Needs the same-name family rename fix ([#208])** - with `""` accepted, renaming family 0 to
+  its own name would otherwise double its counters ([#209]).
 
 
 ## [1.9.0] - 2026-09-08
@@ -384,3 +392,5 @@ date, the version, and what changed.
 [#157]: https://github.com/danielplohmann/mcrit/issues/157
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
+[#208]: https://github.com/danielplohmann/mcrit/issues/208
+[#209]: https://github.com/danielplohmann/mcrit/issues/209
