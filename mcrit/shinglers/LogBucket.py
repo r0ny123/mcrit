@@ -61,6 +61,7 @@ class LogBucket:
             with open(bucket_path) as fjson:
                 value_to_bucket_range = json.load(fjson)
             self._value_to_bucket_range = {int(bucket): value for bucket, value in value_to_bucket_range.items()}
+            self._recordTableBounds()
             return
         else:
             LOGGER.info(f"Calculating logbuckets for the first time - we will cache them for future use @{bucket_path}")
@@ -105,10 +106,37 @@ class LogBucket:
             if len(bucket_range):
                 value_to_bucket_range[value] = bucket_range
         self._value_to_bucket_range = value_to_bucket_range
+        self._recordTableBounds()
         with open(bucket_path, "w") as fjson:
             json.dump(value_to_bucket_range, fjson)
 
+    def _recordTableBounds(self):
+        """Remember the range the table actually covers, for clamping.
+
+        Not derived from max_value on purpose. The cache file name carries none of the
+        parameters it was built with, so an instance asking for one max_value can be served a
+        table built for another - LogBucket(1024, 1) returns the cached 100,000-entry table.
+        Until that is fixed upstream, the only bounds that can be trusted are the ones present.
+        Entries are also skipped where a bucket range comes out empty, so the top key is not
+        guaranteed to be max_value - 1 even on a freshly built table.
+        """
+        self._lowest_value = min(self._value_to_bucket_range) if self._value_to_bucket_range else 0
+        self._highest_value = max(self._value_to_bucket_range) if self._value_to_bucket_range else 0
+
     def getLogBucketRange(self, value, increased_center=False):
+        # The table is precomputed for 0..max_value-1, so anything outside that raised KeyError -
+        # which aborts the whole indexing job over a single outsized function. FuzzyStatPairShingler
+        # already applies exactly this bound to stack_size, but the other fields it buckets
+        # (max_block_size, num_ins_C, num_ins_S, num_calls) are unbounded, and real corpora contain
+        # functions that exceed it: a basic block of 108,837 bytes was what surfaced this.
+        #
+        # Clamping maps such values onto the nearest defined bucket instead. No value inside the
+        # table changes bucket, so no existing MinHash changes - this only defines behaviour where
+        # there was previously a crash.
+        if value > self._highest_value:
+            value = self._highest_value
+        elif value < self._lowest_value:
+            value = self._lowest_value
         return self._value_to_bucket_range[value]
 
 
