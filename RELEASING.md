@@ -100,7 +100,10 @@ Done once, by a repository owner; the workflow cannot create these for itself.
 
 - **PyPI trusted publisher** for the `mcrit` project: owner `familiary`, repository `mcrit`,
   workflow `publish-release.yml`, environment `pypi`. Add the same publisher on TestPyPI with
-  environment `testpypi` to enable rehearsals.
+  environment `testpypi` to enable rehearsals. TestPyPI has no `mcrit` project yet, so there it has
+  to be created as a [pending publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/),
+  which creates the project on the first rehearsal; an ordinary publisher cannot be added to a
+  project that does not exist, and without one a rehearsal fails at the publish job.
 - **GitHub environments** `pypi` and `testpypi` (Settings → Environments). Restricting `pypi` to
   the `v*` tag pattern and requiring a reviewer is recommended: it makes the publish step a
   deliberate click even if a tag is pushed by mistake.
