@@ -25,8 +25,8 @@ class ApiReferenceTest(unittest.TestCase):
         by_route = {(entry["method"], entry["path"]): entry["clients"] for entry in self.entries}
         self.assertEqual(["getFamily", "isFamilyId"], by_route[("GET", "/families/{family_id:int}")])
         self.assertEqual(["getMatchesForPicHash"], by_route[("GET", "/query/pichash/{pichash}/summary")])
-        self.assertEqual(["search_families"], by_route[("GET", "/search/families")])
-        self.assertEqual(["search_functions"], by_route[("GET", "/search/functions")])
+        self.assertEqual(["searchFamilies", "search_families"], by_route[("GET", "/search/families")])
+        self.assertEqual(["searchFunctions", "search_functions"], by_route[("GET", "/search/functions")])
         self.assertEqual(["deleteQueueData"], by_route[("DELETE", "/jobs")])
         self.assertEqual(["deleteJob"], by_route[("DELETE", "/jobs/{job_id}")])
         self.assertEqual(["getJobData"], by_route[("GET", "/jobs/{job_id}")])

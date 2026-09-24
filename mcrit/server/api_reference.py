@@ -16,7 +16,7 @@ import inspect
 import os
 import re
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import falcon.inspect
 
@@ -83,6 +83,34 @@ _ROUTE_PATHS: List[str] = []
 _QUERY_PLACEHOLDER = re.compile(r"\{[^}]*(query|param|uri)[^}]*\}$")
 
 
+def _public_names(
+    method_name: str,
+    callers: Dict[str, List[Tuple[str, Dict[str, str]]]],
+    partials: Dict[str, List[Tuple[str, Dict[str, str]]]],
+    seen: Optional[Set[str]] = None,
+) -> List[Tuple[str, Dict[str, str]]]:
+    """The public methods a request made in method_name is attributed to, with the helper parameters they bind.
+
+    A private helper may itself be reached through another private helper (search_families ->
+    _search_base -> _search_request), so the attribution follows private callers until it reaches
+    public methods; a partialmethod binding found on the way is kept for the path substitution.
+    """
+    if not method_name.startswith("_"):
+        return [(method_name, {})]
+    seen = set() if seen is None else seen
+    if method_name in seen:
+        return []
+    seen.add(method_name)
+    names = list(partials.get(method_name, []))
+    for caller, bound in callers.get(method_name, []):
+        # a binding made further up reaches this helper when the parameter keeps its name
+        for name, outer in _public_names(caller, callers, partials, set(seen)):
+            entry = (name, {**outer, **bound})
+            if entry not in names:
+                names.append(entry)
+    return names
+
+
 def client_calls() -> List[Tuple[str, str, str]]:
     """(HTTP method, path as the client writes it, McritClient method) for every request in McritClient."""
     with open(CLIENT_SOURCE) as handle:
@@ -91,11 +119,17 @@ def client_calls() -> List[Tuple[str, str, str]]:
     client = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "McritClient")
     methods = [node for node in client.body if isinstance(node, ast.FunctionDef)]
     # a request made in a private helper is attributed to the public methods that call the helper
-    callers: Dict[str, List[str]] = {}
+    # searchFamilies calls self._typed_search("families", ...): a constant argument binds the
+    # helper's parameter the same way a partialmethod does
+    by_name = {method.name: method for method in methods}
+    callers: Dict[str, List[Tuple[str, Dict[str, str]]]] = {}
     for method in methods:
         for node in ast.walk(method):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "self":
-                callers.setdefault(node.func.attr, []).append(method.name)
+                callee = by_name.get(node.func.attr)
+                params = callee.args.args[1:] if callee is not None else []
+                bound = {param.arg: str(value.value) for param, value in zip(params, node.args) if isinstance(value, ast.Constant)}
+                callers.setdefault(node.func.attr, []).append((method.name, bound))
     # search_families = functools.partialmethod(_search_base, "families") binds the helper's
     # first parameter after self to a constant, which names the path segment
     partials: Dict[str, List[Tuple[str, Dict[str, str]]]] = {}
@@ -127,10 +161,7 @@ def client_calls() -> List[Tuple[str, str, str]]:
             if path.endswith("{summary_string}"):
                 # "/summary" or nothing: the method serves the endpoint and its summary variant
                 variants = [path[: -len("{summary_string}")], path[: -len("{summary_string}")] + "/summary"]
-            if method.name.startswith("_"):
-                names = [(caller, {}) for caller in callers.get(method.name, []) if not caller.startswith("_")] + partials.get(method.name, [])
-            else:
-                names = [(method.name, {})]
+            names = _public_names(method.name, callers, partials)
             for variant in variants:
                 for name, bound in names:
                     bound_variant = variant
