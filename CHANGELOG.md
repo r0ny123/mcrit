@@ -15,6 +15,32 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **`McritClient`'s error modes reach the three maintenance jobs.** `rebuildPicBlockHashIndex`,
+  `repairMinHashes` and `recomputeFamilyStats` parsed their answer with `handle_response`
+  directly instead of `self._handle`, so a client built with `raise_client_errors` or
+  `raise_server_errors` still got `None` from them - a refused or failed job request that looked
+  like one nothing had answered. They landed while the modes were being written, which is how
+  they were missed. `testClientErrors` now fails on any method that parses outside the client's
+  mode, not only on these three.
+- **`LogBucket` raised `KeyError` for any value past its precomputed table**, which aborts the
+  whole indexing job. The table covers `0..SHINGLER_LOGBUCKETS-1` (100,000 by default) and
+  `FuzzyStatPairShingler` buckets `max_block_size`, `num_ins_C`, `num_ins_S` and `num_calls`
+  through it without bounding any of them - only `stack_size` is clamped, at its own call site.
+  A single basic block of 108,837 bytes in a real corpus was enough to make that corpus
+  unindexable, and the failure gets *likelier* as corpora grow. Values outside the table are now
+  clamped to its bounds. **No MinHash changes**: only inputs that previously raised behave
+  differently, asserted across the whole table.
+- **`Worker.updateMinHashes` raised `UnboundLocalError` when there was nothing left to hash.**
+  `minhashes` was bound only inside the batch loop, so a run with an empty backlog failed exactly
+  like a crash - and that is the normal state of a *resumed* index, which is where it was hit.
+  The same statement also returned the size of the **last batch** rather than the total, silently
+  under-reporting any run longer than one workpack (a 238,991-function backlog across 24 batches
+  reported whatever the final batch held). Every caller reads it as a total, so it now
+  accumulates. **This changes the number returned**, toward what `recalculateMinHashes`,
+  `updateMinHashesForSample` and `/status` already meant by it.
+
 ## [1.9.0] - 2026-09-08
 
 Correctness and operator-recovery release, plus a large `getUniqueBlocks` speedup. **Matching
