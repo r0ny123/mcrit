@@ -161,8 +161,13 @@ class BandBucketingTest(unittest.TestCase):
         self._fill(index, [self.report, self.report_2])
         storage = index._storage
         sample_ids = sorted(sample.sample_id for sample in storage.getSamples(start_index=0, limit=0))
+        victim_function_ids = {function.function_id for function in storage.getFunctionsBySampleId(sample_ids[0])}
+        self.assertTrue(victim_function_ids)
         storage.deleteSample(sample_ids[0])
         collection = storage._getDb()["band_0"]
+        for band_number in range(storage._storage_config.STORAGE_NUM_BANDS):
+            leaked = storage._getDb()["band_%d" % band_number].count_documents({"function_ids": {"$in": sorted(victim_function_ids)}})
+            self.assertEqual(leaked, 0, "the deleted sample's postings must be gone from every bucket")
         for row in collection.aggregate(
             [
                 {"$project": {"band_hash": 1, "bucket": {"$ifNull": ["$bucket", 0]}, "n": {"$size": {"$ifNull": ["$function_ids", []]}}}},
@@ -172,6 +177,85 @@ class BandBucketingTest(unittest.TestCase):
             head = collection.find_one({"band_hash": row["_id"], "bucket": 0}, {"df": 1, "_id": 0})
             if head is not None:
                 self.assertEqual(head["df"], row["total"], "df must match the postings that survived the deletion")
+
+    def _rawStorage(self, bucket_size, db_suffix, df_cutoff=0):
+        server, port = getTestMongoServerAndPort()
+        config = McritConfig()
+        config.STORAGE_CONFIG = StorageConfig(
+            STORAGE_METHOD=StorageFactory.STORAGE_METHOD_MONGODB,
+            STORAGE_SERVER=server,
+            STORAGE_PORT=port,
+            STORAGE_MONGODB_DBNAME="test_band_bucketing_raw_" + db_suffix,
+            STORAGE_BAND_BUCKET_SIZE=bucket_size,
+            STORAGE_BAND_DF_CUTOFF=df_cutoff,
+        )
+        storage = StorageFactory.getStorage(config)
+        storage.clearStorage()
+        return storage
+
+    def _bandState(self, storage, band_hash=4242):
+        return sorted(
+            (document.get("bucket"), document.get("df"), document.get("tail"), document.get("tail_n"), list(document.get("function_ids") or []))
+            for document in storage._getDb()["band_0"].find({"band_hash": band_hash})
+        )
+
+    def _pullFromSevenPostings(self, bucket_size, db_suffix, victims):
+        # one hash, 7 postings: with bucket_size 2 that is buckets 0..3 holding [1,2] [3,4] [5,6] [7]
+        storage = self._rawStorage(bucket_size, db_suffix)
+        storage._updateBands({0: {4242: list(range(1, 8))}}, method="push")
+        storage._updateBands({0: {4242: victims}}, method="pull")
+        state = self._bandState(storage)
+        surviving = sorted(function_id for _bucket, _df, _tail, _tail_n, ids in state for function_id in ids)
+        return storage, state, surviving
+
+    def testPullUnbucketedRemovesPostings(self):
+        _storage, _state, surviving = self._pullFromSevenPostings(0, "pull_plain", [5, 6, 7])
+        self.assertEqual(surviving, [1, 2, 3, 4])
+
+    def testPullReachesEveryBucket(self):
+        """A pull must remove postings from every bucket of a hash, not only the first document it matches."""
+        _storage, state, surviving = self._pullFromSevenPostings(2, "pull_upper", [5, 6, 7])
+        self.assertEqual(surviving, [1, 2, 3, 4])
+        head = [row for row in state if row[0] == 0][0]
+        self.assertEqual(head[1], 4, "df must count only the surviving postings")
+
+    def testPullAcrossBucketZeroAndUpper(self):
+        _storage, state, surviving = self._pullFromSevenPostings(2, "pull_mixed", [1, 5])
+        self.assertEqual(surviving, [2, 3, 4, 6, 7])
+        head = [row for row in state if row[0] == 0][0]
+        self.assertEqual(head[1], 5)
+
+    def testEmptyingBucketZeroKeepsBookkeeping(self):
+        """Bucket 0 alone carries df/tail/tail_n, so it must survive while any other bucket of the hash does."""
+        storage, state, surviving = self._pullFromSevenPostings(2, "pull_zero", [1, 2])
+        self.assertEqual(surviving, [3, 4, 5, 6, 7])
+        heads = [row for row in state if row[0] == 0]
+        self.assertEqual(len(heads), 1, "bucket 0 must survive to carry df/tail/tail_n")
+        self.assertEqual(heads[0][1:4], (5, 3, 1))
+        # purging residue must not take it either
+        storage.purgeEmptyBandDocuments()
+        self.assertEqual(self._bandState(storage), state)
+        # and the next push continues from the real tail with the real df
+        storage._updateBands({0: {4242: [8, 9]}}, method="push")
+        state = self._bandState(storage)
+        head = [row for row in state if row[0] == 0][0]
+        self.assertEqual(head[1], 7)
+        self.assertEqual(sorted(i for row in state for i in row[4]), [3, 4, 5, 6, 7, 8, 9])
+        self.assertTrue(all(len(row[4]) <= 2 for row in state))
+
+    def testPullingEverythingRemovesTheHash(self):
+        storage, state, _surviving = self._pullFromSevenPostings(2, "pull_all", list(range(1, 8)))
+        self.assertEqual(state, [])
+
+    def testPullOfUnknownHashCreatesNothing(self):
+        storage = self._rawStorage(2, "pull_unknown")
+        storage._updateBands({0: {4242: [1]}}, method="pull")
+        self.assertEqual(self._bandState(storage), [])
+
+    def testCutoffAboveBucketSizeIsRejected(self):
+        """Only bucket 0 carries df, so a cutoff a spilled hash could fit under would return bucket 0 alone."""
+        with self.assertRaises(ValueError):
+            self._rawStorage(2, "cutoff", df_cutoff=5)._getDb()
 
 
 if __name__ == "__main__":
