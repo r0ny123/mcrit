@@ -2,7 +2,7 @@
 
 This repository follows the release process shared across the MCRIT ecosystem
 ([smda](https://github.com/danielplohmann/smda), [purepdb](https://github.com/danielplohmann/purepdb),
-[mcrit](https://github.com/danielplohmann/mcrit), [mcritweb](https://github.com/fkie-cad/mcritweb),
+[mcrit](https://github.com/familiary/mcrit), [mcritweb](https://github.com/fkie-cad/mcritweb),
 [mcrit-plugin](https://github.com/danielplohmann/mcrit-plugin),
 [docker-mcrit](https://github.com/danielplohmann/docker-mcrit)). The shape is the same everywhere;
 this file states the values that are specific to this repository.
@@ -98,7 +98,7 @@ GitHub release. Rehearse the first release after any change to the workflow.
 
 Done once, by a repository owner; the workflow cannot create these for itself.
 
-- **PyPI trusted publisher** for the `mcrit` project: owner `danielplohmann`, repository `mcrit`,
+- **PyPI trusted publisher** for the `mcrit` project: owner `familiary`, repository `mcrit`,
   workflow `publish-release.yml`, environment `pypi`. Add the same publisher on TestPyPI with
   environment `testpypi` to enable rehearsals.
 - **GitHub environments** `pypi` and `testpypi` (Settings → Environments). Restricting `pypi` to

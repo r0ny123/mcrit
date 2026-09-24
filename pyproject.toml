@@ -67,10 +67,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/danielplohmann/mcrit"
-Repository = "https://github.com/danielplohmann/mcrit"
-Issues = "https://github.com/danielplohmann/mcrit/issues"
-Changelog = "https://github.com/danielplohmann/mcrit/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/familiary/mcrit"
+Repository = "https://github.com/familiary/mcrit"
+Issues = "https://github.com/familiary/mcrit/issues"
+Changelog = "https://github.com/familiary/mcrit/blob/main/CHANGELOG.md"
 
 [project.scripts]
 mcrit = "mcrit.__main__:main"
