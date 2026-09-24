@@ -772,42 +772,49 @@ class McritClient:
             return self._passthrough(response)
         return self._handle(response)
 
+    @staticmethod
+    def _job_selection_query(method=None, filter=None, state=None, username=None, **more) -> str:
+        """The query string of the parameters that select jobs, URL-encoded (a filter is free text)."""
+        params = {"method": method, "filter": filter, "state": state, "username": username, **more}
+        present = {key: value for key, value in params.items() if value is not None and value is not False and value != 0}
+        return "?" + urllib.parse.urlencode(present) if present else ""
+
     def getQueueData(
-        self, start: int = 0, limit: int = 0, method: Optional[str] = None, filter: Optional[str] = None, state: Optional[str] = None, ascending: bool = False
+        self,
+        start: int = 0,
+        limit: int = 0,
+        method: Optional[str] = None,
+        filter: Optional[str] = None,
+        state: Optional[str] = None,
+        ascending: bool = False,
+        username: Optional[str] = None,
     ) -> Optional[List[Job]]:
-        """GET /jobs: the queued jobs, newest first unless ``ascending``, from index ``start`` on and at most ``limit`` many (0 = all); ``method`` (job method name), ``state`` and ``filter`` (substring of the descriptor) narrow them down."""
-        query_string = "?ascending=True" if ascending else ""
-        if isinstance(start, int) and start > 0:
-            if len(query_string) == 0:
-                query_string = f"?start={start}"
-            else:
-                query_string += f"&start={start}"
-        if isinstance(limit, int) and limit > 0:
-            if len(query_string) == 0:
-                query_string = f"?limit={limit}"
-            else:
-                query_string += f"&limit={limit}"
-        if isinstance(method, str) and method is not None:
-            if len(query_string) == 0:
-                query_string = f"?method={method}"
-            else:
-                query_string += f"&method={method}"
-        if isinstance(filter, str) and filter is not None:
-            if len(query_string) == 0:
-                query_string = f"?filter={filter}"
-            else:
-                query_string += f"&filter={filter}"
-        if isinstance(state, str) and state is not None:
-            if len(query_string) == 0:
-                query_string = f"?state={state}"
-            else:
-                query_string += f"&state={state}"
+        """GET /jobs: the queued jobs, newest first unless ``ascending``, from index ``start`` on and at most ``limit`` many (0 = all); ``method`` (job method name), ``state``, ``filter`` (substring of the job parameters, case-insensitive) and ``username`` (who requested it) narrow them down before paging, so a page is a page of the matches."""
+        query_string = self._job_selection_query(
+            method=method,
+            filter=filter,
+            state=state,
+            username=username,
+            start=start if isinstance(start, int) else 0,
+            limit=limit if isinstance(limit, int) else 0,
+            ascending="True" if ascending else None,
+        )
         response = requests.get(f"{self.mcrit_server}/jobs/{query_string}", headers=self.headers)
         if self.raw:
             return self._passthrough(response)
         data = self._handle(response)
         if data is not None:
             return [Job(job_data, None) for job_data in data]
+
+    def getQueueCount(self, method: Optional[str] = None, filter: Optional[str] = None, state: Optional[str] = None, username: Optional[str] = None) -> Optional[int]:
+        """GET /jobs/count: how many jobs getQueueData would list for the same selection - what a paginated listing needs to size itself."""
+        query_string = self._job_selection_query(method=method, filter=filter, state=state, username=username)
+        response = requests.get(f"{self.mcrit_server}/jobs/count{query_string}", headers=self.headers)
+        if self.raw:
+            return self._passthrough(response)
+        data = self._handle(response)
+        if data is not None:
+            return data["count"]
 
     def deleteQueueData(
         self, method: Optional[str] = None, created_before: Optional[datetime.datetime] = None, finished_before: Optional[datetime.datetime] = None

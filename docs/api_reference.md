@@ -22,6 +22,7 @@ Every response is a JSON document `{"status": "successful" | "failed", "data": .
 | `POST` | `/import` | Import the JSON body an export produced. Adds to the instance (ids are remapped, existing samples by sha256 are skipped); it does not replace it. Answers an import report. | `addImportData` |
 | `DELETE` | `/jobs` | Delete jobs matching all given filters: ``method``, ``created_before`` and ``finished_before`` (``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM:SS``). Answers ``num_deleted``. | `deleteQueueData` |
 | `GET` | `/jobs` | The queued jobs, newest first unless ``ascending=true``; ``start``, ``limit``, and the filters ``method`` (job method name), ``state`` and ``filter`` (substring of the job descriptor). | `getJobCount`, `getQueueData` |
+| `GET` | `/jobs/count` | How many jobs match the same ``method``, ``state``, ``filter`` and ``username`` selection ``GET /jobs`` takes, without paging through them. Answers ``count``. | `getQueueCount` |
 | `GET` | `/jobs/stats` | Queue statistics per method and state; ``with_refresh=true`` recounts instead of answering the cached numbers. | `getQueueStatistics` |
 | `DELETE` | `/jobs/{job_id}` | Delete one job (and its result) by id. | `deleteJob` |
 | `GET` | `/jobs/{job_id}` | One job by its 24 hex digit id. Malformed ids answer 400, unknown ones 404. | `getJobData` |
