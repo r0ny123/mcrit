@@ -136,6 +136,30 @@ class MongoDbStorage(StorageInterface):
     # candidate hashes per $in when querying the index; the same slicing the band index uses
     _PICBLOCKHASH_INDEX_QUERY_SLICE = 20000
 
+    # Maps a function_id back to the sample that holds it, without reading the function.
+    # Candidate generation returns function ids; deciding *which samples* those belong to is
+    # the whole of the shortlist stage, and asking the functions collection would mean one
+    # lookup per candidate - the very cost the shortlist exists to avoid. Function ids are
+    # allocated from a counter in one contiguous run per sample, so one [first, last] pair
+    # per sample describes the whole mapping: ~40 B per sample, i.e. ~40 MB at a million
+    # samples, and a searchsorted away from an answer.
+    _FUNCTION_RANGE_COLLECTION = "function_ranges"
+    # Same reasoning as the picblockhash flag: a partially filled range index would silently
+    # attribute functions to the wrong sample, so it is only read once something vouches for it.
+    _FUNCTION_RANGE_SETTING = "function_range_index_complete"
+    # settings flag: band documents carry a df (posting-list length) that a (band_hash, df)
+    # index can filter on. Only trusted once something has vouched for it, because a missing or
+    # stale df would silently hide posting lists from candidate generation.
+    _BAND_DF_SETTING = "band_df_index_complete"
+    # How many corpus functions hold each pichash. MINHASH_PICHASH_MAX_MATCHES needs that count
+    # to decide whether a hash is too common to be worth fetching, and counting it by grouping
+    # over the functions collection touches one index entry per holder - which is exactly the
+    # cost the cutoff exists to avoid, paid in full for every hash it then rejects. Measured on
+    # a real corpus: pichash lookup still grew 1.80x for a 1.49x corpus increase *with* the
+    # cutoff on. One small document per distinct pichash turns that into an indexed probe.
+    _PICHASH_COUNT_COLLECTION = "pichash_counts"
+    _PICHASH_COUNT_SETTING = "pichash_count_index_complete"
+
     _database: Optional["Database"]
 
     def __init__(self, config: "McritConfig") -> None:
@@ -215,8 +239,22 @@ class MongoDbStorage(StorageInterface):
         # into this code: it keeps using the scan until an operator rebuilds. Correctness first;
         # an index that is merely present would report blocks as unique that are not.
         # find_one is used rather than a count because this runs on every storage construction.
-        if not self._isPicBlockHashIndexComplete() and self._getDb()["functions"].find_one({}, {"_id": 1}) is None:
+        # Same argument for the two indexes two-stage matching depends on, and the same
+        # find_one rather than a count, since this runs on every storage construction. Both are
+        # maintained from the first write - addSmdaReport records the sample's function id span,
+        # and _updateBands keeps each posting list's df - so a database with no functions has
+        # them trivially complete. Without this a fresh instance would maintain both correctly
+        # and still take the fallback path forever, because nothing had vouched for them.
+        is_empty = self._getDb()["functions"].find_one({}, {"_id": 1}) is None
+        if not self._isPicBlockHashIndexComplete() and is_empty:
             self._setPicBlockHashIndexComplete(True)
+        if is_empty:
+            if not self.isFunctionRangeIndexComplete():
+                self._setFunctionRangeIndexComplete(True)
+            if not self.isBandDfIndexComplete():
+                self._setBandDfIndexComplete(True)
+            if not self.isPicHashCountIndexComplete():
+                self._setPicHashCountIndexComplete(True)
         self._getDb()["samples"].create_index("sample_id")
         self._getDb()["samples"].create_index("sha256")
         self._getDb()["samples"].create_index("family_id")
@@ -252,6 +290,7 @@ class MongoDbStorage(StorageInterface):
         self._getDb()["logs"].create_index("username")
         for band_id in range(self._storage_config.STORAGE_NUM_BANDS):
             self._getDb()["band_%d" % band_id].create_index("band_hash")
+            self._getDb()["band_%d" % band_id].create_index([("band_hash", 1), ("df", 1)])
         # Add Family "" (family_id 0) if it is not already in storage. Two processes can bootstrap
         # the same database concurrently (e.g. server and worker), so instead of check-then-addFamily
         # (which would hand out two different family_ids for "") this uses a single upsert keyed on
@@ -821,6 +860,20 @@ class MongoDbStorage(StorageInterface):
             self._getDb().samples.update_one({"sample_id": sample_id}, {"$set": {"component": update_information["component"]}})
         return True
 
+    def modifyFunction(self, function_id: int, update_information: dict, username: Optional[str] = None) -> bool:
+        if function_id < 0 or not self.isFunctionId(function_id):
+            return False
+        if "function_name" in update_information:
+            function_name = update_information["function_name"]
+            self._getDb().functions.update_one({"function_id": function_id}, {"$set": {"function_name": function_name}})
+            if function_name:
+                # the "not yet labelled so by this user" check is part of the update's filter,
+                # so two concurrent identical requests cannot both push the label
+                label_username = username or "anonymous"
+                not_yet_labelled = {"function_id": function_id, "function_labels": {"$not": {"$elemMatch": {"username": label_username, "function_label": function_name}}}}
+                self._getDb().functions.update_one(not_yet_labelled, {"$push": {"function_labels": FunctionLabelEntry(function_name, label_username).toDict()}})
+        return True
+
     def modifyFamily(self, family_id: int, update_information: dict) -> bool:
         if not self.isFamilyId(family_id):
             return False
@@ -1052,6 +1105,8 @@ class MongoDbStorage(StorageInterface):
                 self._insertXcfgDocuments(function_dicts)
                 self._dbInsertMany("functions", function_dicts)
                 self._addToPicBlockHashIndex(function_dicts)
+                self._addToPicHashCounts(function_dicts)
+                self._recordFunctionRange(sample_entry.sample_id, [document["function_id"] for document in function_dicts])
                 self._updateFamilyStats(family_id, +1, sample_entry.statistics["num_functions"], int(sample_entry.is_library))
                 self._updateDbState()
             else:
@@ -1081,6 +1136,7 @@ class MongoDbStorage(StorageInterface):
         self._insertXcfgDocuments([function_dict])
         self._dbInsert("functions", function_dict)
         self._addToPicBlockHashIndex([function_dict])
+        self._addToPicHashCounts([function_dict])
         return function_entry
 
     def importFunctionEntries(self, function_entries: List["FunctionEntry"]) -> Optional[List["FunctionEntry"]]:
@@ -1098,6 +1154,7 @@ class MongoDbStorage(StorageInterface):
         self._insertXcfgDocuments(functions_as_dicts)
         self._dbInsertMany("functions", functions_as_dicts)
         self._addToPicBlockHashIndex(functions_as_dicts)
+        self._addToPicHashCounts(functions_as_dicts)
         return function_entries
 
     def getFunctionsBySampleId(self, sample_id: int) -> Optional[List["FunctionEntry"]]:
@@ -1211,11 +1268,42 @@ class MongoDbStorage(StorageInterface):
         # one $in over all distinct pichashes instead of one query per pichash (N+1, #111);
         # grouping client-side by the returned _pichash reproduces the per-query sets exactly
         if encoded_to_decoded:
+            wanted = self._filterPicHashesByMatchCount(list(encoded_to_decoded))
             fields_to_fetch = {"_pichash": 1, "family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0}
-            for hit in self._getDb().functions.find({"_pichash": {"$in": list(encoded_to_decoded)}}, fields_to_fetch):
+            for hit in self._getDb().functions.find({"_pichash": {"$in": wanted}}, fields_to_fetch):
                 decoded_pichash = encoded_to_decoded[hit.get("_pichash")]
                 pichashes[decoded_pichash].add((hit["family_id"], hit["sample_id"], hit["function_id"]))
         return pichashes
+
+    def _filterPicHashesByMatchCount(self, encoded_pichashes: List[Any]) -> List[Any]:
+        """Drop pichashes held by more than MINHASH_PICHASH_MAX_MATCHES functions.
+
+        The counting pass groups on `_pichash`, which is indexed, so mongod answers it from the
+        index instead of reading the documents - the expensive half is fetching family, sample
+        and function id per hit, and that is what the cutoff avoids. Returns every hash
+        unchanged when the knob is off, so the default path pays nothing for this.
+        """
+        cutoff = getattr(self._minhash_config, "MINHASH_PICHASH_MAX_MATCHES", 0)
+        if cutoff <= 0 or not encoded_pichashes:
+            return encoded_pichashes
+        if self.isPicHashCountIndexComplete():
+            # one indexed probe per queried hash, instead of one index entry per holder
+            kept = [
+                document["_pichash"]
+                for document in self._getDb()[self._PICHASH_COUNT_COLLECTION].find({"_pichash": {"$in": encoded_pichashes}, "df": {"$lte": cutoff}}, {"_pichash": 1, "_id": 0})
+            ]
+        else:
+            # no counts stored yet: fall back to counting, which is correct but pays the very
+            # cost the cutoff is meant to avoid
+            pipeline = [
+                {"$match": {"_pichash": {"$in": encoded_pichashes}}},
+                {"$group": {"_id": "$_pichash", "num_holders": {"$sum": 1}}},
+                {"$match": {"num_holders": {"$lte": cutoff}}},
+            ]
+            kept = [group["_id"] for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True)]
+        if len(kept) != len(encoded_pichashes):
+            LOGGER.info("PicHash cutoff %d dropped %d of %d hashes as too common", cutoff, len(encoded_pichashes) - len(kept), len(encoded_pichashes))
+        return kept
 
     def isFunctionId(self, function_id: int) -> bool:
         is_function_id = None
@@ -1295,8 +1383,10 @@ class MongoDbStorage(StorageInterface):
                 if len(function_ids) < 1:
                     continue
                 if method == "push":
-                    # a band hash seen for the first time gets its document here
-                    band_updates.append(UpdateOne({"band_hash": band_hash}, {"$push": {"function_ids": {"$each": function_ids}}}, upsert=True))
+                    # a band hash seen for the first time gets its document here. df counts the
+                    # posting list so a candidate lookup can skip an over-long one from the
+                    # index, without reading the list to measure it (#band-df)
+                    band_updates.append(UpdateOne({"band_hash": band_hash}, {"$push": {"function_ids": {"$each": function_ids}}, "$inc": {"df": len(function_ids)}}, upsert=True))
                 else:
                     # pulling from a band hash that has no document must not create one (#149)
                     band_updates.append(UpdateOne({"band_hash": band_hash}, {"$pull": {"function_ids": {"$in": function_ids}}}))
@@ -1307,6 +1397,12 @@ class MongoDbStorage(StorageInterface):
                     # a posting list the pull emptied is removed, not kept as a tombstone; scoped to
                     # the hashes just touched, so it is one indexed delete per band (#149)
                     collection.delete_many({"band_hash": {"$in": list(band_data)}, **self._EMPTY_BAND_DOCUMENT})
+                    # $pull cannot report how many elements it removed, so df is restored from
+                    # the list itself rather than decremented by a guess
+                    collection.update_many(
+                        {"band_hash": {"$in": list(band_data)}},
+                        [{"$set": {"df": {"$size": {"$ifNull": ["$function_ids", []]}}}}],
+                    )
             num_band_updates += len(band_updates)
         return num_band_updates
 
@@ -1332,8 +1428,32 @@ class MongoDbStorage(StorageInterface):
                 band_hash_to_function_ids[band_number][band_hash].add(function_id)
         return target_band_hashes_per_band, band_hash_to_function_ids
 
-    def _getCandidatesForMinHashesNumpy(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1) -> Dict[int, Set[int]]:
-        """Variant C: accumulate band hits as int32 arrays instead of dict[qid][cid] -> count.
+    def _bandLookupPipeline(self, band_hashes: List[int]) -> List[Dict[str, Any]]:
+        """Aggregation returning the wanted band documents, dropping over-long posting lists.
+
+        The cutoff is applied server-side rather than after the fetch on purpose: the cost of a
+        stopword band hash is dominated by shipping and BSON-decoding a posting list with
+        millions of entries, so a client-side check would pay almost the whole price before
+        discarding it.
+        """
+        cutoff = getattr(self._storage_config, "STORAGE_BAND_DF_CUTOFF", 0)
+        if cutoff <= 0:
+            return [{"$match": {"band_hash": {"$in": band_hashes}}}]
+        if self.isBandDfIndexComplete():
+            # the whole point of storing df: with a (band_hash, df) index mongod decides from
+            # the index entry alone, so an over-long posting list is never read. Filtering on
+            # $size instead still reads every document to measure it, which measured no faster
+            # than not filtering at all.
+            return [{"$match": {"band_hash": {"$in": band_hashes}, "df": {"$lte": cutoff}}}]
+        # no trustworthy df yet: fall back to measuring the list, which is correct but only
+        # saves the transfer, not the read
+        return [
+            {"$match": {"band_hash": {"$in": band_hashes}}},
+            {"$match": {"$expr": {"$lte": [{"$size": {"$ifNull": ["$function_ids", []]}}, cutoff]}}},
+        ]
+
+    def _getCandidatesForMinHashesNumpy(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1, as_arrays=False):
+        """Variant C: accumulate band hits as int64 arrays instead of dict[qid][cid] -> count.
 
         Semantically identical to the dict version (np.unique(..., return_counts=True) counts
         repeated ids exactly like the += 1 loop did), but it never builds the per-pair Python
@@ -1344,11 +1464,13 @@ class MongoDbStorage(StorageInterface):
         target_band_hashes_per_band, band_hash_to_function_ids = self._collectBandHashTargets(function_id_to_minhash)
         hit_chunks = {}
         for band_number, band_hashes in target_band_hashes_per_band.items():
-            match_query = {"$match": {"band_hash": {"$in": list(band_hashes)}}}
-            cursor = self._getDb()["band_%d" % band_number].aggregate([match_query])
+            cursor = self._getDb()["band_%d" % band_number].aggregate(self._bandLookupPipeline(list(band_hashes)))
             for hit in cursor:
                 reference_function_ids = band_hash_to_function_ids[band_number][hit["band_hash"]]
-                posting_list = np.array(hit["function_ids"], dtype=np.int32)
+                # int64, not int32: function ids come from a counter that never reuses an id, so they
+                # pass 2**31 - 1 within a few million samples. numpy 2 then raises OverflowError, and
+                # numpy 1.x silently wraps the id onto a different function.
+                posting_list = np.array(hit["function_ids"], dtype=np.int64)
                 for function_id in reference_function_ids:
                     if function_id not in hit_chunks:
                         hit_chunks[function_id] = [posting_list]
@@ -1366,8 +1488,18 @@ class MongoDbStorage(StorageInterface):
                 unique_ids, counts = np.unique(all_hits, return_counts=True)
                 surviving = unique_ids[counts >= band_matches_required]
             if surviving.size:
-                valid_candidates[function_id] = set(surviving.tolist())
+                valid_candidates[function_id] = surviving.astype(np.int64, copy=False) if as_arrays else set(surviving.tolist())
         return valid_candidates
+
+    def getCandidateArraysForMinHashes(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1) -> Dict[int, "np.ndarray"]:
+        """Candidates as sorted int64 arrays rather than sets.
+
+        The accumulation already produces arrays and then boxes them into Python sets; a caller
+        that wants to keep working in numpy (the shortlist stage does) would immediately unbox
+        them again. Measured on a 361k-pair query against 10k samples, that round trip alone was
+        most of a second.
+        """
+        return self._getCandidatesForMinHashesNumpy(function_id_to_minhash, band_matches_required=band_matches_required, as_arrays=True)
 
     def getCandidatesForMinHashes(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1) -> Dict[int, Set[int]]:
         if getattr(self._storage_config, "STORAGE_CANDIDATE_ACCUMULATION", "dict") == "numpy":
@@ -1375,8 +1507,7 @@ class MongoDbStorage(StorageInterface):
         candidates = {}
         target_band_hashes_per_band, band_hash_to_function_ids = self._collectBandHashTargets(function_id_to_minhash)
         for band_number, band_hashes in target_band_hashes_per_band.items():
-            match_query = {"$match": {"band_hash": {"$in": list(band_hashes)}}}
-            cursor = self._getDb()["band_%d" % band_number].aggregate([match_query])
+            cursor = self._getDb()["band_%d" % band_number].aggregate(self._bandLookupPipeline(list(band_hashes)))
             for hit in cursor:
                 reference_function_ids = band_hash_to_function_ids[band_number][hit["band_hash"]]
                 for function_id in reference_function_ids:
@@ -1402,8 +1533,8 @@ class MongoDbStorage(StorageInterface):
         candidates = {}
         band_hashes = self.getBandHashesForMinHash(minhash)
         for band_number, band_hash in sorted(band_hashes.items()):
-            band_hash_query = {"band_hash": band_hash}
-            band_document = self._getDb()["band_%d" % band_number].find_one(band_hash_query)
+            band_documents = list(self._getDb()["band_%d" % band_number].aggregate(self._bandLookupPipeline([band_hash])))
+            band_document = band_documents[0] if band_documents else None
             if band_document:
                 for function_id in band_document["function_ids"]:
                     if function_id not in candidates:
@@ -1415,6 +1546,258 @@ class MongoDbStorage(StorageInterface):
             if hit_count >= band_matches_required:
                 valid_candidates.add(function_id)
         return valid_candidates
+
+    @staticmethod
+    def _contiguousRuns(function_ids: List[int]) -> List[Tuple[int, int]]:
+        """[(first, last)] for each run of consecutive ids in the given set."""
+        runs: List[Tuple[int, int]] = []
+        ordered = sorted(set(function_ids))
+        if not ordered:
+            return runs
+        run_start = previous = ordered[0]
+        for function_id in ordered[1:]:
+            if function_id != previous + 1:
+                runs.append((run_start, previous))
+                run_start = function_id
+            previous = function_id
+        runs.append((run_start, previous))
+        return runs
+
+    def _recordFunctionRange(self, sample_id: int, function_ids: List[int]) -> None:
+        """Record which function ids a sample owns, as one document per contiguous run.
+
+        Ids normally arrive as one dense run per sample - they come from a single bulk counter
+        reservation - but nothing guarantees it: an import can add functions to an existing
+        sample later, and concurrent writers interleave their reservations. Storing a span per
+        run rather than a single [first, last] makes the index exact for any layout instead of
+        correct only for the common one, and the lookup is a searchsorted over spans either
+        way, so the generality costs nothing at query time.
+        """
+        if not function_ids:
+            return
+        operations = [
+            UpdateOne(
+                {"sample_id": sample_id, "first_function_id": first_function_id},
+                {"$set": {"sample_id": sample_id, "first_function_id": first_function_id, "last_function_id": last_function_id}},
+                upsert=True,
+            )
+            for first_function_id, last_function_id in self._contiguousRuns(function_ids)
+        ]
+        if operations:
+            self._getDb()[self._FUNCTION_RANGE_COLLECTION].bulk_write(operations, ordered=False)
+
+    def isFunctionRangeIndexComplete(self) -> bool:
+        settings_document = self._getDb().settings.find_one({}, {self._FUNCTION_RANGE_SETTING: 1})
+        return bool(settings_document and settings_document.get(self._FUNCTION_RANGE_SETTING))
+
+    def _setFunctionRangeIndexComplete(self, is_complete: bool) -> None:
+        self._getDb().settings.update_one({}, {"$set": {self._FUNCTION_RANGE_SETTING: bool(is_complete)}})
+
+    def rebuildFunctionRangeIndex(self, progress_reporter=None) -> int:
+        """Build the function-range index from the functions collection; returns samples covered.
+
+        One ordered scan, emitting a span whenever the sample changes or the ids jump. Exact for
+        any id layout, where grouping on min/max per sample would be correct only when every
+        sample owns one dense run - and a wrong span misattributes another sample's functions,
+        which is a worse outcome than a slower rebuild.
+        """
+        collection = self._getDb()[self._FUNCTION_RANGE_COLLECTION]
+        # Mark incomplete *before* emptying it. The flag is what readers consult to decide
+        # whether the index may be trusted, so leaving it true across a rebuild advertises a
+        # complete index over a half-filled collection - and a shortlist built on that would
+        # silently attribute functions to no sample at all.
+        self._setFunctionRangeIndexComplete(False)
+        collection.delete_many({})
+        # indexed before the upserts for the same reason as the pichash counts: each upsert
+        # matches on (sample_id, first_function_id), and an unindexed match scans the collection
+        collection.create_index("sample_id")
+        collection.create_index("first_function_id")
+        operations = []
+        num_spans = 0
+        samples_seen = set()
+        state = {"sample_id": None, "run_start": None, "previous": None}
+
+        def flush_span():
+            nonlocal num_spans
+            if state["sample_id"] is None:
+                return
+            operations.append(
+                UpdateOne(
+                    {"sample_id": state["sample_id"], "first_function_id": state["run_start"]},
+                    {"$set": {"sample_id": state["sample_id"], "first_function_id": state["run_start"], "last_function_id": state["previous"]}},
+                    upsert=True,
+                )
+            )
+            num_spans += 1
+
+        cursor = self._getDb().functions.find({}, {"_id": 0, "function_id": 1, "sample_id": 1}).sort("function_id", 1).batch_size(10000)
+        for document in cursor:
+            function_id, sample_id = document["function_id"], document["sample_id"]
+            samples_seen.add(sample_id)
+            if state["sample_id"] == sample_id and state["previous"] is not None and function_id == state["previous"] + 1:
+                state["previous"] = function_id
+                continue
+            flush_span()
+            state["sample_id"], state["run_start"], state["previous"] = sample_id, function_id, function_id
+            if len(operations) >= 10000:
+                collection.bulk_write(operations, ordered=False)
+                operations = []
+                if progress_reporter is not None:
+                    progress_reporter.step()
+        flush_span()
+        if operations:
+            collection.bulk_write(operations, ordered=False)
+        self._setFunctionRangeIndexComplete(True)
+        LOGGER.info("Function range index rebuilt: %d spans over %d samples.", num_spans, len(samples_seen))
+        return len(samples_seen)
+
+    def _getFunctionRangeLookup(self):
+        """(first_function_id array, sample_id array) for searchsorted, cached per db_state.
+
+        Cached because a matching job asks for it once per batch and it only changes when the
+        corpus does; keyed on db_state so a stale map can never outlive the write that
+        invalidated it.
+        """
+        db_state = self._getDbState()
+        cached = getattr(self, "_function_range_cache", None)
+        if cached is not None and cached[0] == db_state:
+            return cached[1], cached[2]
+        documents = list(
+            self._getDb()[self._FUNCTION_RANGE_COLLECTION].find({}, {"_id": 0, "sample_id": 1, "first_function_id": 1, "last_function_id": 1}).sort("first_function_id", 1)
+        )
+        firsts = np.fromiter((document["first_function_id"] for document in documents), dtype=np.int64, count=len(documents))
+        lasts = np.fromiter((document["last_function_id"] for document in documents), dtype=np.int64, count=len(documents))
+        sample_ids = np.fromiter((document["sample_id"] for document in documents), dtype=np.int64, count=len(documents))
+        self._function_range_cache = (db_state, (firsts, lasts), sample_ids)
+        return (firsts, lasts), sample_ids
+
+    def getSampleFunctionCounts(self, sample_ids: Optional[Iterable[int]] = None) -> Dict[int, int]:
+        """sample_id -> how many functions it owns, from the range index (no functions read).
+
+        `sample_ids` restricts the answer to those samples, and matters more than it looks: the
+        caller in the matching path only needs counts for samples that received a vote - at most
+        a few thousand - and building the whole-corpus map for that is the one place the query
+        path still scaled with corpus size. At the sizes measured here it is invisible (5,034
+        entries), but the map is one entry per contiguous run of function ids, so at 10^9 samples
+        it is a 10^9-entry dict built per matching job. Passing the ids turns it into an indexed
+        lookup of what is actually needed.
+
+        A sample can own several runs when its function ids are not contiguous, so the sizes are
+        summed per sample rather than assigned.
+        """
+        if sample_ids is None:
+            (firsts, lasts), all_sample_ids = self._getFunctionRangeLookup()
+            if not firsts.size:
+                return {}
+            sizes = (lasts - firsts + 1).tolist()
+            counts: Dict[int, int] = {}
+            for sample_id, size in zip(all_sample_ids.tolist(), sizes):
+                counts[sample_id] = counts.get(sample_id, 0) + size
+            return counts
+        wanted = [int(sample_id) for sample_id in sample_ids]
+        if not wanted:
+            return {}
+        counts = {}
+        for document in self._getDb()[self._FUNCTION_RANGE_COLLECTION].find(
+            {"sample_id": {"$in": wanted}}, {"_id": 0, "sample_id": 1, "first_function_id": 1, "last_function_id": 1}
+        ):
+            size = document["last_function_id"] - document["first_function_id"] + 1
+            counts[document["sample_id"]] = counts.get(document["sample_id"], 0) + size
+        return counts
+
+    def getSampleIdsForFunctionIdArray(self, function_ids: "np.ndarray") -> "np.ndarray":
+        """Sample id per function id, or -1 where the range index cannot answer.
+
+        Vectorised on purpose: this runs over every candidate a query produced, and a Python
+        loop there would cost more than the lookup it replaces.
+        """
+        (firsts, lasts), sample_ids = self._getFunctionRangeLookup()
+        if not firsts.size:
+            return np.full(function_ids.shape, -1, dtype=np.int64)
+        positions = np.searchsorted(firsts, function_ids, side="right") - 1
+        result = np.full(function_ids.shape, -1, dtype=np.int64)
+        valid = positions >= 0
+        candidate_positions = positions[valid]
+        # a function id past its span's end belongs to no sample the index knows about
+        inside = function_ids[valid] <= lasts[candidate_positions]
+        resolved = np.where(inside, sample_ids[candidate_positions], -1)
+        result[valid] = resolved
+        return result
+
+    def isBandDfIndexComplete(self) -> bool:
+        settings_document = self._getDb().settings.find_one({}, {self._BAND_DF_SETTING: 1})
+        return bool(settings_document and settings_document.get(self._BAND_DF_SETTING))
+
+    def _setBandDfIndexComplete(self, is_complete: bool) -> None:
+        self._getDb().settings.update_one({}, {"$set": {self._BAND_DF_SETTING: bool(is_complete)}})
+
+    def rebuildBandDfIndex(self, progress_reporter=None) -> int:
+        """Set df on every band document and index (band_hash, df); returns documents updated.
+
+        Needed once on a database built before df existed. Until it has run, a configured
+        cutoff still applies - it just cannot skip the read, so it saves less.
+        """
+        num_updated = 0
+        for band_number in range(self._storage_config.STORAGE_NUM_BANDS):
+            collection = self._getDb()["band_%d" % band_number]
+            result = collection.update_many({}, [{"$set": {"df": {"$size": {"$ifNull": ["$function_ids", []]}}}}])
+            num_updated += result.modified_count
+            collection.create_index([("band_hash", 1), ("df", 1)])
+            if progress_reporter is not None:
+                progress_reporter.step()
+        self._setBandDfIndexComplete(True)
+        LOGGER.info("Band df index rebuilt over %d documents.", num_updated)
+        return num_updated
+
+    def isPicHashCountIndexComplete(self) -> bool:
+        settings_document = self._getDb().settings.find_one({}, {self._PICHASH_COUNT_SETTING: 1})
+        return bool(settings_document and settings_document.get(self._PICHASH_COUNT_SETTING))
+
+    def _setPicHashCountIndexComplete(self, is_complete: bool) -> None:
+        self._getDb().settings.update_one({}, {"$set": {self._PICHASH_COUNT_SETTING: bool(is_complete)}})
+
+    def _addToPicHashCounts(self, function_documents: List[Dict]) -> None:
+        """Count the pichashes these functions carry, one $inc per distinct hash."""
+        if not self.isPicHashCountIndexComplete():
+            return
+        increments: Dict[Any, int] = {}
+        for function_document in function_documents:
+            encoded_pichash = function_document.get("_pichash")
+            if encoded_pichash is not None:
+                increments[encoded_pichash] = increments.get(encoded_pichash, 0) + 1
+        if not increments:
+            return
+        operations = [UpdateOne({"_pichash": encoded}, {"$inc": {"df": count}}, upsert=True) for encoded, count in increments.items()]
+        self._getDb()[self._PICHASH_COUNT_COLLECTION].bulk_write(operations, ordered=False)
+
+    def rebuildPicHashCountIndex(self, progress_reporter=None) -> int:
+        """Count holders per pichash from the functions collection; returns distinct hashes."""
+        collection = self._getDb()[self._PICHASH_COUNT_COLLECTION]
+        # same reasoning as the range index: a hash with no count document is *excluded* by the
+        # indexed filter, so a rebuild that left the flag true would drop exact matches for
+        # every hash it had not yet counted
+        self._setPicHashCountIndexComplete(False)
+        collection.delete_many({})
+        # Create the index *before* the upserts, not after. Every upsert matches on _pichash, so
+        # without it each one is a collection scan against everything written so far - quadratic,
+        # and measured at ~35 upserts/s where an indexed rebuild does thousands.
+        collection.create_index([("_pichash", 1), ("df", 1)])
+        pipeline = [{"$match": {"_pichash": {"$ne": None}}}, {"$group": {"_id": "$_pichash", "df": {"$sum": 1}}}]
+        operations = []
+        num_hashes = 0
+        for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True):
+            operations.append(UpdateOne({"_pichash": group["_id"]}, {"$set": {"_pichash": group["_id"], "df": group["df"]}}, upsert=True))
+            num_hashes += 1
+            if len(operations) >= 10000:
+                collection.bulk_write(operations, ordered=False)
+                operations = []
+                if progress_reporter is not None:
+                    progress_reporter.step()
+        if operations:
+            collection.bulk_write(operations, ordered=False)
+        self._setPicHashCountIndexComplete(True)
+        LOGGER.info("PicHash count index rebuilt over %d distinct hashes.", num_hashes)
+        return num_hashes
 
     def _getCacheDataForFunctionIds(self, function_ids: List[int]) -> Dict:
         cache_data = {}
@@ -1805,6 +2188,10 @@ class MongoDbStorage(StorageInterface):
             collections.append("band_%d" % band_id)
         for c in collections:
             self._getDb()[c].create_index("band_hash")
+            # the df cutoff reads (band_hash, df); without this the rebuilt bands would carry a
+            # correct df - _updateBands maintains it by $inc from the first write - that no index
+            # could serve, so STORAGE_BAND_DF_CUTOFF would silently fall back to scanning
+            self._getDb()[c].create_index([("band_hash", 1), ("df", 1)])
         # re-add minhashes in batches
         total_functions = self._getDb().functions.count_documents(filter={})
         minhash_functions = 0
