@@ -761,7 +761,7 @@ class McritClient:
         response = requests.get(f"{self.mcrit_server}/jobs/count{query_string}", headers=self.headers)
         if self.raw:
             return response
-        data = handle_response(response)
+        data = self._handle(response)
         if data is not None:
             return data["count"]
 
