@@ -761,3 +761,62 @@ cutoff and the LogBucket cache key by the two issues already filed (#201, #202 a
 - **Test runs go to a throwaway server.** Every test run in this round used a tmpfs mongod on
   27018 (`TEST_MONGODB=127.0.0.1:27018`), and the capacity measurement, which writes, a second one
   on 27019. The live server's database list was recorded before and compared after.
+
+## 12. Items 4 and 10 of the review: client timeouts and docker-mcrit
+
+Two of the review's items from section 10 were implemented on 2026-09-24, each test first.
+Neither is a scaling change; they are logged here because section 10 is where they were assessed.
+
+### McritClient timeouts (item 4)
+
+Branch `feat/client-timeouts` on the mcrit fork (`3475de1`), cut from familiary/mcrit `ab56c34`.
+
+- **Before**: 55 of 55 `requests` calls in `McritClient.py` passed no timeout. Against a socket
+  that accepts and never replies, `getVersion()` was still waiting after 15 s.
+- **After**: every call passes `timeout=self.timeout`, from a new `timeout` argument (also settable
+  as `client.timeout`) that defaults to `(10, None)`. The read stays open by default because
+  `/import`, `/export` and `/status` answer from the request handler only once their work is done,
+  which was checked in `StatusResource.py` rather than assumed. The same silent socket now raises
+  `ReadTimeout` in 0.5 s with `timeout=(2, 0.5)`.
+- **Rejected**: a `requests.Session` with retries. MCRITweb builds a new client per request, so a
+  per-client session reuses nothing, and retries would repeat job-creating POSTs. Keeping the
+  module-level calls also keeps every existing test double working: mcrit's tests patch
+  `requests.get`, and MCRITweb's replace the client module's `requests` name outright - a session
+  would have bypassed both silently.
+- **Test**: `tests/testClientTimeouts.py` reads the client's source with `ast` and fails for any
+  `requests` call without `timeout=`, so a method added later cannot go without one. Full suite
+  328 passed against a throwaway mongod; MCRITweb's suite 962 passed against this client.
+- **Conflicts**: it test-merges cleanly with upstream #211, #212 and #213; against #206 only
+  `CHANGELOG.md` conflicts, and #183 and #214 conflict in `McritClient.py`. Whichever lands second
+  rebases mechanically, and the `ast` test catches a request that comes back without a timeout.
+
+The timeout only helps MCRITweb if MCRITweb sets a read bound, so that side was done too: branch
+`feat/mcrit-client-timeout` on the mcritweb fork (`ff08ff3`), cut from familiary/mcritweb
+`e4bfa55`. `default_client_factory` sets `client.timeout` from a new `MCRIT_CLIENT_TIMEOUT` config
+key, default `(10, 280)`, under the 300 s NGINX waits. Setting the attribute rather than passing an
+argument means the published mcrit 1.9.0, which lacks the argument, ignores it instead of failing;
+the new tests pass against both. MCRITweb suite: 965 passed, 6 skipped.
+
+### docker-mcrit (item 10, and a bug the review missed)
+
+familiary/docker-mcrit could not be reached from this environment and has no fork on the account,
+so the three commits are kept as patches in `handoff/docker-mcrit/`, made against `aac38ad` and
+checked to apply with `git am` to a fresh clone.
+
+1. **NGINX cut MCRITweb off at 60 s, not 300.** Both site files set `uwsgi_read_timeout 300s`, which
+   only governs `uwsgi_pass`; MCRITweb sits behind `proxy_pass`, so `proxy_read_timeout` kept its
+   60 s default. With nginx:1.29-alpine, the repository's own configuration and a stand-in upstream
+   answering after 90 s: **504 at 60.0 s before, 200 at 87.7 s after**. `nginx -t` accepts both
+   site files, the TLS one with a throwaway certificate. The review did not name this; it came out
+   of checking what timeout MCRITweb's client should use.
+2. **One worker only.** `container_name: mcrit-worker` made compose refuse `--scale` ("Docker
+   requires each container to have a unique name"). Removed from both compose files, with
+   `deploy.replicas: ${MCRIT_WORKERS:-1}`. Checked with stand-in images: one worker by default, two
+   with `MCRIT_WORKERS=2`, three with `--scale mcrit-worker=3`. Safe because MCRIT's queue claims a
+   job with one `find_one_and_update` on an unset `locked_by`, and every worker has its own uuid4.
+3. **No healthchecks on mcritweb or nginx, and nginx started before MCRITweb served.** With a
+   stand-in MCRITweb that serves only after 20 s, a client polling once a second got **502 from
+   13 s to 33 s** before the change and **none** after it: connection refused until nginx starts,
+   then 200, and all four services healthy. nginx is probed with `nc -z`, because its server
+   blocks answer 444 to any Host but their `server_name`, which would fail an HTTP probe on every
+   deployment that sets one.
