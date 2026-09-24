@@ -125,7 +125,8 @@ class StorageConfig(ConfigInterface):
     # 100,000 leaves a wide margin under the cap even if postings grow heavier than measured, and
     # keeps a single document small enough to be cheap to ship. It must stay comfortably above
     # STORAGE_BAND_DF_CUTOFF: the cutoff selects hashes by the total df stored on bucket 0, and
-    # that stays exact only while an under-cutoff posting list still fits in one bucket.
+    # that stays exact only while an under-cutoff posting list still fits in one bucket, so
+    # MongoDbStorage refuses to start with a cutoff above the bucket size.
     STORAGE_BAND_BUCKET_SIZE: int = 0
     # limit maximum export size to protect the system against running OOM, default: 1 GB
     STORAGE_MAX_EXPORT_SIZE = 1024 * 1024 * 1024
