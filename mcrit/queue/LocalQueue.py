@@ -377,7 +377,6 @@ class LocalQueue:
         self._jobs: Dict[str, Any] = defaultdict(lambda: None)
         self._files: Dict[str, Any] = defaultdict(lambda: None)
         self._files_meta: Dict[str, Any] = defaultdict(lambda: None)
-        self._descriptor_to_job: Dict[str, Any] = defaultdict(lambda: None)
         self._hash_to_file: Dict[str, Any] = defaultdict(lambda: None)
 
     def registerWorker(self):
@@ -396,20 +395,66 @@ class LocalQueue:
         self._worker = worker
 
     def get_job(self, job_id):
-        data = self._jobs[job_id]
+        # .get(): _jobs is a defaultdict, and indexing it with an unknown id used to leave a
+        # None entry behind that every later scan of the jobs tripped over
+        data = self._jobs.get(job_id)
         return data and Job(data, self)
 
-    def get_jobs(self, start_index: int, limit: int, method=None, state=None, filter=None, ascencing=False):
-        # TODO implement all the filtering methods properly
+    @staticmethod
+    def _identifyJobState(doc) -> str:
+        # the same rule as MongoQueue._identifyJobState, on a job dict whose absent fields read
+        # as None
+        if doc["started_at"] and doc["locked_by"] and not (doc["finished_at"] or doc["terminated"]):
+            return "in_progress"
+        if doc["attempts_left"] == 0 and not doc["finished_at"] and not doc["terminated"]:
+            return "failed"
+        if not doc["finished_at"] and not doc["locked_by"] and not doc["terminated"]:
+            return "queued"
+        if doc["finished_at"] and not doc["terminated"]:
+            return "finished"
+        if doc["terminated"]:
+            return "terminated"
+        return "unknown"
+
+    def _matching_jobs(self, method=None, state=None, filter=None, username=None, ascending=False):
+        # the same selection MongoQueue._job_query makes (fkie-cad/mcritweb#57), in submission order
         jobs = []
-        for job_id, job_document in self._jobs.items():
+        for job_document in self._jobs.values():
             if method is not None and job_document["payload"]["method"] != method:
                 continue
-            jobs.append(Job(job_document, self))
-        return jobs[start_index : start_index + limit]
+            if state is not None and self._identifyJobState(job_document) != state:
+                continue
+            if username is not None and job_document["username"] != username:
+                continue
+            if filter:
+                haystack = (job_document["payload"].get("method") or "") + " " + (job_document["payload"].get("params") or "")
+                if filter.lower() not in haystack.lower():
+                    continue
+            jobs.append(job_document)
+        jobs.sort(key=lambda job_document: job_document["number"], reverse=not ascending)
+        return jobs
+
+    def get_jobs(self, start_index: int, limit: int, method=None, state=None, ascending=False, filter=None, username=None):
+        jobs = [Job(job_document, self) for job_document in self._matching_jobs(method=method, state=state, filter=filter, username=username, ascending=ascending)]
+        if limit:
+            return jobs[start_index : start_index + limit]
+        return jobs[start_index:]
+
+    def get_job_count(self, method=None, state=None, filter=None, username=None) -> int:
+        return len(self._matching_jobs(method=method, state=state, filter=filter, username=username))
 
     def get_cached_job_id(self, payload):
-        return self._descriptor_to_job[payload["descriptor"]]
+        # same rule as MongoQueue.get_cached_job_id (fkie-cad/mcritweb#47): finished before unfinished, newest
+        # first within each group, failed and terminated jobs never
+        candidates = [
+            job_data
+            for job_data in self._jobs.values()
+            if job_data["payload"]["descriptor"] == payload["descriptor"] and job_data["attempts_left"] > 0 and not job_data["terminated"]
+        ]
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda job_data: (job_data["finished_at"] is not None, job_data["number"]))
+        return best["_id"]
 
     def _file_to_grid(self, file, metadata=None):
         id = str(uuid.uuid4())
@@ -502,7 +547,6 @@ class LocalQueue:
         job_data["attempts_left"] = self.max_attempts
         job_data["created_at"] = datetime.now()
         self._jobs[id] = job_data
-        self._descriptor_to_job[payload["descriptor"]] = id
         job_data["started_at"] = datetime.now()
         # NOTE: we can just ignore await jobs, because all jobs are
         #       executed in submission order
@@ -519,9 +563,6 @@ class LocalQueue:
         job = self._jobs[id]
         result = job["result"]
         file_params = json.loads(job["payload"]["file_params"])
-        descriptor = job["payload"]["descriptor"]
-        if self._descriptor_to_job[descriptor] == id:
-            del self._descriptor_to_job[descriptor]
         del self._jobs[id]
         self._delete_grid(result)
         for f in file_params.values():
