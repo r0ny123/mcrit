@@ -132,12 +132,17 @@ samples. Per-query work does not grow with the corpus.
 
 **The hard limit is nearer than sharding, and sharding does not move it.** A band posting list is
 a `function_ids` array inside one document, extended with `$push`, and MongoDB caps a document at
-16 MB. Measured on this corpus: the largest `band_0` document holds **18,968 postings in 197,606
-bytes** - 10.42 bytes each - so **1,610,427 postings fit**, giving **84.9x headroom** over the
-current corpus. That puts the wall at roughly **615,000 samples**.
+16 MB. Measured on this corpus across all 20 bands, the longest posting list holds **36,183 ids
+in 386,971 bytes** (in `band_14`). A document holds about **1.35 million ids** while they fit in
+32 bits and about **1.05 million** once they need BSON int64, which gives **37x headroom** over
+the current corpus and puts the wall at roughly **270,000 samples**.
 
-Verified rather than projected. Pushing 100,000 ids at a time into one document succeeded ten
-times and failed on the eleventh:
+An earlier version of this section read `band_0` alone (18,968 ids) and took the bytes per id
+from that short list, which undercounts a long one because every array element carries its index
+as a string key. Together that put the wall at 615,000 samples, more than twice too far.
+
+Verified rather than projected. Pushing 100,000 ids past `2**31` at a time into one document
+succeeded ten times and failed on the eleventh:
 
     successful pushes of 100k = 10
     final df = 1000000   bsonsize = 15888958
@@ -159,7 +164,7 @@ a prerequisite for the sharding work rather than a consequence of it.
 
 **What does grow, ranked by how badly:**
 
-1. **The 16 MB posting-list cap - the one that binds first**, at ~615,000 samples, described
+1. **The 16 MB posting-list cap - the one that binds first**, at ~270,000 samples, described
    above. Nothing else on this list matters until it is fixed, because ingestion stops there.
 2. **Index residency - fatal at billion scale, and the piece sharding addresses.** The band index projects to **331 TB** at 10^9
    samples (1.20e12 functions, 4.50e10 distinct band hashes), against 2.40 GB at 7,244. No single
@@ -189,7 +194,7 @@ a prerequisite for the sharding work rather than a consequence of it.
 
 **The short answer**: per-query work is now corpus-independent and measured as such, so the
 *algorithm* will not degrade as the corpus grows. What stops it is storage, in two stages. At
-around **615,000 samples** a single band posting list exceeds MongoDB's 16 MB document limit and
+around **270,000 samples** a single band posting list exceeds MongoDB's 16 MB document limit and
 ingestion fails outright - that one binds first and sharding does not move it. Past that, the
 index outgrows one machine long before a billion, which is what sharding is for. The remaining
 items are a tuning constant that needs to become adaptive and an offline rebuild that needs
