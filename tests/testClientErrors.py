@@ -107,6 +107,15 @@ class ClientModesTest(unittest.TestCase):
             with self.assertRaises(McritBadRequest):
                 client.deleteFamily(1)
 
+    def test_modify_function_raises_through_the_client_mode_too(self):
+        """modifyFunction was written before these modes existed, on a branch that merged them
+        in later - a method that calls handle_response directly answers None whatever mode the
+        client is in."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True)
+        with patch("mcrit.client.McritClient.requests.put", return_value=answer(404, FAILED, url="http://mcrit.test/functions/7")):
+            with self.assertRaises(McritNotFound):
+                client.modifyFunction(7, "decrypt_config")
+
     def test_one_mode_does_not_imply_the_other(self):
         server_only = McritClient("http://mcrit.test", raise_server_errors=True)
         with patch("mcrit.client.McritClient.requests.get", return_value=answer(404, FAILED)):
@@ -131,6 +140,20 @@ class ClientModesTest(unittest.TestCase):
             with self.assertRaises(McritRequestError):
                 handle_response(answer(status, FAILED), raise_client_errors=True, raise_server_errors=True)
             self.assertIsNone(handle_response(answer(status, FAILED), raise_server_errors=True))
+
+    def test_the_rebuild_endpoints_raise_through_the_client_mode(self):
+        """rebuildFunctionRangeIndex and rebuildBandDfIndex were written before the modes and
+        handed their response to handle_response directly, so they answered None however the
+        client was built."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True, raise_server_errors=True)
+        for method in ("rebuildFunctionRangeIndex", "rebuildBandDfIndex"):
+            with self.subTest(method=method):
+                with patch("mcrit.client.McritClient.requests.get", return_value=answer(500, FAILED)):
+                    with self.assertRaises(McritServerError):
+                        getattr(client, method)()
+                with patch("mcrit.client.McritClient.requests.get", return_value=answer(401, FAILED)):
+                    with self.assertRaises(McritUnauthorized):
+                        getattr(client, method)()
 
 
 if __name__ == "__main__":

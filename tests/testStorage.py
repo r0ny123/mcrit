@@ -13,8 +13,11 @@ from mcrit.config.QueueConfig import QueueConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.index.SearchCursor import FullSearchCursor
+from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.minhash.MinHash import MinHash
 from mcrit.storage.FunctionEntry import FunctionEntry
+from mcrit.storage.MongoDbStorage import MongoDbStorage
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
 
@@ -72,6 +75,48 @@ class MemoryStorageTest(TestCase):
         self.assertEqual(1, stats_without_pichash["num_samples"])
         self.assertEqual(10, stats_without_pichash["num_functions"])
         self.assertIsNone(stats_without_pichash["num_pichashes"])
+
+    def testModifyFunction(self):
+        # fkie-cad/mcritweb#72: a function's name can be set; the name is recorded as a label
+        # by the user who set it, once per (user, name); query functions and unknown ids are refused
+        self.storage.clearStorage()
+        smda_report = SmdaReport.fromFile(self.example_file_path)
+        assert smda_report is not None
+        sample_entry = self.storage.addSmdaReport(smda_report)
+        assert sample_entry is not None
+        function_entry = (self.storage.getFunctionsBySampleId(sample_entry.sample_id) or [])[0]
+        function_id = function_entry.function_id
+        labels_before = len(function_entry.function_labels)
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "decrypt_config"}, username="alice"))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual("decrypt_config", modified.function_name)
+        self.assertEqual(labels_before + 1, len(modified.function_labels))
+        self.assertEqual(("decrypt_config", "alice"), (modified.function_labels[-1].function_label, modified.function_labels[-1].username))
+        # the same label by the same user is not recorded twice, by another user it is
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "decrypt_config"}, username="alice"))
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "decrypt_config"}, username="bob"))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual(labels_before + 2, len(modified.function_labels))
+        self.assertEqual("bob", modified.function_labels[-1].username)
+        # without a user the label is anonymous; an empty name clears the name and records nothing
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "sub_1234"}))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual("anonymous", modified.function_labels[-1].username)
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": ""}, username="alice"))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual("", modified.function_name)
+        self.assertEqual(labels_before + 3, len(modified.function_labels))
+        # the other functions of the sample are untouched, the entry round-trips through toDict
+        untouched = (self.storage.getFunctionsBySampleId(sample_entry.sample_id) or [])[1]
+        self.assertEqual(labels_before, len(untouched.function_labels))
+        self.assertEqual(modified.toDict()["function_labels"], [label.toDict() for label in modified.function_labels])
+        self.assertFalse(self.storage.modifyFunction(function_id + 100000, {"function_name": "x"}, username="alice"))
+        self.assertFalse(self.storage.modifyFunction(-1, {"function_name": "x"}, username="alice"))
+        self.assertTrue(self.storage.modifyFunction(function_id, {}, username="alice"))
 
     def testStatusAnswersInlineXcfgOnMemoryStorage(self):
         # the interface default is None ("not applicable"), so /status must keep working on
@@ -681,6 +726,99 @@ class MongoDbStorageTest(MemoryStorageTest):
         mcrit_config.SHINGLER_CONFIG = ShinglerConfig()
         mcrit_config.QUEUE_CONFIG = QueueConfig()
         return StorageFactory.getStorage(mcrit_config)
+
+    # --- substring search on function_name over the distinct names (fkie-cad/mcritweb#76) ----
+
+    def _storageWithNamedFunctions(self):
+        self.storage.clearStorage()
+        with open(self.example_file_path) as fjson:
+            smda_report = SmdaReport.fromDict(json.load(fjson))
+        self.storage.addSmdaReport(smda_report)
+        function_ids = sorted(entry.function_id for entry in self.storage.getFunctionsBySampleId(0))
+        names = ["qz_alpha", "QZ_Alphabet", "kryptos_config", "KryptosConfig", "sub_401000"]
+        for function_id, name in zip(function_ids, names):
+            self.storage._getDb().functions.update_one({"function_id": function_id}, {"$set": {"function_name": name}})
+        return dict(zip(names, function_ids))
+
+    def _searchFunctionNames(self, term, sort_by="function_id", is_ascending=True):
+        parsed = SearchQueryParser().parse(term)
+        cursor = FullSearchCursor(None, [(sort_by, is_ascending), ("function_id", True)] if sort_by != "function_id" else [("function_id", is_ascending)])
+        return [entry.function_name for entry in self.storage.findFunctionByString(parsed, cursor=cursor, max_num_results=100).values()]
+
+    def testSubstringSearchOnFunctionNamesUsesTheDistinctNames(self):
+        by_name = self._storageWithNamedFunctions()
+        self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+        self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+        self.assertEqual(["QZ_Alphabet", "qz_alpha"], self._searchFunctionNames("qz_alph", is_ascending=False))
+        self.assertEqual([], self._searchFunctionNames("zzzzq"))
+        # the query MongoDB gets is an $in of the matching names, not a regex
+        query = self.storage._get_search_query(["function_name"], SearchQueryParser().parse("qz_alph"), None, distinct_fields={"function_name": "functions"})
+        self.assertEqual({"function_name": {"$in": ["QZ_Alphabet", "qz_alpha"]}}, {k: {op: sorted(v) for op, v in c.items()} for k, c in query.items()})
+        self.assertEqual([entry.function_id for entry in self.storage.findFunctionByString(SearchQueryParser().parse("zzzzq")).values()], [])
+        self.assertEqual(sorted(by_name.values())[:2], sorted(entry.function_id for entry in self.storage.findFunctionByString(SearchQueryParser().parse("qz_alph")).values()))
+
+    def testSubstringSearchFallsBackToTheRegexAboveTheCap(self):
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_CAP
+        try:
+            MongoDbStorage._DISTINCT_VALUES_CAP = 2
+            self.assertIsNone(self.storage._getDistinctValues("functions", "function_name"))
+            query = self.storage._get_search_query(["function_name"], SearchQueryParser().parse("qz_alph"), None, distinct_fields={"function_name": "functions"})
+            self.assertTrue(hasattr(query["function_name"], "search"))
+            # same answers either way
+            self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+            self.assertEqual([], self._searchFunctionNames("zzzzq"))
+            self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_CAP = original_cap
+
+    def testSubstringSearchFallsBackToTheRegexAboveTheByteCap(self):
+        # thousands of long mangled symbols stay under the count cap but would not fit one $in
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_MAX_BYTES
+        try:
+            MongoDbStorage._DISTINCT_VALUES_MAX_BYTES = 16
+            self.assertIsNone(self.storage._getDistinctValues("functions", "function_name"))
+            query = self.storage._get_search_query(["function_name"], SearchQueryParser().parse("qz_alph"), None, distinct_fields={"function_name": "functions"})
+            self.assertTrue(hasattr(query["function_name"], "search"))
+            self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_MAX_BYTES = original_cap
+
+    def testSubstringSearchCombinesWithOtherConditionsAndNegation(self):
+        self._storageWithNamedFunctions()
+        self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("sample_id:0 qz_alph"))
+        self.assertEqual([], self._searchFunctionNames("sample_id:1 qz_alph"))
+        excluded = self._searchFunctionNames("function_name:!?qz_alph")
+        self.assertNotIn("qz_alpha", excluded)
+        self.assertNotIn("QZ_Alphabet", excluded)
+        self.assertIn("kryptos_config", excluded)
+        self.assertEqual(len(self.storage.getFunctionsBySampleId(0)) - 2, len(excluded))
+
+    def testTheOverCapVerdictIsCachedAcrossSearches(self):
+        # on a corpus past the cap the capped scan costs ~0.9 s and always gives the same answer,
+        # so it runs once, not on every search
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_CAP
+        try:
+            MongoDbStorage._DISTINCT_VALUES_CAP = 2
+            functions = self.storage._getDb().functions
+            with patch.object(type(functions), "aggregate", autospec=True, side_effect=type(functions).aggregate) as scan:
+                self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+                self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+                self.assertEqual(1, scan.call_count)
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_CAP = original_cap
+
+    def testDistinctValuesAreListedOnlyForSubstringSearches(self):
+        self._storageWithNamedFunctions()
+        with patch.object(self.storage, "_getDistinctValues", wraps=self.storage._getDistinctValues) as listing:
+            self.storage.findFunctionByString(SearchQueryParser().parse("sample_id:0"))
+            self.assertEqual(0, listing.call_count)
+            self.storage.findFunctionByString(SearchQueryParser().parse("function_name:qz_alpha"))
+            self.assertEqual(0, listing.call_count)
+            self.storage.findFunctionByString(SearchQueryParser().parse("qz_alph"))
+            self.assertEqual(1, listing.call_count)
 
     def testCounterInitIsIdempotent(self):
         # constructing storage repeatedly against the same database must not add counter documents (#105)
