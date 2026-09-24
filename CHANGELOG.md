@@ -98,6 +98,14 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   runs - it assigned each run's size in turn, keeping only the last. Such samples were
   undercounted, distorting their coverage ranking in the shortlist. Both the whole-corpus and the
   per-sample paths now sum.
+- **Searches sorted by anything but the id had no index to be served from**, so MongoDB sorted
+  every filtered document in memory. A compound `(field, id)` index now exists for every field
+  MCRITweb sorts families, samples and functions by, and the tie-break follows the sort
+  direction so one index serves both; `explain()` on a real database went from
+  `SORT -> FETCH -> IXSCAN` to `LIMIT -> FETCH -> IXSCAN`. NOTE that the first start after
+  upgrading builds these indexes. Also fixed: **paging stopped early whenever a page ended on
+  id 0** (function 0, sample 0, the unknown family), as the cursor was tested for truthiness
+  ([mcritweb#59]).
 
 
 ## [1.9.0] - 2026-09-08
@@ -384,3 +392,4 @@ date, the version, and what changed.
 [#157]: https://github.com/danielplohmann/mcrit/issues/157
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
+[mcritweb#59]: https://github.com/fkie-cad/mcritweb/issues/59
