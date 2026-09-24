@@ -251,12 +251,19 @@ samples. Per-query work does not grow with the corpus.
 
 **The hard limit is nearer than sharding, and sharding does not move it.** A band posting list is
 a `function_ids` array inside one document, extended with `$push`, and MongoDB caps a document at
-16 MB. Measured on this corpus: the largest `band_0` document holds **18,968 postings in 197,606
-bytes** - 10.42 bytes each - so **1,610,427 postings fit**, giving **84.9x headroom** over the
-current corpus. That puts the wall at roughly **615,000 samples**.
+16 MB. Measured on this corpus across all 20 bands, the longest posting list holds **36,183 ids
+in 386,971 bytes** (in `band_14`). A document holds about **1.35 million ids** while they fit in
+32 bits and about **1.05 million** once they need BSON int64, which gives **37x headroom** over
+the current corpus and puts the wall at roughly **270,000 samples**.
 
-Verified rather than projected. Pushing 100,000 ids at a time into one document succeeded ten
-times and failed on the eleventh:
+An earlier version of this section read `band_0` alone (18,968 ids) and took the bytes per id
+from that short list, which undercounts a long one because every array element carries its index
+as a string key. Together that put the wall at 615,000 samples, more than twice too far. Both
+corrected figures are measured: `measurements/headroom_7k.json` and
+`measurements/posting_capacity.json`, and RESEARCH-LOG section 10 has how.
+
+Verified rather than projected. Pushing 100,000 ids past `2**31` at a time into one document
+succeeded ten times and failed on the eleventh:
 
     successful pushes of 100k = 10
     final df = 1000000   bsonsize = 15888958
@@ -278,21 +285,28 @@ a prerequisite for the sharding work rather than a consequence of it.
 
 **What does grow, ranked by how badly:**
 
-1. **The 16 MB posting-list cap - the one that binds first**, at ~615,000 samples, described
+1. **The 16 MB posting-list cap - the one that binds first**, at ~270,000 samples, described
    above. Nothing else on this list matters until it is fixed, because ingestion stops there.
-2. **Index residency - fatal at billion scale, and the piece sharding addresses.** The band index projects to **331 TB** at 10^9
+   Fixed on the stack by `STORAGE_BAND_BUCKET_SIZE` (fork PR #45, upstream #196), off by default.
+2. **Function ids past 2^31 - 1.** The numpy candidate accumulator held posting lists as int32.
+   Ids come from a counter that is never reused, and on this corpus it stands at 12,003,563 for
+   8,657,357 stored functions, so it crosses `2**31 - 1` at around **1.3 million samples** (1.8
+   million if nothing is ever deleted). numpy 2 then raises and matching fails; numpy 1.26 wraps
+   the id onto another function silently. Fixed on the stack by holding them as int64, for at
+   most 22 MB more peak memory on the widest query measured.
+3. **Index residency - fatal at billion scale, and the piece sharding addresses.** The band index projects to **331 TB** at 10^9
    samples (1.20e12 functions, 4.50e10 distinct band hashes), against 2.40 GB at 7,244. No single
    machine holds that, and **sharding is not implemented**. This is the gap between the current
    design and billion-scale, and nothing else on this list matters until it is closed. The
    encouraging part is that the work is already partitioned correctly: the 20 band collections are
    independent, and a query touches each with an equal share of its lookups, so sharding by band
    hash needs no algorithmic change - only a router and a fan-in.
-3. **Seek cost, as distinct from seek count.** The count is bounded; what each costs is not. The
+4. **Seek cost, as distinct from seek count.** The count is bounded; what each costs is not. The
    cold-cache measurement puts a number on it: **2.39x for two-stage against 1.33x for one-stage**,
    because bounded work is dominated by random lookups with little compute to amortise them. At a
    corpus too large to be resident, every lookup pays that. Sharding buys this down too, by
    shrinking each node's share until it is resident again.
-4. **Maintenance: partitioned for the PicHash counts, untouched for the rest.** That rebuild is
+5. **Maintenance: partitioned for the PicHash counts, untouched for the rest.** That rebuild is
    now a partitioned sorted index scan behind `STORAGE_REBUILD_PARTITION_SIZE`, producing a
    bit-identical index 4.1-4.8x faster with its intermediate state bounded by two local
    variables. It never touches query latency - the indexes are maintained incrementally on write
@@ -302,26 +316,26 @@ a prerequisite for the sharding work rather than a consequence of it.
    constant factor and a bounded memory shape rather than a fixed exponent; and the picblockhash
    and band-bookkeeping rebuilds have the same `$group` shape and have not been measured or
    changed.
-5. **The df cutoff is a tuned constant, and vocabulary grows sublinearly.** `STORAGE_BAND_DF_CUTOFF
+6. **The df cutoff is a tuned constant, and vocabulary grows sublinearly.** `STORAGE_BAND_DF_CUTOFF
    = 200` was chosen at this corpus size. Band-hash vocabulary follows Heaps' law (fitted
    V(n) = 1412.8 * n^0.7247 here), so posting lists lengthen as the corpus grows and a fixed cutoff
    discards a different - probably much larger - fraction at 10^9. **Recall 1.000 is a measurement
    at 7,244 samples, not a property of the design.** This is the correctness risk on the list, and
    the reason WAND/MaxScore is the right next step: it makes the bound adaptive rather than tuned.
-6. **Ingestion.** Indexing measured ~12 samples/minute single-node here. That is embarrassingly
+7. **Ingestion.** Indexing measured ~12 samples/minute single-node here. That is embarrassingly
    parallel and not an architectural problem, but reaching 10^9 samples is a distributed-ingest
    project in its own right, not something the current harness does.
 
 **The short answer**: per-query work is now corpus-independent and measured as such, so the
 *algorithm* will not degrade as the corpus grows. What stops it is storage, in two stages. At
-around **615,000 samples** a single band posting list exceeds MongoDB's 16 MB document limit and
+around **270,000 samples** a single band posting list exceeds MongoDB's 16 MB document limit and
 ingestion fails outright - that one binds first and sharding does not move it. Past that, the
 index outgrows one machine long before a billion, which is what sharding is for. The remaining
 items are a tuning constant that needs to become adaptive and an offline rebuild that needs
 partitioning.
 
 **Ordering matters here.** Sharding is the obvious next piece and it is the wrong one to build
-first: it addresses the limit at 10^9 while the limit at 6x10^5 is the one a growing corpus meets.
+first: it addresses the limit at 10^9 while the limit at 2.7x10^5 is the one a growing corpus meets.
 Bucketing the posting lists is the prerequisite, and unlike sharding it can be built and verified
 on a single machine.
 

@@ -31,6 +31,10 @@ JSON written by the harness, kept on this branch so the implementation branch st
 | `dedup_after_full_*.json`, `dedup_after_one_*.json` | `bench_matching.py` | the same, with the deduplicated fetch |
 | `dedup_fetch_twostage.json`, `dedup_fetch_onestage.json` | `bench_cache_fetch.py` | the fetch driven in isolation over one query's candidate id set: per-strategy time, traced memory, and the dedup factor |
 | `dedup_fingerprint_*.json` | `db_fingerprint.py` | per-collection document counts and dbstats of `real` before and after each measurement run |
+| `headroom_7k.json` | `measure_id_and_list_headroom.py` | per-band posting-list maxima and sizes over all 20 bands, the highest function id against the stored count, and the minhash share of an average function document, on the 7,244-sample corpus, read-only |
+| `posting_capacity.json` | `measure_posting_capacity.py` | ids one band document holds before mongod refuses the write, for ids in the int32 and int64 ranges, with the size after every 50,000 (throwaway server) |
+| `dtype_int32*.json`, `dtype_int64*.json` | `bench_accumulator_dtype.py` | three runs each (`_run2`, `_run3`) of the numpy candidate accumulator before and after the int64 change: candidates, self-hits, median time and median traced peak memory per query, with and without the df cutoff |
+| `repo_state_2026-09-24.md` | a read-only survey of familiary/mcrit, familiary/mcritweb and both forks | open and recently merged PRs and issues on 2026-09-24, before the int64 push, with what each covers |
 
 ## Reading the concurrency files
 
