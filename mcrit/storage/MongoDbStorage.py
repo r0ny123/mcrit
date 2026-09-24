@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import threading
+import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -157,13 +158,20 @@ class MongoDbStorage(StorageInterface):
     _DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
     # A substring search on function_name is answered through the distinct names of the
-    # collection when there are at most this many (fkie-cad/mcritweb#76). Listing them is one
-    # DISTINCT_SCAN over the function_name index, tens of milliseconds even for millions of
-    # functions; above the cap the search falls back to the regex, unbounded as before.
+    # collection when there are at most this many (fkie-cad/mcritweb#76); above the cap the search
+    # falls back to the regex, unbounded as before. Listing them is a $group that stops one past
+    # the cap: tens of milliseconds for 5,000 names over two million functions, but ~0.9 s to find
+    # out that 11.6M functions carry more than 10,000 (314,144) names. That negative verdict is
+    # therefore remembered per (collection, field) for _OVER_CAP_TTL seconds, see _getDistinctValues.
     _DISTINCT_VALUES_CAP = 10000
     # and at most this many bytes of them in total: the matching values go into one $in, which
     # must stay well inside MongoDB's 16 MiB command limit even when they are long mangled symbols
     _DISTINCT_VALUES_MAX_BYTES = 1 << 20
+    # Only "over the cap" is cached, never the values: a corpus that grew past the cap stays past it,
+    # so no write has to invalidate anything and each worker process may keep its own copy. Should
+    # deletions bring it back under, the cost is the regex - today's behaviour - until the verdict
+    # expires and the scan runs again.
+    _OVER_CAP_TTL = 3600
     # Inverted index over picblockhashes: {_id: <block hash>, sample_ids: [<sample_id>, ...]}.
     # getUniqueBlocks only ever asks "does this block hash occur outside the requested samples?",
     # so the sample list is all it needs - deliberately not function ids or offsets, which would
@@ -211,6 +219,8 @@ class MongoDbStorage(StorageInterface):
         # what we want: forking servers (gunicorn) fork before the first request, so every child
         # inherits an unlocked copy and synchronises its own threads independently
         self._database_lock = threading.Lock()
+        # (collection, field) -> time.monotonic() at which it was found over the distinct-values cap
+        self._over_cap_since: Dict[Tuple[str, str], float] = {}
 
     def _getDb(self):
         # because of gunicorn and forking workers, we want to delay creation of MongoClient until actual usage and avoid it within __init__()
@@ -1007,6 +1017,8 @@ class MongoDbStorage(StorageInterface):
             collections.append("band_%d" % band_id)
         for c in collections:
             self._getDb()[c].drop()
+        # an emptied corpus is under every cap again; other processes simply wait out the TTL
+        self._over_cap_since.clear()
         self._ensureIndexAndUnknownFamily()
 
     def getSampleBySha256(self, sha256: str, is_query=False) -> Optional["SampleEntry"]:
@@ -2537,7 +2549,17 @@ class MongoDbStorage(StorageInterface):
 
     def _getDistinctValues(self, collection: str, field: str) -> Optional[List[Any]]:
         """All distinct values of the field, or None when there are more than _DISTINCT_VALUES_CAP
-        of them or they exceed _DISTINCT_VALUES_MAX_BYTES in total."""
+        of them or they exceed _DISTINCT_VALUES_MAX_BYTES in total. A None is remembered for
+        _OVER_CAP_TTL seconds, so a large corpus pays for the capped scan once, not per search."""
+        found_over_cap = self._over_cap_since.get((collection, field))
+        if found_over_cap is not None and time.monotonic() - found_over_cap < self._OVER_CAP_TTL:
+            return None
+        values = self._scanDistinctValues(collection, field)
+        if values is None:
+            self._over_cap_since[(collection, field)] = time.monotonic()
+        return values
+
+    def _scanDistinctValues(self, collection: str, field: str) -> Optional[List[Any]]:
         pipeline = [{"$group": {"_id": "$" + field}}, {"$limit": self._DISTINCT_VALUES_CAP + 1}]
         values = []
         total_bytes = 0

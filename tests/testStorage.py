@@ -795,6 +795,21 @@ class MongoDbStorageTest(MemoryStorageTest):
         self.assertIn("kryptos_config", excluded)
         self.assertEqual(len(self.storage.getFunctionsBySampleId(0)) - 2, len(excluded))
 
+    def testTheOverCapVerdictIsCachedAcrossSearches(self):
+        # on a corpus past the cap the capped scan costs ~0.9 s and always gives the same answer,
+        # so it runs once, not on every search
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_CAP
+        try:
+            MongoDbStorage._DISTINCT_VALUES_CAP = 2
+            functions = self.storage._getDb().functions
+            with patch.object(type(functions), "aggregate", autospec=True, side_effect=type(functions).aggregate) as scan:
+                self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+                self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+                self.assertEqual(1, scan.call_count)
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_CAP = original_cap
+
     def testDistinctValuesAreListedOnlyForSubstringSearches(self):
         self._storageWithNamedFunctions()
         with patch.object(self.storage, "_getDistinctValues", wraps=self.storage._getDistinctValues) as listing:

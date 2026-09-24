@@ -105,7 +105,10 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   functions with 5,000 distinct names, a no-result search went 4.2 s -> 22 ms and a sorted
   search 1.5 s -> 62 ms. NOTE that a common term at the default sort got slower by tens of
   milliseconds (`main` 15 ms -> 78 ms), and above 10,000 distinct names the search keeps the
-  regex, unbounded as before ([mcritweb#76]).
+  regex, unbounded as before ([mcritweb#76]). Finding out that a corpus is past that cap is not
+  free - on 11.6M functions with 314,144 distinct names the capped scan takes ~0.9 s - so each
+  process remembers the over-cap verdict for an hour instead of rescanning on every search. Only
+  that verdict is kept, never the names, so writes need not invalidate it.
 
 
 ## [1.9.0] - 2026-09-08
