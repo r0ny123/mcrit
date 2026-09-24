@@ -141,6 +141,20 @@ class ClientModesTest(unittest.TestCase):
                 handle_response(answer(status, FAILED), raise_client_errors=True, raise_server_errors=True)
             self.assertIsNone(handle_response(answer(status, FAILED), raise_server_errors=True))
 
+    def test_the_rebuild_endpoints_raise_through_the_client_mode(self):
+        """rebuildFunctionRangeIndex and rebuildBandDfIndex were written before the modes and
+        handed their response to handle_response directly, so they answered None however the
+        client was built."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True, raise_server_errors=True)
+        for method in ("rebuildFunctionRangeIndex", "rebuildBandDfIndex"):
+            with self.subTest(method=method):
+                with patch("mcrit.client.McritClient.requests.get", return_value=answer(500, FAILED)):
+                    with self.assertRaises(McritServerError):
+                        getattr(client, method)()
+                with patch("mcrit.client.McritClient.requests.get", return_value=answer(401, FAILED)):
+                    with self.assertRaises(McritUnauthorized):
+                        getattr(client, method)()
+
 
 class GetQueueDataTest(unittest.TestCase):
     """getQueueData's query string for the sample_ids/job_ids selectors, and raw mode."""
