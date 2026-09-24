@@ -73,6 +73,48 @@ class MemoryStorageTest(TestCase):
         self.assertEqual(10, stats_without_pichash["num_functions"])
         self.assertIsNone(stats_without_pichash["num_pichashes"])
 
+    def testModifyFunction(self):
+        # fkie-cad/mcritweb#72: a function's name can be set; the name is recorded as a label
+        # by the user who set it, once per (user, name); query functions and unknown ids are refused
+        self.storage.clearStorage()
+        smda_report = SmdaReport.fromFile(self.example_file_path)
+        assert smda_report is not None
+        sample_entry = self.storage.addSmdaReport(smda_report)
+        assert sample_entry is not None
+        function_entry = (self.storage.getFunctionsBySampleId(sample_entry.sample_id) or [])[0]
+        function_id = function_entry.function_id
+        labels_before = len(function_entry.function_labels)
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "decrypt_config"}, username="alice"))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual("decrypt_config", modified.function_name)
+        self.assertEqual(labels_before + 1, len(modified.function_labels))
+        self.assertEqual(("decrypt_config", "alice"), (modified.function_labels[-1].function_label, modified.function_labels[-1].username))
+        # the same label by the same user is not recorded twice, by another user it is
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "decrypt_config"}, username="alice"))
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "decrypt_config"}, username="bob"))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual(labels_before + 2, len(modified.function_labels))
+        self.assertEqual("bob", modified.function_labels[-1].username)
+        # without a user the label is anonymous; an empty name clears the name and records nothing
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "sub_1234"}))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual("anonymous", modified.function_labels[-1].username)
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": ""}, username="alice"))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual("", modified.function_name)
+        self.assertEqual(labels_before + 3, len(modified.function_labels))
+        # the other functions of the sample are untouched, the entry round-trips through toDict
+        untouched = (self.storage.getFunctionsBySampleId(sample_entry.sample_id) or [])[1]
+        self.assertEqual(labels_before, len(untouched.function_labels))
+        self.assertEqual(modified.toDict()["function_labels"], [label.toDict() for label in modified.function_labels])
+        self.assertFalse(self.storage.modifyFunction(function_id + 100000, {"function_name": "x"}, username="alice"))
+        self.assertFalse(self.storage.modifyFunction(-1, {"function_name": "x"}, username="alice"))
+        self.assertTrue(self.storage.modifyFunction(function_id, {}, username="alice"))
+
     def testStatusAnswersInlineXcfgOnMemoryStorage(self):
         # the interface default is None ("not applicable"), so /status must keep working on
         # backends without the pre-split shape - a raise here broke every memory-backed call.
@@ -609,6 +651,51 @@ class MongoDbStorageTest(MemoryStorageTest):
         THIS_FILE_PATH = str(os.path.abspath(__file__))
         PROJECT_ROOT = str(os.path.abspath(os.sep.join([THIS_FILE_PATH, "..", ".."])))
         self.example_file_path = os.sep.join([PROJECT_ROOT, "tests", "example_report.smda"])
+
+    def testAnOversizedDisassemblyBlobIsDroppedAndTheFunctionKept(self):
+        # #42: MongoDB refuses a document over 16 MiB; the whole batch used to fail as
+        # "Database insert failed." with nothing saying which document, and the sample was lost
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        huge = "x" * (16 * 1024 * 1024 + 1)
+        with patch("mcrit.storage.MongoDbStorage.LOGGER") as logger:
+            self.storage._insertXcfgDocuments([{"function_id": 5, "_xcfg": huge}, {"function_id": 6, "_xcfg": "{}"}])
+        self.assertIn("Dropping the disassembly of %d function(s)", logger.warning.call_args.args[0])
+        self.assertEqual(1, logger.warning.call_args.args[1])
+        self.assertEqual([6], [document["_id"] for document in db.xcfg.find({}, {"_id": 1})])
+        error = db.error.find_one({}, sort=[("ts", -1)])
+        assert error is not None
+        self.assertIn("exceed the 16 MiB limit", error["error_msg"])
+        self.assertEqual(5, error["error_details"]["oversized"][0]["document"]["_id"])
+        self.assertGreater(error["error_details"]["oversized"][0]["bytes"], 16 * 1024 * 1024)
+        self.assertTrue(error["error_details"]["dropped"])
+
+    def testAnOversizedFunctionDocumentFailsNamingItself(self):
+        self.storage.clearStorage()
+        huge = "x" * (16 * 1024 * 1024 + 1)
+        with self.assertRaises(ValueError) as raised:
+            self.storage._dbInsertMany("functions", [{"function_id": 8, "sample_id": 1}, {"function_id": 9, "sample_id": 1, "blob": huge}, {"function_id": 10, "sample_id": 1}])
+        self.assertIn("16 MiB", str(raised.exception))
+        self.assertIn("'function_id': 9", str(raised.exception))
+        self.assertNotIn("'function_id': 10", str(raised.exception))
+        # the ordered insert stopped at the oversized document
+        self.assertEqual([8], [d["function_id"] for d in self.storage._getDb().functions.find({}, {"function_id": 1})])
+
+    def testAnOversizedBlobInTheMiddleKeepsTheOthers(self):
+        self.storage.clearStorage()
+        huge = "x" * (16 * 1024 * 1024 + 1)
+        with patch("mcrit.storage.MongoDbStorage.LOGGER"):
+            inserted = self.storage._insertXcfgDocuments(
+                [
+                    {"function_id": 1, "_xcfg": "{}"},
+                    {"function_id": 2, "_xcfg": huge},
+                    {"function_id": 3, "_xcfg": "{}"},
+                    {"function_id": 4, "_xcfg": huge},
+                    {"function_id": 5, "_xcfg": "{}"},
+                ]
+            )
+        self.assertIsNone(inserted)
+        self.assertEqual([1, 3, 5], sorted(document["_id"] for document in self.storage._getDb().xcfg.find({}, {"_id": 1})))
 
     def _driftFamilyCounters(self, family_id, num_samples, num_functions):
         self.storage._getDb().families.update_one({"family_id": family_id}, {"$set": {"num_samples": num_samples, "num_functions": num_functions}})
