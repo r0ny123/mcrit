@@ -1,0 +1,90 @@
+From 75f84dd13eb1541d0c949ea1d3ef8e160da65ff3 Mon Sep 17 00:00:00 2001
+From: r0ny123 <49360849+r0ny123@users.noreply.github.com>
+Date: Thu, 24 Sep 2026 13:12:02 +0000
+Subject: [PATCH 3/3] Give mcritweb and nginx healthchecks, and start nginx
+ once mcritweb serves
+
+nginx depended on mcritweb with condition: service_started, which holds as soon as the
+container exists, long before gunicorn listens, so nginx answered 502 Bad Gateway for as
+long as MCRITweb took to start. Neither service had a healthcheck, so `docker compose ps`
+could not say whether either was serving.
+
+mcritweb is now probed with curl on a static file: any HTTP answer counts, as for
+mcrit-server, and a static file keeps the probe out of the views (every request still makes
+MCRITweb's two small SQLite reads). curl is already in the runtime image. nginx is probed
+with `nc -z 127.0.0.1 80`, not HTTP: its server blocks answer 444 to any Host but their
+server_name, so an HTTP probe would fail on every deployment that sets its own name. nginx
+now waits for mcritweb to be healthy.
+
+Checked with compose v5.1.1, the real nginx image and site configuration, and stand-ins
+for the other services, the mcritweb one serving only 20 s after it starts: before, a
+client polling once a second got 502 from 13 s to 33 s; after, connection refused until
+nginx starts at 33 s and then 200, with all four services reporting healthy. nc -z exits
+1 with nothing listening and 0 once nginx is up.
+---
+ CHANGELOG.md       | 10 ++++++++++
+ docker-compose.yml | 19 ++++++++++++++++++-
+ 2 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6b85e6c..810f5cc 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -39,6 +39,16 @@ deployment that means saying plainly what an operator has to *do*, which is what
+   (default `1`) sets how many run. MCRIT's queue claims a job with one `find_one_and_update` on an
+   unset `locked_by`, and each worker has its own UUID, so two workers never take the same job.
+ 
++### Added
++
++- **Healthchecks for `mcritweb` and `nginx`, and NGINX waits for MCRITweb to serve.** NGINX used
++  to start as soon as the `mcritweb` container existed, and answered `502 Bad Gateway` until
++  gunicorn listened. With a stand-in MCRITweb that takes 20 s to start serving, a client got 502
++  for those 20 s before this change and none after it. `mcritweb` is probed with a static file
++  (any HTTP answer counts, as for `mcrit-server`); `nginx` with a TCP connect, because its server
++  blocks answer 444 to any Host but their `server_name` and an HTTP probe would fail on every
++  deployment that sets one.
++
+ ### Upgrading
+ 
+ - The worker container is now named by compose after the project (`docker-mcrit-mcrit-worker-1`
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 7a9c7d3..f2519d9 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -105,6 +105,14 @@ services:
+       - ./storage/mcritweb:/opt/mcritweb/instance
+     entrypoint:
+       - /entry_web_prod.sh
++    healthcheck:
++      # any HTTP answer means gunicorn is serving the app; a static file keeps the probe out of the
++      # views, though every request still makes MCRITweb's two small reads of its SQLite database
++      test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:5000/static/style.css"]
++      interval: 10s
++      timeout: 5s
++      retries: 10
++      start_period: 30s
+     ports: 
+       - 127.0.0.1:5000:5000
+   nginx:
+@@ -114,8 +122,17 @@ services:
+     security_opt:
+       - no-new-privileges:true
+     depends_on:
++      # started is not serving: until gunicorn listens, NGINX answers every request with a 502
+       mcritweb:
+-        condition: service_started
++        condition: service_healthy
++    healthcheck:
++      # a TCP probe rather than an HTTP one: the server blocks answer 444 to any Host other than
++      # their server_name, so an HTTP probe would fail on every deployment that sets its own
++      test: ["CMD", "nc", "-z", "127.0.0.1", "80"]
++      interval: 10s
++      timeout: 5s
++      retries: 10
++      start_period: 10s
+     volumes:
+       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+       - ./nginx/uwsgi_params:/etc/nginx/uwsgi_params:ro
+-- 
+2.43.0
+
