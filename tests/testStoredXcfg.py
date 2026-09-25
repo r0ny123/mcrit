@@ -25,6 +25,7 @@ from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.storage.FunctionEntry import missingXcfgFields, smdaFunctionFromXcfg
 from mcrit.storage.MatchingResult import MatchingResult
 from mcrit.storage.StorageFactory import StorageFactory
+from mcrit.storage.UniqueBlocksResult import UniqueBlocksResult
 
 from .context import config
 from .testStorage import buildMongoStorageConfig
@@ -111,6 +112,40 @@ class RebuildPathsTest(unittest.TestCase):
         for block in result["unique_blocks"].values():
             self.assertEqual([], block["instructions"])
             self.assertEqual("", block["escaped_sequence"])
+        # no bytes to match on, so no rule - rather than a cover that cannot be rendered
+        self.assertEqual([], result["yara_rule"])
+        self.assertFalse(result["statistics"]["has_yara_rule"])
+        self.assertFalse(result["statistics"]["has_complete_yara_rule"])
+        self.assertEqual(len(with_disassembly), result["statistics"]["blocks_without_instructions"])
+        cover = UniqueBlocksResult.fromDict(json.loads(json.dumps(result))).generateBlockCover()
+        self.assertEqual([], cover["block_hashes"])
+        self.assertFalse(cover["has_rule"])
+
+    def test_a_block_cover_never_selects_a_block_without_disassembly(self):
+        sample_id = self.sample_entry.sample_id
+        before = self.worker.getUniqueBlocks([sample_id])
+        self.assertEqual(0, before["statistics"]["blocks_without_instructions"])
+        # empty the function of a block both covers select while it still has its disassembly
+        selected = before["yara_rule"][0]
+        self.assertIn(selected, UniqueBlocksResult.fromDict(before).generateBlockCover()["block_hashes"])
+        emptied = before["unique_blocks"][selected]["function_id"]
+        self.storage._functions[emptied].xcfg = {}
+        result = self.worker.getUniqueBlocks([sample_id])
+        without = {block_hash for block_hash, block in result["unique_blocks"].items() if block["function_id"] == emptied}
+        self.assertIn(selected, without)
+        self.assertEqual(len(without), result["statistics"]["blocks_without_instructions"])
+        self.assertTrue(result["yara_rule"])
+        self.assertFalse(without.intersection(result["yara_rule"]))
+        # the rule is rendered from the wire shape, where block hashes are strings
+        wire = json.loads(json.dumps(result))
+        blocks = UniqueBlocksResult.fromDict(wire)
+        cover = blocks.generateBlockCover()
+        self.assertTrue(cover["block_hashes"])
+        self.assertFalse({str(block_hash) for block_hash in without}.intersection(cover["block_hashes"]))
+        rule = blocks.generateYaraRule(wrap_at=0)
+        self.assertNotIn("{  }", rule)
+        for block_hash in cover["block_hashes"]:
+            self.assertIn(f"$blockhash_{block_hash} = {{ {wire['unique_blocks'][block_hash]['escaped_sequence']} }}", rule)
 
     def test_unique_blocks_skip_only_the_function_without_disassembly(self):
         blocks = self.storage.getUniqueBlocks([self.sample_entry.sample_id])["unique_blocks"]

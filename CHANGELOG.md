@@ -54,7 +54,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `KeyError`). `Worker.calculateMinHashes` handed it over anyway, so the minhashing job of that
   sample - and every `complete_minhashes` batch of 10,000 functions it fell into - failed, on
   every retry; `recalculateAllPicHashes` stopped on a stored `{}` and link-hunt clustering
-  (`MatchingResult.clusterLinkHuntResult`) on any entry without disassembly. All of them now
+  (`MatchingResult.clusterLinkHuntResult`) on an entry whose disassembly was dropped. All of them now
   rebuild through one helper, `FunctionEntry.smdaFunctionFromXcfg`, skip such a function and log
   one warning per call with the number skipped; `recalculateAllPicHashes` no longer counts a
   skipped function's old block hashes in `picblockhashes_updatable`.
@@ -70,8 +70,11 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   MongoDbStorage decoded a missing or `{}` blob to `{}` and indexed it anyway. Such blocks are now
   reported without instructions (an empty `instructions` list and `escaped_sequence`) on both
   backends, as MemoryStorage already did for a block offset its xcfg lacks, instead of failing the
-  job. A sample hashed under `STORAGE_DROP_DISASSEMBLY` therefore still gets its unique blocks and
-  a block cover, but no byte patterns to build a YARA rule from.
+  job. Neither the job's block cover nor `UniqueBlocksResult.generateYaraRule` selects such a block
+  any more, as there are no bytes to match on: a cover built from them claimed a complete rule that
+  then failed to render (`max()` of no instructions) or rendered an empty, invalid string.
+  `statistics["blocks_without_instructions"]` counts them. A sample hashed under
+  `STORAGE_DROP_DISASSEMBLY` therefore still gets its unique blocks, but no YARA rule.
 
 ## [1.11.0] - 2026-09-25
 

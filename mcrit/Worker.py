@@ -425,6 +425,8 @@ class Worker(QueueRemoteCallee):
         blocks covering the least covered sample, i.e. the k the cover actually achieved. It also
         echoes the two parameters, so a result says what shaped it, and "blocks_considered" records
         how many blocks survived min_instructions while the counts above describe everything found.
+        "blocks_without_instructions" counts the ones among them whose function was stored without
+        its disassembly: they are reported, but never selected, as they have no bytes to match on.
         """
         # TODO we could propagate this progress reporter into the storage function for more fine grained progress tracking
         progress_reporter.set_total(1)
@@ -440,6 +442,10 @@ class Worker(QueueRemoteCallee):
         blocks_result_dict["statistics"]["covers_required"] = covers_required
         blocks_result_dict["statistics"]["min_instructions"] = min_instructions
         blocks_result_dict["statistics"]["blocks_considered"] = len(unique_blocks)
+        # a block whose function has no disassembly (STORAGE_DROP_DISASSEMBLY, #42) has no bytes to
+        # match on, so it stays in the result but cannot become part of the cover
+        coverable_blocks = {block_hash: entry for block_hash, entry in unique_blocks.items() if entry["instructions"]}
+        blocks_result_dict["statistics"]["blocks_without_instructions"] = len(unique_blocks) - len(coverable_blocks)
         # greedily produce a multi set cover of picblockhashes for sample_ids, i.e. a YARA rule :)
         yara_rule = []
         sample_coverage = {sample_id: 0 for sample_id in sample_ids}
@@ -447,7 +453,7 @@ class Worker(QueueRemoteCallee):
         while True:
             # calculate block_scores as how much benefit they bring, i.e. how many uncovered samples they can cover at once
             block_candidates = []
-            for block_hash, entry in unique_blocks.items():
+            for block_hash, entry in coverable_blocks.items():
                 sample_ids_coverable = set(entry["samples"]).difference(samples_covered)
                 if sample_ids_coverable and block_hash not in yara_rule:
                     candidate = {"block_hash": block_hash, "coverable": sample_ids_coverable, "value": len(sample_ids_coverable), "score": entry["score"]}
