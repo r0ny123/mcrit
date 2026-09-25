@@ -4,6 +4,7 @@ import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.server.utils import db_log_msg, get_username, jsonify, timing
+from mcrit.storage.FamilyEntry import FamilyEntry
 
 
 class FamilyResource:
@@ -38,6 +39,31 @@ class FamilyResource:
         db_log_msg(self.index, req, f"FamilyResource.on_get - success - family_id {family_id}")
 
     @timing
+    def on_post_by_ids(self, req, resp):
+        if not req.content_length:
+            resp.data = jsonify(
+                {
+                    "status": "failed",
+                    "data": {"message": "POST request without body can't be processed."},
+                }
+            )
+            resp.status = falcon.HTTP_400
+            db_log_msg(self.index, req, "FamilyResource.on_post_by_ids - failed - no POST body.")
+            return
+        # assume the POST body consists of comma separated family_ids
+        post_body = req.stream.read()
+        if re.match(rb"^\d+(?:[\s]*,[\s]*\d+)*$", post_body):
+            target_family_ids = [int(family_id) for family_id in post_body.split(b",")]
+            family_entries = self.index.getFamiliesByIds(target_family_ids)
+            data = {family_id: family_entry.toDict() for family_id, family_entry in family_entries.items()}
+            resp.data = jsonify({"status": "successful", "data": data})
+            resp.status = falcon.HTTP_200
+            db_log_msg(self.index, req, "FamilyResource.on_post_by_ids - success.")
+            return
+        resp.status = falcon.HTTP_400
+        db_log_msg(self.index, req, "FamilyResource.on_post_by_ids - failed - invalid body format.")
+
+    @timing
     def on_put(self, req, resp, family_id=None):
         resp.status = falcon.HTTP_400
         if not req.content_length or not isinstance(req.media, dict):
@@ -46,7 +72,7 @@ class FamilyResource:
             return
         # sanitize sample information
         information_update = req.media
-        if "family_name" in information_update and not re.match(r"^(?=[a-zA-Z0-9._\-]{0,64}$)(?!.*[\-_.]{2})[^\-_.].*[^\-_.]$", information_update["family_name"]):
+        if "family_name" in information_update and not re.match(r"^(?![\-_.])(?!.*[\-_.]{2})(?!.*[\-_.]\Z)[a-zA-Z0-9._\-]{0,64}\Z", information_update["family_name"]):
             resp.data = jsonify({"status": "failed", "data": {"message": "family_name may be 0-64 alphanumeric chars with single dots, dashes, underscores inbetween."}})
             return
         if "is_library" in information_update:
@@ -58,6 +84,17 @@ class FamilyResource:
                 information_update["is_library"] = True
             elif information_update["is_library"] in ["False", "false", "0", 0]:
                 information_update["is_library"] = False
+        if "actors" in information_update:
+            actors = information_update["actors"]
+            if isinstance(actors, str):
+                actors = [actor for actor in actors.split(",")]
+            if not isinstance(actors, list) or not all(FamilyEntry.isValidActor(actor) for actor in actors):
+                resp.data = jsonify(
+                    {"status": "failed", "data": {"message": "actors must be a list of 1-64 character names (letters, digits, spaces, dots, dashes, underscores)."}}
+                )
+                db_log_msg(self.index, req, "FamilyResource.on_put - failed - actors malformed.")
+                return
+            information_update["actors"] = actors
         successful = self.index.modifyFamily(family_id, information_update, force_recalculation=True, username=get_username(req))
         if successful:
             resp.data = jsonify({"status": "successful", "data": {"message": "Family modified."}})

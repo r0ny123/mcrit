@@ -234,6 +234,19 @@ class StorageInterface:
         """
         raise NotImplementedError
 
+    def modifyFunction(self, function_id: int, update_information: dict, username: Optional[str] = None) -> bool:
+        """Update a function in the storage (fkie-cad/mcritweb#72)
+
+        Args:
+            function_id: the id of the function to modify; query functions (negative ids) cannot be modified
+            update_information: a dictionary with update information for fields (function_name)
+            username: who submits the change; a new function_name is also recorded as a FunctionLabelEntry by this user
+
+        Returns:
+            True if function_id was contained in the storage and updated successfully, False otherwise
+        """
+        raise NotImplementedError
+
     def deleteSample(self, sample_id: int) -> bool:
         """Remove a sample from the storage, also removes all functions of the sample.
         All minhashes will be removed from the bands.
@@ -550,6 +563,18 @@ class StorageInterface:
         """
         raise NotImplementedError
 
+    def getFamilyEntriesByIds(self, family_ids: List[int]) -> Dict[int, "FamilyEntry"]:
+        """Batch form of getFamily: one lookup for many ids.
+
+        Args:
+            family_ids: family ids to resolve
+
+        Returns:
+            family_id -> FamilyEntry for every id that exists; missing ids are absent.
+            Entries carry no sample lists, same as getFamily.
+        """
+        raise NotImplementedError
+
     # TODO find out if it is really possible that a Function Object has no MinHash.
     def getMinHashByFunctionId(self, function_id: int) -> Optional[bytes]:
         """Get the MinHash's bytes of a function, if the function exists and has a MinHash object.
@@ -739,6 +764,39 @@ class StorageInterface:
         Returns:
             the number of distinct block hashes indexed
         """
+        raise NotImplementedError
+
+    def rebuildFunctionRangeIndex(self, progress_reporter=None) -> int:
+        """Rebuild the index mapping function ids back to the sample that holds them.
+
+        Required before two-stage matching (MINHASH_MATCHING_SHORTLIST_SIZE) can run: the
+        shortlist has to turn candidate function ids into samples without reading one function
+        per candidate.
+        Args:
+            progress_reporter: optional callable invoked with progress updates
+        Returns:
+            the number of samples covered
+        """
+        raise NotImplementedError
+
+    def isFunctionRangeIndexComplete(self) -> bool:
+        """Whether the function range index may be trusted; readers fall back when it is not."""
+        raise NotImplementedError
+
+    def rebuildBandDfIndex(self, progress_reporter=None) -> int:
+        """Set the posting-list length on every band document and index it.
+
+        Makes STORAGE_BAND_DF_CUTOFF skip an over-long posting list from the index entry rather
+        than reading the document to measure it.
+        Args:
+            progress_reporter: optional callable invoked with progress updates
+        Returns:
+            the number of band documents updated
+        """
+        raise NotImplementedError
+
+    def isBandDfIndexComplete(self) -> bool:
+        """Whether band documents carry a trustworthy df; the cutoff falls back when they do not."""
         raise NotImplementedError
 
     def rebuildMinhashBandIndex(self, progress_reporter=None) -> int:

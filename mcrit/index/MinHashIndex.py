@@ -3,7 +3,7 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from smda.common.SmdaReport import SmdaReport
 from smda.SmdaConfig import SmdaConfig
@@ -191,6 +191,12 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 raise MemoryError("Export running beyond the allocated maximum, aborting operation.")
         exported_data["content"]["num_families"] = len(family_mapping)
         exported_data["family_mapping"] = family_mapping
+        # the family attributes beyond the name (#57); an importer without this key ignores it
+        exported_data["family_actors"] = {}
+        for family_id in family_mapping:
+            family_entry = storage.getFamily(family_id)
+            if family_entry is not None and family_entry.actors:
+                exported_data["family_actors"][family_id] = list(family_entry.actors)
         exported_data["sample_entries"] = exported_sample_entries
         exported_data["function_entries"] = exported_function_entries
         return exported_data
@@ -283,6 +289,19 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             else:
                 import_report["num_families_skipped"] += 1
             family_id_remapping[exported_family_id] = remapped_family_id
+        # actors of imported families are merged into what this instance already knows (#57)
+        for exported_family_id, actors in (export_data.get("family_actors") or {}).items():
+            remapped_family_id = family_id_remapping.get(int(exported_family_id))
+            local_family = storage.getFamily(remapped_family_id) if remapped_family_id is not None else None
+            # held to what the API accepts: an export is data from elsewhere
+            valid_actors = [actor for actor in actors or [] if FamilyEntry.isValidActor(actor)]
+            if len(valid_actors) != len(actors or []):
+                LOGGER.warning("Dropping %d invalid actor name(s) of imported family %s.", len(actors or []) - len(valid_actors), exported_family_id)
+            actors = FamilyEntry.normalizeActors(valid_actors)
+            if local_family is not None and actors:
+                merged = list(local_family.actors) + [actor for actor in actors if actor not in local_family.actors]
+                if merged != local_family.actors:
+                    storage.modifyFamily(remapped_family_id, {"actors": merged})
         LOGGER.info("Family remapping created: %d families, %d samples.", len(family_id_remapping), len(export_data["sample_entries"]))
         # iterate samples
         index = 0
@@ -390,6 +409,11 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         report = SmdaReport.fromDict(report_json)
         return self.addReport(report, calculate_hashes=calculate_hashes, calculate_matches=calculate_matches)
 
+    def modifyFunction(self, function_id: int, update_information: dict, username: Optional[str] = None) -> bool:
+        # unlike modifySample/modifyFamily this touches one document and no statistics, so it
+        # is answered synchronously instead of as a job (fkie-cad/mcritweb#72)
+        return self.getStorage().modifyFunction(function_id, update_information, username=username)
+
     def getMatchesCross(self, sample_ids: List[int], sample_group_only=False, force_recalculation=False, username=None, **params):
         sample_to_job_id = {}
         for id in sample_ids:
@@ -448,6 +472,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
     def getFamily(self, family_id):
         return self.getStorage().getFamily(family_id)
 
+    def getFamiliesByIds(self, family_ids: List[int]) -> Dict[int, FamilyEntry]:
+        return self.getStorage().getFamilyEntriesByIds(family_ids)
+
     def getFunctionsBySampleId(self, sample_id):
         return self.getStorage().getFunctionsBySampleId(sample_id)
 
@@ -468,6 +495,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
 
     def getSampleById(self, sample_id):
         return self.getStorage().getSampleById(sample_id)
+
+    def getSamplesByIds(self, sample_ids: List[int]) -> Dict[int, SampleEntry]:
+        return self.getStorage().getSampleEntriesByIds(sample_ids)
 
     def getSamples(self, start_index, limit):
         return self.getStorage().getSamples(start_index, limit)
@@ -583,7 +613,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             last_element_key = None
 
         forward_cursor_str = None
-        if last_element_key:
+        # `is not None`, not truthiness: the key is an id, and a page whose last entry is
+        # id 0 (function 0, sample 0, the unknown family 0) used to end the listing there
+        if last_element_key is not None:
             last_result = search_results_objects[last_element_key]
             forward_cursor = MinimalSearchCursor()
             forward_cursor.is_forward_search = True ^ is_backward_search  # switch for backward search, because of swap
@@ -619,9 +651,12 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 (standard_sort, is_ascending),
             ]
         else:
+            # the tie-break follows the direction of the sort field: the order stays total and
+            # deterministic, and a single compound index on (field, id) then serves the
+            # descending order as well, walked backwards (fkie-cad/mcritweb#59)
             sort_by_list = [
                 (sort_by, is_ascending),
-                (standard_sort, True),
+                (standard_sort, is_ascending),
             ]
         return sort_by_list
 

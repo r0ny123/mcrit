@@ -1,4 +1,6 @@
+import inspect
 import json
+import re
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -107,6 +109,43 @@ class ClientModesTest(unittest.TestCase):
             with self.assertRaises(McritBadRequest):
                 client.deleteFamily(1)
 
+    def test_modify_family_raises_through_the_client_mode_too(self):
+        """modifyFamily grew its actors on a branch written before these modes existed, where
+        it called handle_response directly - which answers None whatever mode the client is in."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True)
+        with patch("mcrit.client.McritClient.requests.put", return_value=answer(400, FAILED, url="http://mcrit.test/families/3")):
+            with self.assertRaises(McritBadRequest):
+                client.modifyFamily(3, actors=["APT-1"])
+
+    def test_the_maintenance_jobs_raise_through_the_client_mode(self):
+        """rebuildPicBlockHashIndex, repairMinHashes and recomputeFamilyStats landed while the
+        modes were being written and kept calling handle_response directly, so they answered
+        None however the client was built."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True, raise_server_errors=True)
+        for method, verb in (("rebuildPicBlockHashIndex", "get"), ("repairMinHashes", "post"), ("recomputeFamilyStats", "post")):
+            with self.subTest(method=method):
+                with patch(f"mcrit.client.McritClient.requests.{verb}", return_value=answer(500, FAILED)):
+                    with self.assertRaises(McritServerError):
+                        getattr(client, method)()
+                with patch(f"mcrit.client.McritClient.requests.{verb}", return_value=answer(401, FAILED)):
+                    with self.assertRaises(McritUnauthorized):
+                        getattr(client, method)()
+
+    def test_no_method_parses_outside_the_client_mode(self):
+        """The ratchet behind the case above: a method that hands its response to
+        handle_response itself, rather than to self._handle, ignores the mode it was built in -
+        and nothing fails until someone relies on the mode."""
+        self.assertEqual([], re.findall(r"(?<![\w.])handle_response\(response\)", inspect.getsource(McritClient)))
+
+    def test_modify_function_raises_through_the_client_mode_too(self):
+        """modifyFunction was written before these modes existed, on a branch that merged them
+        in later - a method that calls handle_response directly answers None whatever mode the
+        client is in."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True)
+        with patch("mcrit.client.McritClient.requests.put", return_value=answer(404, FAILED, url="http://mcrit.test/functions/7")):
+            with self.assertRaises(McritNotFound):
+                client.modifyFunction(7, "decrypt_config")
+
     def test_one_mode_does_not_imply_the_other(self):
         server_only = McritClient("http://mcrit.test", raise_server_errors=True)
         with patch("mcrit.client.McritClient.requests.get", return_value=answer(404, FAILED)):
@@ -131,6 +170,59 @@ class ClientModesTest(unittest.TestCase):
             with self.assertRaises(McritRequestError):
                 handle_response(answer(status, FAILED), raise_client_errors=True, raise_server_errors=True)
             self.assertIsNone(handle_response(answer(status, FAILED), raise_server_errors=True))
+
+    def test_the_rebuild_endpoints_raise_through_the_client_mode(self):
+        """rebuildFunctionRangeIndex and rebuildBandDfIndex were written before the modes and
+        handed their response to handle_response directly, so they answered None however the
+        client was built."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True, raise_server_errors=True)
+        for method in ("rebuildFunctionRangeIndex", "rebuildBandDfIndex"):
+            with self.subTest(method=method):
+                with patch("mcrit.client.McritClient.requests.get", return_value=answer(500, FAILED)):
+                    with self.assertRaises(McritServerError):
+                        getattr(client, method)()
+                with patch("mcrit.client.McritClient.requests.get", return_value=answer(401, FAILED)):
+                    with self.assertRaises(McritUnauthorized):
+                        getattr(client, method)()
+
+
+class GetQueueDataTest(unittest.TestCase):
+    """getQueueData's query string for the sample_ids/job_ids selectors, and raw mode."""
+
+    @staticmethod
+    def _success(data=None):
+        return answer(200, {"status": "successful", "data": data if data is not None else []})
+
+    def test_sample_ids_and_job_ids_are_sent_as_comma_separated_lists(self):
+        client = McritClient("http://mcrit.test")
+        with patch("mcrit.client.McritClient.requests.get", return_value=self._success()) as mock_get:
+            client.getQueueData(method="getMatchesForSample", sample_ids=[7, 8, 9], job_ids=["a1b2c3d4e5f6a1b2c3d4e5f6"])
+        url = mock_get.call_args.args[0]
+        self.assertIn("method=getMatchesForSample", url)
+        self.assertIn("sample_ids=7,8,9", url)
+        self.assertIn("job_ids=a1b2c3d4e5f6a1b2c3d4e5f6", url)
+
+    def test_neither_parameter_is_sent_when_not_given(self):
+        client = McritClient("http://mcrit.test")
+        with patch("mcrit.client.McritClient.requests.get", return_value=self._success()) as mock_get:
+            client.getQueueData()
+        url = mock_get.call_args.args[0]
+        self.assertNotIn("sample_ids", url)
+        self.assertNotIn("job_ids", url)
+
+    def test_an_empty_list_is_still_sent_present_but_empty(self):
+        client = McritClient("http://mcrit.test")
+        with patch("mcrit.client.McritClient.requests.get", return_value=self._success()) as mock_get:
+            client.getQueueData(method="getMatchesForSample", sample_ids=[], job_ids=[])
+        url = mock_get.call_args.args[0]
+        self.assertIn("sample_ids=&", url)
+        self.assertTrue(url.endswith("job_ids="))
+
+    def test_raw_mode_returns_the_response_untouched(self):
+        client = McritClient("http://mcrit.test", raw_responses=True)
+        response = self._success()
+        with patch("mcrit.client.McritClient.requests.get", return_value=response):
+            self.assertIs(response, client.getQueueData(sample_ids=[1, 2], job_ids=["x"]))
 
 
 if __name__ == "__main__":
