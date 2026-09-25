@@ -95,6 +95,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Fixed
 
+- **`McritClient`'s error modes reach the three maintenance jobs.** `rebuildPicBlockHashIndex`,
+  `repairMinHashes` and `recomputeFamilyStats` parsed their answer with `handle_response`
+  directly instead of `self._handle`, so a client built with `raise_client_errors` or
+  `raise_server_errors` still got `None` from them - a refused or failed job request that looked
+  like one nothing had answered. They landed while the modes were being written, which is how
+  they were missed. `testClientErrors` now fails on any method that parses outside the client's
+  mode, not only on these three.
 - **`LogBucket` raised `KeyError` for any value past its precomputed table**, which aborts the
   whole indexing job. The table covers `0..SHINGLER_LOGBUCKETS-1` (100,000 by default) and
   `FuzzyStatPairShingler` buckets `max_block_size`, `num_ins_C`, `num_ins_S` and `num_calls`
@@ -131,7 +138,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   refused. Checked over 37,210 generated strings against the old patterns: nothing else changes.
   **Needs the same-name family rename fix ([#208])** - with `""` accepted, renaming family 0 to
   its own name would otherwise double its counters ([#209]).
-
 
 ## [1.9.0] - 2026-09-08
 
