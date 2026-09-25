@@ -185,8 +185,9 @@ def invalidate_derived_indexes(db) -> None:
     log("pichash_counts and picblockhashes dropped; run rebuildPicHashCountIndex() and rebuildPicBlockHashIndex() to restore the fast paths")
 
 
-def set_flag(db, padded: bool) -> None:
-    invalidate_derived_indexes(db)
+def set_flag(db, padded: bool, invalidate: bool = True) -> None:
+    if invalidate:
+        invalidate_derived_indexes(db)
     db.settings.update_one({}, {"$set": {"pichash_padded": padded}}, upsert=True)
     # clear the walk state so a later run of the other mode starts from the top
     db[STATE_COLLECTION].delete_many({})
@@ -230,9 +231,13 @@ def run(db, mode: str, batch_size: int = 2000) -> Dict[str, Any]:
         result.update(verify(db))
         return result
     padded = mode == "pad"
+    flag_before = bool((db.settings.find_one({}) or {}).get("pichash_padded", False))
     for collection_name in COLLECTIONS:
         result[collection_name] = walk(db, collection_name, padded, batch_size)
-    set_flag(db, padded)
+    # a re-run that found nothing to rewrite (the counts carry over from an interrupted run, so
+    # that one still counts) leaves the spelling, and the indexes built on it, as they were
+    changed = flag_before != padded or any(result[name]["rewritten"] + result[name]["swept"] for name in COLLECTIONS)
+    set_flag(db, padded, invalidate=changed)
     result.update(verify(db))
     return result
 

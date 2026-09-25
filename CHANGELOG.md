@@ -32,18 +32,11 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   functions collection, correctly but slowly, until `rebuildPicHashCountIndex()` and
   `rebuildPicBlockHashIndex()` (`GET /rebuild_picblockhash_index`) have run. Unique-block results
   and the YARA rules built from them name blocks by the stored hex, so on a padded instance those
-  names are 16 digits wide.
-
-### Fixed
-
-- **The PicHash cutoff (`MINHASH_PICHASH_MAX_MATCHES`) and zero-padded pichashes ([#145]) now
-  compose.** On an instance not yet migrated, a value may be stored in both spellings, and the
-  cutoff counted each separately, so a value over it could pass; counts are now summed over the
-  spellings of a value, which is kept or dropped as a unit. `migrate_pichash_padding` (`pad` and
-  `unpad`) clears `pichash_counts` and marks it incomplete, since its keys are the stored
-  spelling: left in place, every lookup would miss its count and the cutoff would drop every
-  PicHash match. Until `rebuildPicHashCountIndex()` runs again, the cutoff counts holders the
-  slow way and logs a warning - results are unaffected.
+  names are 16 digits wide. A run that finds nothing to rewrite (a repeated `pad`, or `pad` on an
+  instance padded from the start) keeps both indexes. Until the migration is complete a value may
+  be stored in both spellings; the cutoff (`MINHASH_PICHASH_MAX_MATCHES`) sums the holders of both
+  and keeps or drops the value as a unit, and without its count index it counts them the slow way
+  and logs a warning, with the same results.
 
 ## [1.11.0] - 2026-09-25
 

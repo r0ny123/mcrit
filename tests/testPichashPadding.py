@@ -427,6 +427,19 @@ class PichashMigrationEquivalenceTest(TestCase):
         )
         self._assert_same_unique_blocks()
 
+    def test_a_run_with_nothing_to_rewrite_keeps_the_indexes(self):
+        """Re-running pad, as verify advises for leftovers, must not throw a correct index away."""
+        self._migrate_legacy()
+        self.legacy.rebuildPicBlockHashIndex()
+        self.legacy.rebuildPicHashCountIndex()
+        for db in (self.legacy_db, self.fresh_db):
+            index_size = db.picblockhashes.count_documents({})
+            migrate_pichash_padding.run(db, "pad")
+            self.assertTrue(self._setting(db, "picblockhash_index_complete"))
+            self.assertTrue(self._setting(db, "pichash_count_index_complete"))
+            self.assertEqual(index_size, db.picblockhashes.count_documents({}))
+        self._assert_same_unique_blocks()
+
     def test_unique_blocks_during_an_interrupted_migration(self):
         """A `pad` killed after its first batch leaves both widths behind, and no flag set."""
         num_functions_of_a = self.legacy_db.functions.count_documents({"sample_id": self.sample_a})
