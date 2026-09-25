@@ -50,7 +50,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - With memory storage and the fake queue (`STORAGE_METHOD = "memory"`, `QUEUE_METHOD = "fake"`), no
   job or result could be fetched by id: `LocalQueue` minted `uuid4` ids, and `/jobs/{id}`,
   `/jobs/{id}/result`, `/results/{id}` and `/results/{id}/job`, as well as `DELETE /jobs/{id}`,
-  accept only the 24 hex characters of an ObjectId, so every one of them answered 400 (#203).
+  accept only the 24 hex characters of an ObjectId, so every one of them answered 400 ([#203]).
   `LocalQueue` now mints ObjectIds as `MongoQueue` does; the accepted id format is unchanged. The id
   check is also anchored at the end: an id that merely started with 24 hex characters used to pass
   it and then fail as an invalid ObjectId inside `MongoQueue`, which the client saw as a 500
@@ -604,3 +604,4 @@ date, the version, and what changed.
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#207]: https://github.com/danielplohmann/mcrit/issues/207
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
+[#203]: https://github.com/danielplohmann/mcrit/issues/203
