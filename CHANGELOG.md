@@ -17,6 +17,41 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
+- `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP`, default `False`, runs MongoDB's `compact` on
+  `query_samples`, `query_functions` and `query_xcfg` after every query cleanup (`DbCleanup`), so
+  the space the cleanup freed goes back to the file system instead of staying inside the collection
+  files for reuse. It needs the `compact` privilege, which `readWrite` does not carry; a refusal is
+  reported per collection in the cleanup's result rather than failing the job. The queue's GridFS
+  (`fs.files`, `fs.chunks`), where the results of the deleted query jobs were, is compacted too when
+  the queue shares the storage database, as it does by default, and left alone when the queue has a
+  database of its own.
+
+### Fixed
+
+- The query cleanup (`STORAGE_MONGODB_ENABLE_CLEANUP`) failed on the first query job that left no
+  result - one that failed before matching, or was terminated - because it read the query sample
+  out of every job's result, and so never deleted anything once such a job existed ([#68]). It now
+  deletes an old job without a result and moves on, and it also reaches failed
+  `getMatchesForSmdaReport` jobs, which it did not look at. Its result says how many query
+  samples and jobs it deleted. The memory queue could not delete such a job at all - it raised on
+  the missing result - and now deletes it.
+
+- The query data nothing refers to any more is deleted by the same cleanup ([#68]): query functions
+  whose query sample is gone, and query disassembly whose function is gone. Both were left behind
+  for good by an interrupted deletion or insert. Each is judged only behind a boundary taken
+  before the walk, in batches, so that a query inserted meanwhile is never looked at. The
+  disassembly is written before its functions, so it is judged only while no query sample is
+  short of its functions: a query sample now records how many functions its insert writes
+  (`num_query_functions`), and one still missing some is an insert in flight - or one that died,
+  whose disassembly then goes in the run that deletes its sample. Without that check, two queries
+  inserted at once that finished out of order had the disassembly of the one still writing its
+  functions deleted under it. Query samples written before this release have no count and hold
+  the disassembly judgment back until the last of them has expired.
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
 - **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
   `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
   `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
@@ -32,15 +67,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
   Family entries carry no sample lists ([#207]).
 
-- `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP`, default `False`, runs MongoDB's `compact` on
-  `query_samples`, `query_functions` and `query_xcfg` after every query cleanup (`DbCleanup`), so
-  the space the cleanup freed goes back to the file system instead of staying inside the collection
-  files for reuse. It needs the `compact` privilege, which `readWrite` does not carry; a refusal is
-  reported per collection in the cleanup's result rather than failing the job. The queue's GridFS
-  (`fs.files`, `fs.chunks`), where the results of the deleted query jobs were, is compacted too when
-  the queue shares the storage database, as it does by default, and left alone when the queue has a
-  database of its own.
-
 ### Fixed
 
 - **`McritClient` waited forever on a server that did not answer.** None of its requests passed
@@ -55,25 +81,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
   `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
   client's source and fails for any request added without a timeout.
-
-- The query cleanup (`STORAGE_MONGODB_ENABLE_CLEANUP`) failed on the first query job that left no
-  result - one that failed before matching, or was terminated - because it read the query sample
-  out of every job's result, and so never deleted anything once such a job existed ([#68]). It now
-  deletes an old job without a result and moves on, and it also reaches failed
-  `getMatchesForSmdaReport` jobs, which it did not look at. Its result says how many query
-  samples and jobs it deleted. The memory queue could not delete such a job at all - it raised on
-  the missing result - and now deletes it.
-- The query data nothing refers to any more is deleted by the same cleanup ([#68]): query functions
-  whose query sample is gone, and query disassembly whose function is gone. Both were left behind
-  for good by an interrupted deletion or insert. Each is judged only behind a boundary taken
-  before the walk, in batches, so that a query inserted meanwhile is never looked at. The
-  disassembly is written before its functions, so it is judged only while no query sample is
-  short of its functions: a query sample now records how many functions its insert writes
-  (`num_query_functions`), and one still missing some is an insert in flight - or one that died,
-  whose disassembly then goes in the run that deletes its sample. Without that check, two queries
-  inserted at once that finished out of order had the disassembly of the one still writing its
-  functions deleted under it. Query samples written before this release have no count and hold
-  the disassembly judgment back until the last of them has expired.
 
 ## [1.11.0] - 2026-09-25
 
