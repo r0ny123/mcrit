@@ -25,13 +25,23 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   sample - and every `complete_minhashes` batch of 10,000 functions it fell into - failed, on
   every retry; `recalculateAllPicHashes` stopped on a stored `{}` and link-hunt clustering
   (`MatchingResult.clusterLinkHuntResult`) on any entry without disassembly. All of them now
-  rebuild through one helper, `FunctionEntry.smdaFunctionFromXcfg`, and skip such a function with
-  a warning; `FunctionEntry.toSmdaFunction` answers `None` for it, so a caller that used its
-  result unchecked now has to handle `None`. An `xcfg` that is present but lacks a field smda
-  requires still raises, now naming the fields. The cause does not depend on the smda version:
-  every smda release MCRIT supports requires the same fields (4.4.5 and newer check for them,
-  older ones read them unconditionally), and none can rebuild a function from `{}`. A skipped
-  function stays without a minhash, and the warning with the count is the only trace of it.
+  rebuild through one helper, `FunctionEntry.smdaFunctionFromXcfg`, skip such a function and log
+  one warning per call with the number skipped; `recalculateAllPicHashes` no longer counts a
+  skipped function's old block hashes in `picblockhashes_updatable`.
+  `FunctionEntry.toSmdaFunction` answers `None` for it, so a caller that used its result
+  unchecked now has to handle `None`. An `xcfg` that is present but lacks a field smda requires
+  still raises, now naming the fields. The cause does not depend on the smda version: every smda
+  release MCRIT supports requires the same fields (4.4.5 and newer check for them, older ones read
+  them unconditionally), and none can rebuild a function from `{}`. A skipped function stays
+  without a minhash, and the warning with the count is the only trace of it.
+
+  The unique-blocks job (`getUniqueBlocks`) failed the same way, with `KeyError: 'blocks'`, when a
+  candidate block's function had no disassembly: MemoryStorage only guarded against `None`, and
+  MongoDbStorage decoded a missing or `{}` blob to `{}` and indexed it anyway. Such blocks are now
+  reported without instructions (an empty `instructions` list and `escaped_sequence`) on both
+  backends, as MemoryStorage already did for a block offset its xcfg lacks, instead of failing the
+  job. A sample hashed under `STORAGE_DROP_DISASSEMBLY` therefore still gets its unique blocks and
+  a block cover, but no byte patterns to build a YARA rule from.
 
 ## [1.11.0] - 2026-09-25
 

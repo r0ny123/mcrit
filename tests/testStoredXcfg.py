@@ -73,7 +73,12 @@ class RebuildPathsTest(unittest.TestCase):
     def test_the_older_xcfg_rebuilds_on_every_path(self):
         self.assertTrue(all(entry.toSmdaFunction() is not None for entry in self.function_entries))
         self.assertGreater(self.worker.updateMinHashes(None), 0)
-        MatchingResult(self.sample_entry).clusterLinkHuntResult(self.function_entries, [])
+        with patch("mcrit.storage.MatchingResult.LOGGER") as logger:
+            MatchingResult(self.sample_entry).clusterLinkHuntResult(self.function_entries, [])
+        logger.warning.assert_not_called()
+        blocks = self.storage.getUniqueBlocks([self.sample_entry.sample_id])["unique_blocks"]
+        self.assertTrue(blocks)
+        self.assertTrue(all(block["instructions"] for block in blocks.values()))
 
     def test_minhashing_a_sample_skips_a_function_without_disassembly(self):
         num_hashable = self._dropDisassemblyOfOneHashableFunction()
@@ -86,8 +91,34 @@ class RebuildPathsTest(unittest.TestCase):
     def test_link_hunt_clustering_skips_a_function_without_disassembly(self):
         entries = deepcopy(self.function_entries)
         entries[0].xcfg = {}
-        MatchingResult(self.sample_entry).clusterLinkHuntResult(entries, [])
+        # an entry loaded without its xcfg is skipped the same way
+        entries[1].xcfg = None
+        with patch("mcrit.storage.MatchingResult.LOGGER") as logger:
+            MatchingResult(self.sample_entry).clusterLinkHuntResult(entries, [])
         self.assertIsNone(entries[0].toSmdaFunction())
+        # one warning for the call, with the count, not one per entry and not silence
+        logger.warning.assert_called_once()
+        self.assertEqual(2, logger.warning.call_args.args[1])
+        self.assertIn("no disassembly", logger.warning.call_args.args[0])
+
+    def test_unique_blocks_of_a_sample_without_disassembly_carry_no_instructions(self):
+        """The job completes; blocks whose function has no disassembly have no instructions to show."""
+        with_disassembly = self.storage.getUniqueBlocks([self.sample_entry.sample_id])["unique_blocks"]
+        # what STORAGE_DROP_DISASSEMBLY does once the sample is hashed
+        self.storage.deleteXcfgForSampleId(self.sample_entry.sample_id)
+        result = self.worker.getUniqueBlocks([self.sample_entry.sample_id])
+        self.assertEqual(set(with_disassembly), set(result["unique_blocks"]))
+        for block in result["unique_blocks"].values():
+            self.assertEqual([], block["instructions"])
+            self.assertEqual("", block["escaped_sequence"])
+
+    def test_unique_blocks_skip_only_the_function_without_disassembly(self):
+        blocks = self.storage.getUniqueBlocks([self.sample_entry.sample_id])["unique_blocks"]
+        emptied = next(iter(blocks.values()))["function_id"]
+        self.storage._functions[emptied].xcfg = {}
+        blocks = self.storage.getUniqueBlocks([self.sample_entry.sample_id])["unique_blocks"]
+        self.assertTrue(all(not block["instructions"] for block in blocks.values() if block["function_id"] == emptied))
+        self.assertTrue(all(block["instructions"] for block in blocks.values() if block["function_id"] != emptied))
 
 
 @pytest.mark.mongo
@@ -125,6 +156,35 @@ class MongoRebuildPathsTest(unittest.TestCase):
             self.storage.recalculateAllPicHashes()
         warnings = [call.args[0] for call in logger.warning.call_args_list]
         self.assertTrue(any(message.startswith("1 functions could not be updated") for message in warnings), warnings)
+
+    def test_pichash_recalculation_does_not_count_a_skipped_functions_block_hashes(self):
+        db = self.storage._getDb()
+        block_hash_counts = {
+            document["function_id"]: len(document.get("_picblockhashes", [])) for document in db.functions.find({}, {"function_id": 1, "_picblockhashes": 1, "_id": 0})
+        }
+        emptied = next(function_id for function_id, count in block_hash_counts.items() if count)
+        db.xcfg.update_one({"_id": emptied}, {"$set": {"_xcfg": "{}"}})
+        result = self.storage.recalculateAllPicHashes()
+        self.assertEqual(sum(block_hash_counts.values()) - block_hash_counts[emptied], result["picblockhashes_updatable"])
+
+    def test_unique_blocks_of_a_sample_without_disassembly_carry_no_instructions(self):
+        sample_id = self.sample_entry.sample_id
+        with_disassembly = self.storage.getUniqueBlocks([sample_id])["unique_blocks"]
+        self.assertTrue(with_disassembly)
+        self.assertTrue(all(block["instructions"] for block in with_disassembly.values()))
+        db = self.storage._getDb()
+        emptied = next(iter(with_disassembly.values()))["function_id"]
+        # one blob stored as {} (an import of an export with dropped disassembly) ...
+        db.xcfg.update_one({"_id": emptied}, {"$set": {"_xcfg": "{}"}})
+        blocks = self.storage.getUniqueBlocks([sample_id])["unique_blocks"]
+        self.assertEqual(set(with_disassembly), set(blocks))
+        self.assertTrue(all(not block["instructions"] for block in blocks.values() if block["function_id"] == emptied))
+        self.assertTrue(all(block["instructions"] for block in blocks.values() if block["function_id"] != emptied))
+        # ... and every blob gone, as STORAGE_DROP_DISASSEMBLY leaves the sample
+        self.storage.deleteXcfgForSampleId(sample_id)
+        blocks = self.storage.getUniqueBlocks([sample_id])["unique_blocks"]
+        self.assertEqual(set(with_disassembly), set(blocks))
+        self.assertTrue(all(block["instructions"] == [] for block in blocks.values()))
 
 
 if __name__ == "__main__":
