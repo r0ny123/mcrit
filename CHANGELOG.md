@@ -15,6 +15,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-09-25
+
 ### Added
 
 - Pushing a `vX.Y.Z` tag now publishes the release. The workflow refuses to continue unless the tag
