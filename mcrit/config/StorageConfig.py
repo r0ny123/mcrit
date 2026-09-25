@@ -128,6 +128,31 @@ class StorageConfig(ConfigInterface):
     # that stays exact only while an under-cutoff posting list still fits in one bucket, so
     # MongoDbStorage refuses to start with a cutoff above the bucket size.
     STORAGE_BAND_BUCKET_SIZE: int = 0
+    # How many index keys one partition of an offline index rebuild reads. 0 (the default)
+    # keeps the single-pass rebuild that groups over the whole collection server-side, i.e. the
+    # behaviour this knob was added to. 500,000 is the measured recommendation.
+    #
+    # The pichash count rebuild used to be one `$group` over every pichash in the corpus. That
+    # is a blocking stage whose accumulator holds one entry per *distinct* hash, so its memory
+    # follows the corpus; past `internalDocumentSourceGroupMaxMemoryBytes` (100 MB by default)
+    # it spills to disk and pays external merge I/O on top of the scan. Measured: k ~ +2.2 over
+    # a 1.38x corpus increase, 211.9 s at 5,243 samples against 437.1 s at 7,244.
+    #
+    # The partitioned rebuild reads the same index in bounded slices and counts runs of equal
+    # keys as it goes, so its memory is constant and its cost is one pass over the index no
+    # matter how large the vocabulary grows. Results are identical - the rebuild verifies its
+    # own total against an independent count and falls back to the grouped path if they
+    # disagree - so there is no recall or accuracy trade here, only time and memory.
+    #
+    # 500,000 keys is about 40 MB of BSON in flight per partition and few enough partitions
+    # that the per-partition round trip is noise. Lower it if the rebuild has to share a small
+    # machine; raising it buys nothing once the round trip has stopped mattering.
+    #
+    # It defaults to off despite there being no measured trade, for the same reason as the other
+    # knobs added by this work: a rebuild is the operation an operator reaches for when something
+    # is already wrong, and changing what it does underneath an existing deployment is not a
+    # change to make silently on upgrade.
+    STORAGE_REBUILD_PARTITION_SIZE: int = 0
     # limit maximum export size to protect the system against running OOM, default: 1 GB
     STORAGE_MAX_EXPORT_SIZE = 1024 * 1024 * 1024
 

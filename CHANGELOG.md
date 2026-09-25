@@ -77,6 +77,33 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
     with 0.9936-1.000 of surviving function matches keeping a bit-identical score. What a
     shortlist costs is tail samples: overall sample recall at 12,500 samples was 0.67. PicHash
     matching is unaffected and stays exact. See `docs/TUNING.md`.
+- **`STORAGE_REBUILD_PARTITION_SIZE`**, defaulting to `0` (off), which rebuilds the PicHash count
+  index from a partitioned scan of the `_pichash` index instead of one server-side `$group`
+  followed by an upsert per distinct hash. `500000` is the measured recommendation. The rebuild
+  is offline and never touches query latency, but it was the last operation whose cost followed
+  corpus size rather than request size.
+  - The old rebuild held two structures shaped like the corpus: a `$group` accumulator with one
+    entry per *distinct* hash, which crosses MongoDB's 100 MB limit and spills (4 spills, 36.7 MB
+    at 7,244 samples), and an upsert per hash arriving in group order rather than key order, so
+    each landed at a random position in a growing index. A covered index scan already arrives
+    sorted, which the old code discarded; counting runs of equal keys makes the intermediate
+    state two local variables, and makes the writes ascending inserts.
+  - Measured on corpora projected from a 7,244-sample real corpus, three repeats, medians:
+    **51.9 s -> 10.8 s** at 1,000 samples and **301.6 s -> 73.1 s** at 7,244 (4.81x to 4.12x).
+    At the largest size the old rebuild spends 32.6 s reading and 269.0 s writing - 8,690
+    upserts/s against 38,765 inserts/s.
+  - **Result-preserving**, and verified rather than assumed: the rebuild checks the holders it
+    counted against an independent count of the functions carrying a pichash and falls back to
+    the old implementation if they disagree. This matters because keyset paging brackets by BSON
+    type, so a pichash that was not a string would silently truncate the index - and a missing
+    count document is *excluded* by the cutoff filter, i.e. exact matches would quietly stop
+    being found. The tests compare the full `_pichash -> df` map from both implementations.
+  - **Caveat on the scaling claim**: the measured corpora are reduced to the one field the
+    rebuild reads, so they stay inside the WiredTiger cache and both implementations measured
+    *linear* there - the superlinear exponent (k ~ +2.2) seen earlier on full-fidelity corpora
+    did not reproduce. What is demonstrated is a 4.1x constant factor and a memory shape
+    independent of the corpus, not a repaired exponent. `rebuildPicBlockHashIndex` and the band
+    bookkeeping rebuild share the `$group` shape and are unchanged and unmeasured.
 - `function_ranges` index and `GET /rebuild_function_range_index`, mapping a function id back to
   its sample without reading the function - the shortlist has to do that per candidate, which is
   the cost it exists to avoid. Stored as one span per contiguous id run, so it is exact whether

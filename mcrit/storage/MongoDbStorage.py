@@ -9,7 +9,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from itertools import zip_longest
 from operator import itemgetter
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
 import numpy as np
 from bson import encode as bson_encode
@@ -210,6 +210,11 @@ class MongoDbStorage(StorageInterface):
     # cutoff on. One small document per distinct pichash turns that into an indexed probe.
     _PICHASH_COUNT_COLLECTION = "pichash_counts"
     _PICHASH_COUNT_SETTING = "pichash_count_index_complete"
+    # Count documents per insert during a rebuild. Independent of the partition size, which
+    # bounds how much of the *functions* index one pass reads: a partition of pichash-index
+    # keys collapses to as few as one count document, so tying the two together would make the
+    # write batch follow how repetitive the corpus is rather than how large a write should be.
+    _PICHASH_COUNT_WRITE_BATCH = 10000
 
     _database: Optional["Database"]
 
@@ -2038,7 +2043,30 @@ class MongoDbStorage(StorageInterface):
         self._getDb()[self._PICHASH_COUNT_COLLECTION].bulk_write(operations, ordered=False)
 
     def rebuildPicHashCountIndex(self, progress_reporter=None) -> int:
-        """Count holders per pichash from the functions collection; returns distinct hashes."""
+        """Count holders per pichash from the functions collection; returns distinct hashes.
+
+        Two implementations live below. STORAGE_REBUILD_PARTITION_SIZE selects between them: 0,
+        the default, keeps the single-`$group` original, and a positive value switches to the
+        partitioned scan. Both are kept rather than one replacing the other, so that they can be
+        measured against each other and so a corpus that violates the partitioned path's
+        precondition in a way its postcondition misses still has a way back.
+        """
+        partition_size = int(getattr(self._storage_config, "STORAGE_REBUILD_PARTITION_SIZE", 0) or 0)
+        if partition_size <= 0:
+            return self._rebuildPicHashCountIndexGrouped(progress_reporter=progress_reporter)
+        return self._rebuildPicHashCountIndexPartitioned(partition_size, progress_reporter=progress_reporter)
+
+    def _rebuildPicHashCountIndexGrouped(self, progress_reporter=None) -> int:
+        """The original rebuild, still the default: one `$group` over every pichash, then upserts.
+
+        Both halves hold state shaped like the corpus. The `$group` is blocking and its
+        accumulator table holds one entry per *distinct* pichash; past
+        `internalDocumentSourceGroupMaxMemoryBytes` (100 MB by default) it spills to disk and the
+        rebuild pays external merge I/O on top of the scan. The upserts then arrive in the
+        group's output order rather than key order, so each dirties a random page of an index
+        that is itself growing. STORAGE_REBUILD_PARTITION_SIZE opts out of both - what each one
+        costs is measured on the `research/scaling-notes` branch under docs/scaling/.
+        """
         collection = self._getDb()[self._PICHASH_COUNT_COLLECTION]
         # same reasoning as the range index: a hash with no count document is *excluded* by the
         # indexed filter, so a rebuild that left the flag true would drop exact matches for
@@ -2064,6 +2092,102 @@ class MongoDbStorage(StorageInterface):
             collection.bulk_write(operations, ordered=False)
         self._setPicHashCountIndexComplete(True)
         LOGGER.info("PicHash count index rebuilt over %d distinct hashes.", num_hashes)
+        return num_hashes
+
+    def _iteratePicHashRuns(self, partition_size: int) -> Iterator[Tuple[Any, int]]:
+        """Yield (encoded pichash, holders) for every non-null pichash, in index order.
+
+        The whole point of the partitioned rebuild. `_pichash` is indexed and the projection is
+        covered (verified with explain: PROJECTION_COVERED over IXSCAN `_pichash_1`), so the
+        scan walks the index rather than the documents, and it arrives *sorted*. Equal hashes
+        are therefore adjacent, which is what lets the counting be a run length held in two
+        local variables instead of a hash table the size of the vocabulary.
+
+        Each partition is an independent `find` of at most `partition_size` index keys - bounded
+        work, bounded memory, no long-lived cursor to time out on a multi-hour rebuild - resumed
+        by a keyset bound on the last key seen. A run cut by the partition boundary is *not*
+        emitted; the next partition restarts inclusively at its key and counts it from the
+        beginning, so a boundary can never split a count.
+
+        The one case that needs care is a hash held by more than `partition_size` functions: the
+        partition is then a single run, restarting inclusively would not advance, and the loop
+        would not terminate. That run is counted with an indexed `count_documents` instead - one
+        COUNT_SCAN over its own contiguous index range - and the bound then moves past it.
+
+        This pages with `$gte`/`$gt`, which MongoDB brackets by BSON type, so it would silently
+        stop at the end of the string bracket if a corpus held pichashes of another type.
+        `_encodePichash` only ever writes `hex()`, i.e. a string, and the caller verifies the
+        total against an independent count rather than trusting that.
+        """
+        functions = self._getDb().functions
+        condition: Dict[str, Any] = {"$ne": None}
+        while True:
+            cursor = functions.find({"_pichash": condition}, {"_id": 0, "_pichash": 1}).sort("_pichash", 1).limit(partition_size)
+            run_key: Any = None
+            run_length = 0
+            num_keys = 0
+            num_runs = 0
+            for function_document in cursor:
+                encoded_pichash = function_document["_pichash"]
+                num_keys += 1
+                if encoded_pichash != run_key:
+                    if run_key is not None:
+                        yield run_key, run_length
+                    run_key, run_length, num_runs = encoded_pichash, 0, num_runs + 1
+                run_length += 1
+            if run_key is None:
+                return
+            if num_keys < partition_size:
+                # the cursor ended on its own, so the trailing run is complete as well
+                yield run_key, run_length
+                return
+            if num_runs == 1:
+                yield run_key, functions.count_documents({"_pichash": run_key})
+                condition = {"$gt": run_key}
+            else:
+                condition = {"$gte": run_key}
+
+    def _rebuildPicHashCountIndexPartitioned(self, partition_size: int, progress_reporter=None) -> int:
+        """Rebuild the counts from a partitioned, sorted index scan; returns distinct hashes.
+
+        Writes with `insert_many` rather than upserts: the collection was just emptied and the
+        flag is false, which stops `_addToPicHashCounts` from writing concurrently, so every
+        write is known to be an insert and the upsert's match is pure overhead. The keys arrive
+        ascending, so the index fills at its right edge instead of being dirtied at random.
+
+        The result is checked, not assumed: the counted holders must equal an independent count
+        of the functions carrying a pichash. If they disagree - a pichash of an unexpected BSON
+        type, or a writer that ran during the rebuild - the counts are discarded and the grouped
+        rebuild runs instead, so a violated precondition costs time and not correctness.
+        """
+        collection = self._getDb()[self._PICHASH_COUNT_COLLECTION]
+        self._setPicHashCountIndexComplete(False)
+        collection.delete_many({})
+        collection.create_index([("_pichash", 1), ("df", 1)])
+        documents = []
+        num_hashes = 0
+        num_holders = 0
+        for encoded_pichash, holders in self._iteratePicHashRuns(partition_size):
+            documents.append({"_pichash": encoded_pichash, "df": holders})
+            num_hashes += 1
+            num_holders += holders
+            if len(documents) >= self._PICHASH_COUNT_WRITE_BATCH:
+                collection.insert_many(documents, ordered=False)
+                documents = []
+                if progress_reporter is not None:
+                    progress_reporter.step()
+        if documents:
+            collection.insert_many(documents, ordered=False)
+        expected_holders = self._getDb().functions.count_documents({"_pichash": {"$ne": None}})
+        if num_holders != expected_holders:
+            LOGGER.warning(
+                "Partitioned pichash count rebuild saw %d holders where the functions collection has %d - falling back to the grouped rebuild.",
+                num_holders,
+                expected_holders,
+            )
+            return self._rebuildPicHashCountIndexGrouped(progress_reporter=progress_reporter)
+        self._setPicHashCountIndexComplete(True)
+        LOGGER.info("PicHash count index rebuilt over %d distinct hashes (%d holders, partition size %d).", num_hashes, num_holders, partition_size)
         return num_hashes
 
     def _getCacheDataForFunctionIds(self, function_ids: List[int]) -> Dict:
