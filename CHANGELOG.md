@@ -26,6 +26,38 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `McritClient.modifyFamily` now sends its update as JSON, since a list does not survive form
   encoding; the route accepts both ([#57]).
 
+- **Families, samples and functions carry `tags`**, free labels such as `packed`, `reviewed` or
+  the namespaced `source:vt`. `POST /{families|samples|functions}/{id}/tags` adds and `DELETE` on
+  the same path removes the tags named in a JSON body `{"tags": [...]}`; both answer the entity's
+  resulting tags, 404 for an unknown id (query samples and functions carry no tags) and 400 for
+  a malformed body or an invalid tag, without writing any of the list. There is deliberately no
+  replace-all, so two analysts tagging the same entity at once cannot erase each other's tags,
+  and no per-tag author. `GET /tags?entity=family|sample|function` answers the distinct tags with
+  how many entities carry each. `McritClient.addTags(entity, entity_id, tags)`,
+  `removeTags(...)` and `getTags(entity)` wrap them.
+  - A tag is stripped and lower-cased, then has to be 1-64 letters, digits, spaces, dots, colons,
+    underscores or dashes starting with a letter or digit - so `$where` or an empty tag is
+    refused rather than stored.
+  - The search takes `tags:packed` (or `tag:packed`) for "some tag is packed", `tags:!=packed`
+    (or `NOT tag:packed`) for "no tag is packed" and `tags:?pack` for a substring, MongoDB's own
+    semantics for an array field, which the in-memory storage now follows for list fields too.
+    The value is normalised like a tag, so `tag:Packed` finds `packed`. A plain search term does
+    not look at tags, so existing searches find what they found before.
+  - A rename that merges a family into another unions their tags, as it does their actors. Moving
+    a sample to another family moves none: family tags stay on the family, and go with it when its
+    last sample leaves and it is deleted, as its actors do.
+  - Exports carry sample and function tags in their entries and family tags as `family_tags`,
+    which an import merges into what the target knows; an older importer ignores the key. Tags
+    of a sample the target already holds are not merged, because the import skips that sample
+    as a whole. An imported tag this instance would not accept is dropped, not the import.
+  - **Stored data**: entities stored before read as untagged, so there is no migration. MongoDB
+    gets a `tags` index on `families`, `samples` and `functions`, built by the first start after
+    the upgrade, which waits for it. The one on `functions` is sparse and function documents leave
+    the field out while it is empty, so the index holds the tagged functions only; its first build
+    on an existing corpus still reads every function document once, but adds no entries.
+    `tags:!=x` has to look at every entity on either backend, as a negated condition on any field
+    does ([#53]).
+
 ## [1.11.0] - 2026-09-25
 
 ### Added
@@ -562,3 +594,4 @@ date, the version, and what changed.
 [mcritweb#76]: https://github.com/fkie-cad/mcritweb/issues/76
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#57]: https://github.com/danielplohmann/mcrit/issues/57
+[#53]: https://github.com/danielplohmann/mcrit/issues/53
