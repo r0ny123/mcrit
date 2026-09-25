@@ -116,18 +116,24 @@ keep server and workers on the same configuration and upgrade them together. Upg
 with this (#217) computes each matching request once more, since earlier results were stored
 without these values. Matching one sample against another, within a group (`sample_group_only`) or
 across several (a cross compare) takes no shortlist: it is restricted to the samples it names
-already, and a shortlist ranked over the corpus could only drop some of them. A request's
-`band_df_cutoff` above `STORAGE_BAND_BUCKET_SIZE` (with band bucketing on) is refused with a 400, for
-the reason such a configured cutoff is refused at startup.
+already, and a shortlist ranked over the corpus could only drop some of them; a `shortlist_size` sent
+to one of them is refused with a 400. So is a request's `band_df_cutoff` above
+`STORAGE_BAND_BUCKET_SIZE` (with band bucketing on), for the reason such a configured cutoff is
+refused at startup.
 
 A shortlist needs the function range index to be complete. A database created empty on a version
 that maintains it is; **one that already held samples is not until `rebuildFunctionRangeIndex` has
 run once** (MCRIT only vouches for an index it built from the first sample), and it is incomplete
 again while that rebuild runs. Until then a requested shortlist is not applied: the job matches
-against the whole corpus, its report names the fallback under `info.matching.fallbacks`, and the
-result is never handed to a later request for the shortlisted result - the same request gets that
-once the index is complete.
-`MINHASH_PICHASH_MAX_MATCHES` changes reported matches as well but remains a deployment setting.
+against the whole corpus and its report names the fallback under `info.matching.fallbacks`. Such a
+result is kept apart from the shortlisted one, so a request made once the index is complete gets
+the shortlisted result; only a request that attached to the job while it was still queued or
+running receives the whole-corpus one, with the fallback named in its report.
+
+`MINHASH_PICHASH_MAX_MATCHES` and `PICHASH_IMPLIES_MINHASH_MATCH` change reported matches as well but
+remain deployment settings, and they are not part of a job's cache key: after changing either, a
+repeated request is still served the result cached under the old value until it is asked for with
+`force_recalculation`.
 
 ### Suggested starting point
 

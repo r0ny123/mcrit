@@ -17,6 +17,15 @@ from mcrit.matchers.MatcherInterface import shortlistUnavailableReason
 MATCHING_KNOBS = ("minhash_threshold", "pichash_size", "band_matches_required", "shortlist_size", "band_df_cutoff", "shortlist_unavailable")
 
 
+def _canonical(value):
+    """One representation per value, so equal knobs make equal cache keys: True and 1, 50.0 and 50."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
 class MatchingParameterError(ValueError):
     """A matching knob set to a value no job can run with; the server answers it with a 400."""
 
@@ -63,6 +72,6 @@ def resolveMatchingParams(parameters: Dict[str, Any], config, storage=None, with
     else:
         knobs.pop("shortlist_size", None)
         knobs.pop("shortlist_unavailable", None)
-    resolved: Dict[str, Any] = {key: knobs[key] for key in MATCHING_KNOBS if key in knobs}
+    resolved: Dict[str, Any] = {key: _canonical(knobs[key]) for key in MATCHING_KNOBS if key in knobs}
     resolved.update(others)
     return resolved

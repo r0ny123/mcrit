@@ -64,13 +64,15 @@ class MatchingParamsTest(unittest.TestCase):
         # without the configuration only what the request named, as before
         self.assertEqual({"band_matches_required": 1}, getMatchingParams({"band_matches_required": "1"}))
 
-    def test_matches_restricted_to_named_samples_carry_no_shortlist(self):
+    def test_matches_restricted_to_named_samples_refuse_a_shortlist(self):
+        """Refused, not dropped: a silently different answer would not say what it left out."""
         mcrit_config = configured(shortlist_size=100)
-        self.assertNotIn("shortlist_size", getMatchingParams({"shortlist_size": "5"}, mcrit_config, with_shortlist=False))
-        self.assertNotIn("shortlist_size", getMatchingParams({"sample_group_only": "true", "shortlist_size": "5"}, mcrit_config))
-        # still validated, so a bad value is not accepted silently on these routes either
-        with self.assertRaises(MatchingParameterError):
-            getMatchingParams({"shortlist_size": "-1"}, mcrit_config, with_shortlist=False)
+        for request, with_shortlist in (({"shortlist_size": "5"}, False), ({"sample_group_only": "true", "shortlist_size": "5"}, True), ({"shortlist_size": "-1"}, False)):
+            with self.subTest(request=request), self.assertRaises(MatchingParameterError):
+                getMatchingParams(request, mcrit_config, with_shortlist=with_shortlist)
+        # the configured shortlist does not apply to them either, and is not put into their arguments
+        self.assertNotIn("shortlist_size", getMatchingParams({}, mcrit_config, with_shortlist=False))
+        self.assertNotIn("shortlist_size", getMatchingParams({"sample_group_only": "true"}, mcrit_config))
 
     def test_a_repeated_parameter_is_refused_for_the_new_knobs(self):
         """falcon hands a repeated query parameter over as a list."""
@@ -105,6 +107,22 @@ class ResolveMatchingParamsTest(unittest.TestCase):
         """So a job listing shows each knob in the same position whichever of them a request named."""
         resolved = resolveMatchingParams({"force_recalculation": True, "band_df_cutoff": 3, "shortlist_size": 5}, configured())
         self.assertEqual([*MATCHING_KNOBS[:5], "force_recalculation"], list(resolved))
+
+    def test_a_marker_without_a_shortlist_is_dropped(self):
+        """Nothing to fall back from: keeping it would split the cache key for the same job."""
+        resolved = resolveMatchingParams({"shortlist_size": 0, "shortlist_unavailable": "function_range_index_incomplete"}, configured())
+        self.assertNotIn("shortlist_unavailable", resolved)
+        self.assertEqual(resolveMatchingParams({"shortlist_size": 0}, configured()), resolved)
+
+    def test_equal_values_make_one_key(self):
+        """A float or bool that equals the configured int is the same job."""
+        mcrit_config = configured()
+        plain = resolveMatchingParams({}, mcrit_config)
+        self.assertEqual(
+            plain, resolveMatchingParams({"minhash_threshold": float(plain["minhash_threshold"]), "band_matches_required": float(plain["band_matches_required"])}, mcrit_config)
+        )
+        self.assertEqual(1, resolveMatchingParams({"band_matches_required": True}, mcrit_config)["band_matches_required"])
+        self.assertEqual(json.dumps(plain, sort_keys=True), json.dumps(resolveMatchingParams({"pichash_size": float(plain["pichash_size"])}, mcrit_config), sort_keys=True))
 
     def test_named_samples_take_no_shortlist(self):
         resolved = resolveMatchingParams({"shortlist_size": 5, "shortlist_unavailable": "function_range_index_incomplete"}, configured(shortlist_size=10), with_shortlist=False)
@@ -212,6 +230,38 @@ class JobCacheTest(unittest.TestCase):
         changed.MINHASH_CONFIG.MINHASH_MATCHING_THRESHOLD = 70
         self.index.config = changed
         self.assertNotEqual(implicit, self.index.getMatchesForSample(self.sample_id))
+
+
+class ResultStorageTest(unittest.TestCase):
+    """Both ways a worker stores a finished job's result mark an UncacheableResult's job (#217)."""
+
+    def _worker_and_job(self, result):
+        from mcrit.SingleJobWorker import SingleJobWorker
+
+        worker = SingleJobWorker.__new__(SingleJobWorker)
+        worker.queue = MagicMock()
+        worker.queue.clean_interval = 10**9
+        worker.queue._dicts_to_grid.return_value = "0123456789abcdef01234567"
+        worker.queue.collection.find_one_and_update.return_value = {"_id": "job"}
+        worker.t_last_cleanup = __import__("time").time()
+        worker._executeJobProfiled = None
+        job = MagicMock()
+        job.job_id = "job"
+        job.__enter__.return_value = {"payload": {}}
+        job.__exit__.return_value = False
+        return worker, job
+
+    def test_both_execution_paths_mark_an_uncacheable_result(self):
+        # QueueRemoteCallee._executeJobImpl serves mcrit worker; SingleJobWorker._executeJob serves
+        # each job mcrit spawningworker hands to a child process
+        for path in ("_executeJobImpl", "_executeJob"):
+            for result, marked in ((UncacheableResult({"info": {}}), True), ({"info": {}}, False)):
+                with self.subTest(path=path, uncacheable=marked):
+                    worker, job = self._worker_and_job(result)
+                    with patch.object(type(worker), "_executeJobPayload", return_value=result):
+                        getattr(worker, path)(job)
+                    self.assertEqual(marked, job.mark_uncacheable.called)
+                    worker.queue._dicts_to_grid.assert_called_once()
 
 
 class MinHashThresholdTest(unittest.TestCase):
@@ -523,7 +573,7 @@ class ForwardingTest(unittest.TestCase):
             "requestMatchesForUnmappedBinary": ("post", lambda: client.requestMatchesForUnmappedBinary(b"", disassemble_locally=False, **KNOBS), KNOBS),
             "requestMatchesForSample": ("get", lambda: client.requestMatchesForSample(1, **KNOBS), KNOBS),
             "requestMatchesForSampleVs": ("get", lambda: client.requestMatchesForSampleVs(1, 2, band_df_cutoff=4), {"band_df_cutoff": 4}),
-            "requestMatchesCross": ("get", lambda: client.requestMatchesCross([1, 2], **KNOBS), KNOBS),
+            "requestMatchesCross": ("get", lambda: client.requestMatchesCross([1, 2], band_df_cutoff=4), {"band_df_cutoff": 4}),
             "getMatchesForSmdaFunction": ("post", lambda: client.getMatchesForSmdaFunction(MagicMock(), **KNOBS), KNOBS),
         }
         for name, (verb, call, expected) in cases.items():
@@ -545,21 +595,32 @@ class VsShortlistTest(unittest.TestCase):
         app.add_route("/matches/sample/cross/{sample_ids}", resource, suffix="sample_cross")
         return falcon.testing.TestClient(app)
 
-    def test_the_vs_and_group_routes_leave_it_out(self):
+    def test_the_vs_group_and_cross_routes_take_none(self):
         index = MagicMock()
         index.config = configured(shortlist_size=100, band_df_cutoff=200)
         index.isSampleId.return_value = True
         client = self._app(index)
-        client.simulate_get("/matches/sample/1/2", query_string="shortlist_size=5")
+        # the configured shortlist is not applied to them, and not put into their arguments
+        client.simulate_get("/matches/sample/1/2")
         self.assertNotIn("shortlist_size", index.getMatchesForSampleVs.call_args.kwargs)
         self.assertEqual(200, index.getMatchesForSampleVs.call_args.kwargs["band_df_cutoff"])
-        client.simulate_get("/matches/sample/cross/1,2", query_string="sample_group_only=true&shortlist_size=5")
+        client.simulate_get("/matches/sample/cross/1,2", query_string="sample_group_only=true")
         self.assertNotIn("shortlist_size", index.getMatchesCross.call_args.kwargs)
-        client.simulate_get("/matches/sample/cross/1,2", query_string="shortlist_size=5")
+        client.simulate_get("/matches/sample/cross/1,2")
         self.assertNotIn("shortlist_size", index.getMatchesCross.call_args.kwargs)
-        # still validated on these routes
-        self.assertEqual(400, client.simulate_get("/matches/sample/1/2", query_string="shortlist_size=-1").status_code)
-        self.assertEqual(400, client.simulate_get("/matches/sample/cross/1,2", query_string="shortlist_size=abc").status_code)
+        # one asked for is refused, valid or not, and nothing is submitted
+        index.reset_mock()
+        for path, query in (
+            ("/matches/sample/1/2", "shortlist_size=5"),
+            ("/matches/sample/cross/1,2", "shortlist_size=5"),
+            ("/matches/sample/cross/1,2", "sample_group_only=true&shortlist_size=5"),
+            ("/matches/sample/1/2", "shortlist_size=-1"),
+            ("/matches/sample/cross/1,2", "shortlist_size=abc"),
+        ):
+            with self.subTest(path=path, query=query):
+                self.assertEqual(400, client.simulate_get(path, query_string=query).status_code)
+        index.getMatchesForSampleVs.assert_not_called()
+        index.getMatchesCross.assert_not_called()
 
     def test_vs_matchers_ignore_a_configured_shortlist(self):
         index = MinHashIndex(config=configured(shortlist_size=1))

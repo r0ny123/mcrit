@@ -379,8 +379,17 @@ class QueueRemoteCallee(BaseRemoteCallerClass):
             return self._executeJobProfiled(job)
         return self._executeJobImpl(job)
 
+    def _storeJobResult(self, job, result):
+        """Store a finished job's result and answer its id; every execution path goes through here.
+
+        A result returned as an UncacheableResult marks its job first, so that no identical request
+        is handed it between the job completing and being marked.
+        """
+        if isinstance(result, UncacheableResult):
+            job.mark_uncacheable()
+        return self.queue._dicts_to_grid(result, metadata={"result": True, "job": job.job_id})
+
     def _executeJobImpl(self, job):
-        # see UncacheableResult
         if time.time() - self.t_last_cleanup >= self.queue.clean_interval:
             try:
                 self.queue.clean()
@@ -394,11 +403,8 @@ class QueueRemoteCallee(BaseRemoteCallerClass):
                 LOGGER.info("Processing Remote Job: %s", job)
                 result = self._executeJobPayload(j["payload"], job)
                 LOGGER.debug("Remote Job Result: %s", result)
-                if isinstance(result, UncacheableResult):
-                    # before the job completes, so no identical request is handed it in between
-                    job.mark_uncacheable()
                 # ensure we always have a job_id for finished job payloads
-                job.result = self.queue._dicts_to_grid(result, metadata={"result": True, "job": job.job_id})
+                job.result = self._storeJobResult(job, result)
                 LOGGER.info("Finished Remote Job: %s", job)
         except Exception:
             # the failure may include the Job.__exit__ error() write itself (e.g. the

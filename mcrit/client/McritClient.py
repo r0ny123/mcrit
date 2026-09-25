@@ -700,16 +700,16 @@ class McritClient:
         pichash_size=None,
         band_matches_required=None,
         force_recalculation=False,
-        shortlist_size=None,
         band_df_cutoff=None,
     ) -> Any:
+        # no shortlist_size: a cross compare is restricted to the samples it names, and a shortlist
+        # ranked over the whole corpus could only drop some of them (#217)
         params = self._getMatchingRequestParams(
             minhash_threshold,
             pichash_size,
             force_recalculation,
             band_matches_required,
             sample_group_only=sample_group_only,
-            shortlist_size=shortlist_size,
             band_df_cutoff=band_df_cutoff,
         )
         response = requests.get(f"{self.mcrit_server}/matches/sample/cross/{','.join([str(id) for id in sample_ids])}", headers=self.headers, params=params, timeout=self.timeout)
@@ -738,7 +738,6 @@ class McritClient:
         Get all matches for a SmdaReport with a single SmdaFunction
         Supported by mcritweb API pass-through
         """
-        # TODO add the same parameter possibilities that are used for regular full matching jobs
         params = self._getMatchingRequestParams(
             minhash_threshold, pichash_size, force_recalculation, band_matches_required, exclude_self_matches, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff
         )

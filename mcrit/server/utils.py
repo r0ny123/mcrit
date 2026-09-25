@@ -51,7 +51,8 @@ def getMatchingParams(req_params, config=None, with_shortlist=True):
     direct callers as well). `with_shortlist=False` is for matches restricted to the samples they
     name, which take no shortlist.
 
-    Raises MatchingParameterError for an unusable shortlist_size or band_df_cutoff.
+    Raises MatchingParameterError for an unusable shortlist_size or band_df_cutoff, and for a
+    shortlist_size on a match that takes none.
     """
     parameters = {}
     for key, value in req_params.items():
@@ -80,10 +81,13 @@ def getMatchingParams(req_params, config=None, with_shortlist=True):
                 parameters["band_matches_required"] = band_matches_required
         except (AttributeError, TypeError, ValueError):
             LOGGER.warning(f"Failed to handle request parameter: {key}: {value}")
-    if not with_shortlist or parameters.get("sample_group_only"):
-        parameters.pop("shortlist_size", None)
+    with_shortlist = with_shortlist and not parameters.get("sample_group_only")
+    if not with_shortlist and "shortlist_size" in parameters:
+        # refused, not dropped, for the reason an unusable value is: the caller asked for something
+        # this match does not do, and a silently different answer would not say so
+        raise MatchingParameterError("shortlist_size does not apply to a match restricted to the samples it names (one against another, a group or a cross compare).")
     if config is not None:
-        parameters = resolveMatchingParams(parameters, config, with_shortlist=with_shortlist and not parameters.get("sample_group_only"))
+        parameters = resolveMatchingParams(parameters, config, with_shortlist=with_shortlist)
     return parameters
 
 
