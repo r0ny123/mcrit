@@ -15,6 +15,33 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- `SHINGLER_LOGBUCKETS` and `SHINGLER_LOGBUCKET_RANGE` take effect. The logbucket table was cached as
+  `mcrit/cache/logbuckets.json` whatever its parameters and loaded whenever that file existed, and
+  the package ships it, so every installed package hashed with the 100,000/1 default table
+  regardless of what it configured - `LogBucket(1024, 1)` answered with 100,000 entries ([#202],
+  [#215]); a source checkout whose copy of the file had been deleted hashed with whichever table it
+  built next, and needs a re-index as well unless that table was built for the values it is
+  configured with. The shipped file is now `logbuckets_100000_1.json`, byte for byte the same table, so **a
+  deployment on the defaults hashes exactly as before and needs nothing**. One that set either
+  value away from its default was hashing with the default table all along; its MinHashes now
+  follow its settings and no longer agree with what is stored, so it needs a full re-index after
+  upgrading. Its exports have to be regenerated after that re-index, too: their `config.shingler`
+  hash already encodes the non-default values, so an upgraded instance with the same settings
+  would accept them without complaint while their MinHashes came from the default table. A table
+  for other parameters is built in memory once per process (0.2 s at 100,000 entries) and never
+  written to disk, where the old code wrote one into the package directory. The builder cannot
+  produce a proper range for the lowest values once `SHINGLER_LOGBUCKET_RANGE` reaches 5, or when
+  `SHINGLER_LOGBUCKETS` is too small for the range (below 6 for a range of 4), which an installed
+  package never reached, since it always loaded the default table: such a
+  setting now raises `ValueError` when the shinglers are loaded - even with
+  `FuzzyStatPairShingler` weighted 0, as `ShingleLoader` instantiates every shingler - instead of
+  `KeyError` in the middle of indexing. A `SHINGLER_LOGBUCKETS` below 1 or a negative range raises
+  `ValueError` as well, and a non-int value of either `TypeError`.
+
+## [1.12.0] - 2026-09-25
+
 ### Added
 
 - **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
@@ -46,29 +73,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
   `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
   client's source and fails for any request added without a timeout.
-
-- `SHINGLER_LOGBUCKETS` and `SHINGLER_LOGBUCKET_RANGE` take effect. The logbucket table was cached as
-  `mcrit/cache/logbuckets.json` whatever its parameters and loaded whenever that file existed, and
-  the package ships it, so every installed package hashed with the 100,000/1 default table
-  regardless of what it configured - `LogBucket(1024, 1)` answered with 100,000 entries ([#202],
-  [#215]); a source checkout whose copy of the file had been deleted hashed with whichever table it
-  built next, and needs a re-index as well unless that table was built for the values it is
-  configured with. The shipped file is now `logbuckets_100000_1.json`, byte for byte the same table, so **a
-  deployment on the defaults hashes exactly as before and needs nothing**. One that set either
-  value away from its default was hashing with the default table all along; its MinHashes now
-  follow its settings and no longer agree with what is stored, so it needs a full re-index after
-  upgrading. Its exports have to be regenerated after that re-index, too: their `config.shingler`
-  hash already encodes the non-default values, so an upgraded instance with the same settings
-  would accept them without complaint while their MinHashes came from the default table. A table
-  for other parameters is built in memory once per process (0.2 s at 100,000 entries) and never
-  written to disk, where the old code wrote one into the package directory. The builder cannot
-  produce a proper range for the lowest values once `SHINGLER_LOGBUCKET_RANGE` reaches 5, or when
-  `SHINGLER_LOGBUCKETS` is too small for the range (below 6 for a range of 4), which an installed
-  package never reached, since it always loaded the default table: such a
-  setting now raises `ValueError` when the shinglers are loaded - even with
-  `FuzzyStatPairShingler` weighted 0, as `ShingleLoader` instantiates every shingler - instead of
-  `KeyError` in the middle of indexing. A `SHINGLER_LOGBUCKETS` below 1 or a negative range raises
-  `ValueError` as well, and a non-int value of either `TypeError`.
 
 ## [1.11.0] - 2026-09-25
 
