@@ -15,6 +15,25 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Changed
+
+- **Pichashes and picblockhashes are stored zero-padded to 16 hex digits ([#145])**, so that
+  their string order is their numeric order: the MongoDB backend now answers range conditions on
+  `pichash` and sorts (and pages) function searches by it. A new instance is padded from the
+  start. An existing one keeps its variable-width values, and keeps rejecting both, until
+  `python -m mcrit.migrations.migrate_pichash_padding --mode pad` has rewritten them and set the
+  `pichash_padded` settings flag (`--mode verify` checks, `--mode unpad` rolls back); every other
+  reader accepts both widths meanwhile, and `/status` reports `pichash_padded`. Stop the server
+  and workers for the migration and restart them afterwards. It drops the two indexes keyed on the
+  stored spelling - `pichash_counts` and the inverted `picblockhashes` index - and marks them
+  incomplete, since left behind they would miss every lookup: the cutoff would drop every PicHash
+  match, and `getUniqueBlocks` would report every shared block with a leading zero as unique (15
+  blocks unique to a sample that has none, in the test data). Both fall back to reading the
+  functions collection, correctly but slowly, until `rebuildPicHashCountIndex()` and
+  `rebuildPicBlockHashIndex()` (`GET /rebuild_picblockhash_index`) have run. Unique-block results
+  and the YARA rules built from them name blocks by the stored hex, so on a padded instance those
+  names are 16 digits wide.
+
 ### Fixed
 
 - **The PicHash cutoff (`MINHASH_PICHASH_MAX_MATCHES`) and zero-padded pichashes ([#145]) now

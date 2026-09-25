@@ -21,10 +21,17 @@ Modes:
 Stop the mcrit server and its workers before `pad`: while the flag is unset they keep
 writing unpadded values, which `pad` would have to be re-run for (it is idempotent, and
 `verify` reports leftovers). Storage reads the flag once per process, so restart them
-afterwards. `pad` and `unpad` clear the PicHash count index (`pichash_counts`), whose keys are
-the stored spelling; with MINHASH_PICHASH_MAX_MATCHES on, the cutoff then counts holders the
-slow way (and warns) until rebuildPicHashCountIndex has run again. Until the flag is set, all readers accept both widths, so the instance keeps
+afterwards. Until the flag is set, all readers accept both widths, so the instance keeps
 answering correctly during the walk; only range and sort by pichash stay rejected.
+
+Two derived indexes are keyed on the stored spelling and would silently disagree with the
+rewritten functions: the PicHash count index (`pichash_counts`, MINHASH_PICHASH_MAX_MATCHES),
+whose lookups would miss every count and drop every PicHash match, and the inverted
+picblockhash index (`picblockhashes`, getUniqueBlocks), whose lookups would miss every block
+and report blocks as unique that are not. `pad` and `unpad` mark both incomplete and drop them.
+Both readers then fall back to the functions collection, correct but slow (and they warn),
+until rebuildPicHashCountIndex and rebuildPicBlockHashIndex (GET /rebuild_picblockhash_index)
+have run again; `verify` reports an index that is marked complete but holds the other width.
 
 Usage:
     python -m mcrit.migrations.migrate_pichash_padding --mode pad
@@ -48,6 +55,13 @@ from mcrit.storage.MongoDbStorage import PICHASH_HEX_DIGITS, MongoDbStorage, enc
 STATE_COLLECTION = "pichash_padding_state"
 PICHASH_COUNT_COLLECTION = MongoDbStorage._PICHASH_COUNT_COLLECTION
 PICHASH_COUNT_SETTING = MongoDbStorage._PICHASH_COUNT_SETTING
+PICBLOCKHASH_INDEX_COLLECTION = MongoDbStorage._PICBLOCKHASH_INDEX_COLLECTION
+PICBLOCKHASH_INDEX_SETTING = MongoDbStorage._PICBLOCKHASH_INDEX_SETTING
+# the derived indexes keyed on the stored spelling: (collection, key field, completeness flag)
+DERIVED_INDEXES = (
+    (PICHASH_COUNT_COLLECTION, "_pichash", PICHASH_COUNT_SETTING),
+    (PICBLOCKHASH_INDEX_COLLECTION, "_id", PICBLOCKHASH_INDEX_SETTING),
+)
 COLLECTIONS = ("functions", "query_functions")
 PROJECTION = {"function_id": 1, "_pichash": 1, "_picblockhashes.hash": 1, "_id": 0}
 
@@ -62,9 +76,14 @@ def log(message):
     print("%s %s" % (datetime.now(UTC).strftime("%H:%M:%S"), message), flush=True)
 
 
-def unpadded_query(prefix: str = "") -> Dict[str, Any]:
+def unpadded_query(prefix: str = "", field: str = "_pichash") -> Dict[str, Any]:
     """Values of fewer than 16 digits; anchored, so the index on the field serves it."""
-    return {prefix + "_pichash": {"$regex": "^0x[0-9a-f]{1,%d}$" % (PICHASH_HEX_DIGITS - 1)}}
+    return {prefix + field: {"$regex": "^0x[0-9a-f]{1,%d}$" % (PICHASH_HEX_DIGITS - 1)}}
+
+
+def leading_zero_query(field: str) -> Dict[str, Any]:
+    """Padded values with a leading zero, the ones `hex()` never writes."""
+    return {field: {"$regex": "^0x0[0-9a-f]{%d}$" % (PICHASH_HEX_DIGITS - 1)}}
 
 
 def unpadded_block_query() -> Dict[str, Any]:
@@ -151,17 +170,27 @@ def walk(db, collection_name: str, padded: bool, batch_size: int) -> Dict[str, A
     return {"seen": seen, "rewritten": rewritten, "swept": swept, "seconds": elapsed}
 
 
+def invalidate_derived_indexes(db) -> None:
+    """Mark the indexes keyed on the stored spelling incomplete, then drop them.
+
+    The walk has just changed that spelling. Left as they are, pichash_counts would miss every
+    count, so the cutoff would drop every PicHash match, and the picblockhash index would miss
+    every block, so getUniqueBlocks would report shared blocks as unique. Marked incomplete, both
+    readers fall back to the functions collection and the write paths stop maintaining them. The
+    flag goes first, so that no reader trusts an index that is half gone.
+    """
+    for collection_name, _, setting in DERIVED_INDEXES:
+        db.settings.update_one({}, {"$set": {setting: False}}, upsert=True)
+        db[collection_name].drop()
+    log("pichash_counts and picblockhashes dropped; run rebuildPicHashCountIndex() and rebuildPicBlockHashIndex() to restore the fast paths")
+
+
 def set_flag(db, padded: bool) -> None:
+    invalidate_derived_indexes(db)
     db.settings.update_one({}, {"$set": {"pichash_padded": padded}}, upsert=True)
     # clear the walk state so a later run of the other mode starts from the top
     db[STATE_COLLECTION].delete_many({})
     log("settings.pichash_padded = %s" % padded)
-    # pichash_counts (MINHASH_PICHASH_MAX_MATCHES) is keyed on the stored spelling, which the
-    # walk has just changed. Left as it is, every lookup would miss its count and the cutoff would
-    # drop every PicHash match; marked incomplete, the cutoff falls back to counting instead.
-    db.settings.update_one({}, {"$set": {PICHASH_COUNT_SETTING: False}})
-    db[PICHASH_COUNT_COLLECTION].delete_many({})
-    log("pichash_counts cleared; run rebuildPicHashCountIndex() to restore the fast cutoff path")
 
 
 def verify(db) -> Dict[str, Any]:
@@ -181,6 +210,17 @@ def verify(db) -> Dict[str, Any]:
         # (most 64 bit pichashes have no leading zero), an unpadded one only while the flag is unset
         if flag and (counts["unpadded_pichashes"] or counts["documents_with_unpadded_blockhashes"]):
             report["problems"].append("%s: flag says padded but unpadded values remain; re-run --mode pad" % collection_name)
+    # A derived index is only read while it is marked complete, and then its keys have to be
+    # spelled like the functions it was built from. Here a leading-zero value tells the widths
+    # apart in both directions, since `hex()` never writes one.
+    report["derived_indexes"] = {}
+    for collection_name, field, setting in DERIVED_INDEXES:
+        complete = bool((db.settings.find_one({}, {setting: 1, "_id": 0}) or {}).get(setting, False))
+        wrong_width = unpadded_query(field=field) if flag else leading_zero_query(field)
+        num_wrong_width = db[collection_name].count_documents(wrong_width)
+        report["derived_indexes"][collection_name] = {"complete": complete, "keys_of_the_other_width": num_wrong_width}
+        if complete and num_wrong_width:
+            report["problems"].append("%s: marked complete but keyed on the other width; rebuild it" % collection_name)
     return report
 
 

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from unittest import TestCase
+from unittest.mock import patch
 
 import pymongo
 import pytest
@@ -29,14 +30,14 @@ EXAMPLE_REPORT = os.sep.join([PROJECT_ROOT, "tests", "example_report.smda"])
 DB_NAME = "test_pichash_padding_mcrit"
 
 
-def build_config():
+def build_config(db_name=DB_NAME):
     server, port = getTestMongoServerAndPort()
     mcrit_config = McritConfig()
     mcrit_config.STORAGE_CONFIG = StorageConfig(
         STORAGE_METHOD=StorageFactory.STORAGE_METHOD_MONGODB,
         STORAGE_SERVER=server,
         STORAGE_PORT=port,
-        STORAGE_MONGODB_DBNAME=DB_NAME,
+        STORAGE_MONGODB_DBNAME=db_name,
         STORAGE_DROP_DISASSEMBLY=False,
     )
     mcrit_config.MINHASH_CONFIG = MinHashConfig()
@@ -290,3 +291,246 @@ class PichashPaddingTest(TestCase):
         # a rebuild restores the index, keyed on the new spelling
         self.storage.rebuildPicHashCountIndex()
         self.assertEqual(matches, self.storage.getPicHashMatchesByFunctionIds([target["function_id"]]))
+
+
+LEGACY_DB_NAME = "test_pichash_padding_legacy_mcrit"
+FRESH_DB_NAME = "test_pichash_padding_fresh_mcrit"
+# pichashes given to the same function of every sample, and to one function of the first
+# sample only; the example report's own pichashes have no leading zero
+SHARED_PICHASH = 0x4D2
+SINGLE_PICHASH = 0x99
+
+
+def with_int_keys(unique_blocks_result):
+    """A getUniqueBlocks result with its block hashes as integers, to compare across spellings."""
+    return {int(block_hash, 16): entry for block_hash, entry in unique_blocks_result["unique_blocks"].items()}, unique_blocks_result["statistics"]
+
+
+@pytest.mark.mongo
+class PichashMigrationEquivalenceTest(TestCase):
+    """#145: a database written unpadded and then migrated answers what a padded one answers.
+
+    Two databases receive the same samples: one created before #145 (its settings carry no
+    pichash_padded flag, so everything is written with `hex()`, including the derived indexes
+    that are keyed on the stored spelling), one created fresh. The first is migrated, then both
+    are asked the same questions.
+    """
+
+    def setUp(self):
+        server, port = getTestMongoServerAndPort()
+        self.client = pymongo.MongoClient(server, int(port))
+        for db_name in (LEGACY_DB_NAME, FRESH_DB_NAME):
+            self.client.drop_database(db_name)
+        self.legacy_db = self.client[LEGACY_DB_NAME]
+        self.fresh_db = self.client[FRESH_DB_NAME]
+        # settings that predate the flag: the storage keeps writing the old, unpadded shape
+        self.legacy_db.settings.insert_one({"mcrit_db_id": "legacy", "db_state": 0})
+        self.legacy_config = build_config(LEGACY_DB_NAME)
+        self.fresh_config = build_config(FRESH_DB_NAME)
+        self.legacy = StorageFactory.getStorage(self.legacy_config)
+        self.fresh = StorageFactory.getStorage(self.fresh_config)
+        self.assertFalse(self.legacy.isPichashPadded())
+        self.assertTrue(self.fresh.isPichashPadded())
+        with open(EXAMPLE_REPORT) as fjson:
+            report_json = json.load(fjson)
+        # a: the whole report, b: half of its functions, c: the whole report again - so a block
+        # is held by two or three samples, and some blocks by a and c only
+        half = dict(report_json, xcfg=dict(list(report_json["xcfg"].items())[: len(report_json["xcfg"]) // 2]))
+        self.sample_ids = []
+        for storage in (self.legacy, self.fresh):
+            sample_ids = []
+            for sha256, smda_json in (("a", report_json), ("b", half), ("c", report_json)):
+                report = SmdaReport.fromDict(smda_json)
+                assert report is not None
+                report.sha256 = 64 * sha256
+                sample_entry = storage.addSmdaReport(report)
+                assert sample_entry is not None
+                sample_ids.append(sample_entry.sample_id)
+            self.sample_ids.append(sample_ids)
+        self.assertEqual(self.sample_ids[0], self.sample_ids[1])
+        self.sample_a, self.sample_b, self.sample_c = self.sample_ids[0]
+        # leading-zero pichashes, written in each database's own spelling: one held by the first
+        # function of every sample, one by a single function
+        for db, storage in ((self.legacy_db, self.legacy), (self.fresh_db, self.fresh)):
+            padded = storage.isPichashPadded()
+            for sample_id in self.sample_ids[0]:
+                first = db.functions.find({"sample_id": sample_id}).sort("function_id", 1).limit(1)[0]
+                db.functions.update_one({"function_id": first["function_id"]}, {"$set": {"_pichash": encode_pichash_value(SHARED_PICHASH, padded)}})
+            second = db.functions.find({"sample_id": self.sample_a}).sort("function_id", 1).skip(1).limit(1)[0]
+            db.functions.update_one({"function_id": second["function_id"]}, {"$set": {"_pichash": encode_pichash_value(SINGLE_PICHASH, padded)}})
+            storage.rebuildPicHashCountIndex()
+        # the old instance really is old: its functions and both derived indexes are unpadded and trusted
+        for db in (self.legacy_db, self.fresh_db):
+            self.assertTrue(self._setting(db, "picblockhash_index_complete"))
+            self.assertTrue(self._setting(db, "pichash_count_index_complete"))
+        self.assertGreater(self.legacy_db.picblockhashes.count_documents(migrate_pichash_padding.unpadded_query(field="_id")), 0)
+        self.assertGreater(self.legacy_db.pichash_counts.count_documents(migrate_pichash_padding.unpadded_query()), 0)
+        self.assertGreater(self.legacy_db.functions.count_documents(migrate_pichash_padding.unpadded_block_query()), 0)
+        self.assertEqual(0, self.fresh_db.picblockhashes.count_documents(migrate_pichash_padding.unpadded_query(field="_id")))
+        # the answers of the old instance before it is touched
+        self.legacy_unique_blocks = {tuple(sample_ids): with_int_keys(self.legacy.getUniqueBlocks(sample_ids)) for sample_ids in self._sample_sets()}
+
+    def tearDown(self):
+        for db_name in (LEGACY_DB_NAME, FRESH_DB_NAME):
+            self.client.drop_database(db_name)
+
+    @staticmethod
+    def _setting(db, key):
+        return (db.settings.find_one({}, {key: 1}) or {}).get(key)
+
+    def _sample_sets(self):
+        return [[self.sample_a], [self.sample_b], [self.sample_a, self.sample_b], [self.sample_a, self.sample_c], [self.sample_a, self.sample_b, self.sample_c]]
+
+    def _migrate_legacy(self, **kwargs):
+        report = migrate_pichash_padding.run(self.legacy_db, "pad", **kwargs)
+        self.assertEqual([], report["problems"])
+        # storage reads the flag once per process; the migration asks for a restart
+        self.legacy = StorageFactory.getStorage(self.legacy_config)
+        self.assertTrue(self.legacy.isPichashPadded())
+        return report
+
+    def _assert_same_unique_blocks(self):
+        for sample_ids in self._sample_sets():
+            migrated = self.legacy.getUniqueBlocks(sample_ids)
+            self.assertEqual(self.fresh.getUniqueBlocks(sample_ids), migrated, sample_ids)
+            # and the migration changed only the spelling of what the old instance answered
+            self.assertEqual(self.legacy_unique_blocks[tuple(sample_ids)], with_int_keys(migrated), sample_ids)
+
+    def test_the_data_discriminates(self):
+        """Without shared blocks of a leading zero, a stale index could not change any answer."""
+        # a and c hold the same blocks, b holds some of them
+        self.assertEqual({}, self.fresh.getUniqueBlocks([self.sample_a])["unique_blocks"])
+        unique_to_a_and_c = self.fresh.getUniqueBlocks([self.sample_a, self.sample_c])["unique_blocks"]
+        candidates = {entry["hash"] for document in self.fresh_db.functions.find({"sample_id": self.sample_a}) for entry in document["_picblockhashes"]}
+        self.assertGreater(len(unique_to_a_and_c), 0)
+        shared = candidates - set(unique_to_a_and_c)
+        self.assertTrue(any(block_hash != short_form(block_hash) for block_hash in shared))
+
+    def test_unique_blocks_after_the_migration(self):
+        self._migrate_legacy()
+        # the index was keyed on the old spelling: it must not be read until it is rebuilt
+        self.assertFalse(self._setting(self.legacy_db, "picblockhash_index_complete"))
+        self.assertEqual(0, self.legacy_db.picblockhashes.count_documents({}))
+        self._assert_same_unique_blocks()
+        # ... nor maintained - a sample deleted meanwhile must not leave anything behind
+        for storage in (self.legacy, self.fresh):
+            storage.deleteSample(self.sample_c)
+        self.assertEqual(0, self.legacy_db.picblockhashes.count_documents({}))
+        self.legacy_unique_blocks = {tuple(sample_ids): with_int_keys(self.fresh.getUniqueBlocks(sample_ids)) for sample_ids in self._sample_sets()}
+        self._assert_same_unique_blocks()
+        # the rebuild restores the indexed path, keyed on the new spelling
+        self.legacy.rebuildPicBlockHashIndex()
+        self.assertTrue(self.legacy._isPicBlockHashIndexComplete())
+        self.assertEqual(
+            {document["_id"]: sorted(document["sample_ids"]) for document in self.fresh_db.picblockhashes.find({})},
+            {document["_id"]: sorted(document["sample_ids"]) for document in self.legacy_db.picblockhashes.find({})},
+        )
+        self._assert_same_unique_blocks()
+
+    def test_unique_blocks_during_an_interrupted_migration(self):
+        """A `pad` killed after its first batch leaves both widths behind, and no flag set."""
+        num_functions_of_a = self.legacy_db.functions.count_documents({"sample_id": self.sample_a})
+        original_put_state = migrate_pichash_padding.put_state
+
+        def killed_after_first_batch(db, state):
+            original_put_state(db, state)
+            raise KeyboardInterrupt()
+
+        with patch.object(migrate_pichash_padding, "put_state", killed_after_first_batch):
+            with self.assertRaises(KeyboardInterrupt):
+                migrate_pichash_padding.run(self.legacy_db, "pad", batch_size=num_functions_of_a)
+        self.legacy = StorageFactory.getStorage(self.legacy_config)
+        self.assertFalse(self.legacy.isPichashPadded())
+        # sample a is padded now, b and c are not, and blocks shared between them differ in spelling
+        self.assertEqual(0, self.legacy_db.functions.count_documents({"sample_id": self.sample_a, **migrate_pichash_padding.unpadded_block_query()}))
+        self.assertGreater(self.legacy_db.functions.count_documents({"sample_id": self.sample_b, **migrate_pichash_padding.unpadded_block_query()}), 0)
+        for index_complete in (True, False):
+            self.legacy._setPicBlockHashIndexComplete(index_complete)
+            for sample_ids in self._sample_sets():
+                self.assertEqual(self.legacy_unique_blocks[tuple(sample_ids)], with_int_keys(self.legacy.getUniqueBlocks(sample_ids)), (index_complete, sample_ids))
+        # finishing the migration lands where a fresh instance is
+        self._migrate_legacy()
+        self._assert_same_unique_blocks()
+
+    def test_a_rollback_lands_on_what_an_old_instance_answers(self):
+        report = migrate_pichash_padding.run(self.fresh_db, "unpad")
+        self.assertEqual([], report["problems"])
+        self.fresh = StorageFactory.getStorage(self.fresh_config)
+        self.assertFalse(self.fresh.isPichashPadded())
+        self.assertFalse(self.fresh._isPicBlockHashIndexComplete())
+        for sample_ids in self._sample_sets():
+            self.assertEqual(self.legacy.getUniqueBlocks(sample_ids), self.fresh.getUniqueBlocks(sample_ids), sample_ids)
+        self.fresh.rebuildPicBlockHashIndex()
+        for sample_ids in self._sample_sets():
+            self.assertEqual(self.legacy.getUniqueBlocks(sample_ids), self.fresh.getUniqueBlocks(sample_ids), sample_ids)
+
+    def _pichash_answers(self, storage, db):
+        function_ids = [document["function_id"] for document in db.functions.find({}, {"function_id": 1}).sort("function_id", 1)]
+        pichashes = sorted({int(document["_pichash"], 16) for document in db.functions.find({}, {"_pichash": 1})})
+        answers = {
+            "by_function_id": {function_id: storage.getPicHashMatchesByFunctionId(function_id) for function_id in function_ids},
+            "is_pichash": {pichash: storage.isPicHash(pichash) for pichash in pichashes + [0x1234567]},
+            "matches": {pichash: storage.getMatchesForPicHash(pichash) for pichash in pichashes},
+            "num_pichashes": storage.getStats()["num_pichashes"],
+        }
+        for cutoff in (0, 1, 2, 3):
+            storage._minhash_config.MINHASH_PICHASH_MAX_MATCHES = cutoff
+            answers["cutoff_%d" % cutoff] = storage.getPicHashMatchesByFunctionIds(function_ids)
+        storage._minhash_config.MINHASH_PICHASH_MAX_MATCHES = 0
+        blocks = sorted({entry["hash"] for document in db.functions.find({}, {"_picblockhashes": 1}) for entry in document["_picblockhashes"]})
+        answers["blocks"] = {int(block_hash, 16): storage.getMatchesForPicBlockHash(int(block_hash, 16)) for block_hash in blocks}
+        return answers
+
+    def test_pichash_lookups_and_cutoffs_after_the_migration(self):
+        expected = self._pichash_answers(self.fresh, self.fresh_db)
+        # the cutoff has to decide something: some values are dropped at 2, none at 3
+        self.assertNotEqual(expected["cutoff_2"], expected["cutoff_3"])
+        self.assertEqual(expected["cutoff_0"], expected["cutoff_3"])
+        self.assertEqual(3, len(expected["matches"][SHARED_PICHASH]))
+        self._migrate_legacy()
+        # the counts were keyed on the old spelling: the cutoff counts holders until they are rebuilt
+        self.assertFalse(self.legacy.isPicHashCountIndexComplete())
+        self.assertEqual(0, self.legacy_db.pichash_counts.count_documents({}))
+        self.assertEqual(expected, self._pichash_answers(self.legacy, self.legacy_db))
+        self.legacy.rebuildPicHashCountIndex()
+        self.assertTrue(self.legacy.isPicHashCountIndexComplete())
+        self.assertEqual(
+            {document["_pichash"]: document["df"] for document in self.fresh_db.pichash_counts.find({})},
+            {document["_pichash"]: document["df"] for document in self.legacy_db.pichash_counts.find({})},
+        )
+        self.assertEqual(expected, self._pichash_answers(self.legacy, self.legacy_db))
+
+    def _search_answers(self, config):
+        index = MinHashIndex(config)
+        answers = {}
+        for term in ("pichash:0x4d2", "pichash:0x99", "pichash:!=0x4d2", "pichash:<0x1000", "pichash:>=0x99", "pichash:?4d2"):
+            answers[term] = list(index.getFunctionSearchResults(term, limit=1000)["search_results"])
+        for is_ascending in (True, False):
+            answers["sorted_%s" % is_ascending] = list(
+                index.getFunctionSearchResults("function_id:>=0", sort_by="pichash", is_ascending=is_ascending, limit=1000)["search_results"]
+            )
+        return answers
+
+    def test_searches_after_the_migration(self):
+        expected = self._search_answers(self.fresh_config)
+        self.assertEqual(3, len(expected["pichash:0x4d2"]))
+        self.assertEqual(4, len(expected["pichash:<0x1000"]))
+        self._migrate_legacy()
+        self.assertEqual(expected, self._search_answers(self.legacy_config))
+
+    def test_verify_names_a_derived_index_of_the_other_width(self):
+        self._migrate_legacy()
+        # an index rebuilt from a stale backup, say: still unpadded, but marked complete
+        for setting, collection_name, document in (
+            ("picblockhash_index_complete", "picblockhashes", {"_id": "0x4d2", "sample_ids": [self.sample_a]}),
+            ("pichash_count_index_complete", "pichash_counts", {"_pichash": "0x4d2", "df": 1}),
+        ):
+            self.legacy_db[collection_name].insert_one(document)
+            report = migrate_pichash_padding.run(self.legacy_db, "verify")
+            self.assertEqual([], report["problems"], "an index that is not marked complete is never read")
+            self.legacy_db.settings.update_one({}, {"$set": {setting: True}})
+            report = migrate_pichash_padding.run(self.legacy_db, "verify")
+            self.assertEqual(1, len(report["problems"]), report)
+            self.assertIn(collection_name, report["problems"][0])
+            self.legacy_db[collection_name].delete_many({})
+            self.legacy_db.settings.update_one({}, {"$set": {setting: False}})

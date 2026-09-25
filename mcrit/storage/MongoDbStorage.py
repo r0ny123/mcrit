@@ -2926,16 +2926,34 @@ class MongoDbStorage(StorageInterface):
         LOGGER.info("Rebuilt picblockhash index over %d distinct block hashes.", num_hashes)
         return num_hashes
 
+    @staticmethod
+    def _unpaddedBlockHash(stored_hash: str) -> str:
+        """The one spelling getUniqueBlocks keys a block hash by on an instance not (yet) padded.
+
+        Such an instance may hold a value in both spellings while migrate_pichash_padding is
+        underway (#145), and a candidate is dropped by looking its key up, so both have to land on
+        the same key. `hex()` is the one its values had before the migration started. Only a
+        padded value with a leading zero is spelled differently, and the scan fallback calls this
+        once per block entry of the corpus, so every other value is returned without parsing it.
+        """
+        if stored_hash[2:3] != "0":
+            return stored_hash
+        return hex(int(stored_hash, 16))
+
     def _reduceToUniqueBlocksUsingIndex(self, candidate_picblockhashes: Dict, sample_ids: List[int]) -> None:
         """Drop every candidate the index shows in a sample outside the request."""
         requested_sample_ids = set(sample_ids)
         collection = self._getDb()[self._PICBLOCKHASH_INDEX_COLLECTION]
+        padded = self.isPichashPadded()
         candidate_hashes = list(candidate_picblockhashes)
         for offset in range(0, len(candidate_hashes), self._PICBLOCKHASH_INDEX_QUERY_SLICE):
             hash_slice = candidate_hashes[offset : offset + self._PICBLOCKHASH_INDEX_QUERY_SLICE]
+            if not padded:
+                # the index is keyed on the stored spelling, which may be either width here
+                hash_slice = sorted({variant for block_hash in hash_slice for variant in pichash_value_variants(int(block_hash, 16))})
             for document in collection.find({"_id": {"$in": hash_slice}}, {"sample_ids": 1}):
                 if any(sample_id not in requested_sample_ids for sample_id in document["sample_ids"]):
-                    candidate_picblockhashes.pop(document["_id"], None)
+                    candidate_picblockhashes.pop(document["_id"] if padded else self._unpaddedBlockHash(document["_id"]), None)
 
     def _reduceToUniqueBlocksByScan(self, candidate_picblockhashes: Dict, sample_ids: List[int], progress_reporter=None) -> None:
         """The pre-index elimination: read every function that has block hashes.
@@ -2945,12 +2963,13 @@ class MongoDbStorage(StorageInterface):
         """
         if progress_reporter is not None:
             progress_reporter.set_total(self._getDb().functions.count_documents(filter={}))
+        padded = self.isPichashPadded()
         for entry in self._getDb().functions.find({"_picblockhashes": {"$exists": True, "$ne": []}}, {"sample_id": 1, "_picblockhashes": 1, "_id": 0}):
             if progress_reporter is not None:
                 progress_reporter.step()
             if entry["sample_id"] not in sample_ids:
                 for block_entry in entry["_picblockhashes"]:
-                    candidate_picblockhashes.pop(block_entry["hash"], None)
+                    candidate_picblockhashes.pop(block_entry["hash"] if padded else self._unpaddedBlockHash(block_entry["hash"]), None)
 
     def getUniqueBlocks(self, sample_ids: List[int], progress_reporter=None) -> Dict:
         # query once to get all blocks from the functions of our samples
@@ -2959,13 +2978,16 @@ class MongoDbStorage(StorageInterface):
             "unique_blocks_overall": 0,
             "num_samples": len(sample_ids),
         }
-        candidate_picblockhashes: Dict[int, Dict[str, Any]] = {}
+        candidate_picblockhashes: Dict[str, Dict[str, Any]] = {}
+        # keyed by the stored spelling, which on an instance not (yet) padded is normalised so
+        # that a value stored in both widths during a migration stays one block (#145)
+        padded = self.isPichashPadded()
         for entry in self._getDb().functions.find(
             {"sample_id": {"$in": sample_ids}, "_picblockhashes": {"$exists": True, "$ne": []}}, {"function_id": 1, "sample_id": 1, "_picblockhashes": 1, "_id": 0}
         ):
             sample_id = entry["sample_id"]
             for block_entry in entry["_picblockhashes"]:
-                block_hash = block_entry["hash"]
+                block_hash = block_entry["hash"] if padded else self._unpaddedBlockHash(block_entry["hash"])
                 if block_hash not in candidate_picblockhashes:
                     candidate_picblockhashes[block_hash] = {
                         "samples": set(),
