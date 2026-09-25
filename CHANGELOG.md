@@ -15,23 +15,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
-### Added
-
-- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
-  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
-  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
-  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
-  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
-  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
-  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
-  selector that keeps no parseable id selects nothing, never everything ([#210]).
-- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
-  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
-  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
-  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
-  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
-  Family entries carry no sample lists ([#207]).
-
 ### Changed
 
 - **Pichashes and picblockhashes are stored zero-padded to 16 hex digits ([#145])**, so that
@@ -54,6 +37,25 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   be stored in both spellings; the cutoff (`MINHASH_PICHASH_MAX_MATCHES`) sums the holders of both
   and keeps or drops the value as a unit, and without its count index it counts them the slow way
   and logs a warning, with the same results.
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
+- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
+  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
+  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
+  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
+  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
+  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
+  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
+  selector that keeps no parseable id selects nothing, never everything ([#210]).
+- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
+  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
+  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
+  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
+  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
+  Family entries carry no sample lists ([#207]).
 
 ### Fixed
 
