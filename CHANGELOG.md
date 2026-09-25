@@ -138,6 +138,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   refused. Checked over 37,210 generated strings against the old patterns: nothing else changes.
   **Needs the same-name family rename fix ([#208])** - with `""` accepted, renaming family 0 to
   its own name would otherwise double its counters ([#209]).
+- **A repeated request could be served by a queued or running force rematch** instead of the
+  finished job whose result it could use, because the cache picked the newest job with the same
+  descriptor whatever its state. Both queues now prefer a finished job, then the newest, and
+  never reuse a failed or terminated one. NOTE that this changes which job answers: a pending
+  forced rematch no longer shadows an earlier finished result, verified against a running
+  instance ([mcritweb#47]).
+
 
 ## [1.9.0] - 2026-09-08
 
@@ -425,3 +432,4 @@ date, the version, and what changed.
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
 [#208]: https://github.com/danielplohmann/mcrit/issues/208
 [#209]: https://github.com/danielplohmann/mcrit/issues/209
+[mcritweb#47]: https://github.com/fkie-cad/mcritweb/issues/47
