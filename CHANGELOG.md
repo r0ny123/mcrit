@@ -33,7 +33,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   Family entries carry no sample lists ([#207]).
 
 - `/status` reports `escaper_fingerprints`, and exports record, a fingerprint of how smda escapes
-  AArch64, CIL and Dalvik code next to the Intel one (#93), so that a change in how smda escapes any
+  AArch64, CIL and Dalvik code next to the Intel one ([#93]), so that a change in how smda escapes any
   architecture MCRIT computes MinHashes for shows, not only an Intel one. The Intel fingerprint, and
   `escaper_fingerprint` in `/status`, are unchanged; an import compares only the architectures the
   export holds samples of. An export made before carries the Intel fingerprint alone: it is compared
@@ -55,7 +55,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   client's source and fails for any request added without a timeout.
 
 - Sample, query, function query, vs, vs-group and cross match reports included matches against
-  samples of another architecture (#93). A PicHash or MinHash only means the same thing for two
+  samples of another architecture ([#93]). A PicHash or MinHash only means the same thing for two
   functions escaped by one instruction set's rules; across architectures, shingles still collide in
   bands now and then. On a corpus of 6,315 Intel, 458 CIL, 14 Dalvik and 13 AArch64 samples (and 444
   SMDA could not disassemble), sample matching reported them at scores of 51 to 61, just over the
@@ -67,7 +67,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   a sample SMDA could not disassemble has) is not taken as another one. Results computed before and
   kept by the job cache still hold such matches until requested with `force_recalculation`.
 - Block hashes of non-Intel code are computed with that architecture's escaper: MCRIT now requires
-  picblocks 2.1.0, which escaped every block as Intel code before (#93). picblocks was unpinned
+  picblocks 2.1.0, which escaped every block as Intel code before ([#93]). picblocks was unpinned
   above 1.1.2, so installations set up since its 2.1.0 release on 2026-09-13 compute the new hashes
   already; this makes it the floor. Intel block hashes are unchanged. Non-Intel samples indexed
   before keep the block hashes they were stored with, and `recalculatePicHashes` only revisits
@@ -611,3 +611,4 @@ date, the version, and what changed.
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#207]: https://github.com/danielplohmann/mcrit/issues/207
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
+[#93]: https://github.com/danielplohmann/mcrit/issues/93
