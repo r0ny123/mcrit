@@ -263,13 +263,17 @@ machine; raising it buys nothing once the round trip has stopped mattering.
 | `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP` | `False` | run MongoDB's `compact` on `query_samples`, `query_functions` and `query_xcfg` after every `DbCleanup` job |
 
 The cleanup job deletes expired query samples, their functions and disassembly, and the
-orphans a broken deletion left behind; WiredTiger keeps the freed pages inside the collection
-files and reuses them for later inserts, so disk usage does not shrink on its own. `compact`
-returns that space to the file system. It needs the `compact` privilege on the database
-(the default `readWrite` role does not carry it - grant `dbAdmin` or a custom role), it
-blocks writes to the collection it is working on for the duration (seconds to minutes,
-depending on collection size; queries keep being accepted by the other collections), and on
-a replica set it runs on the member it is sent to only. Leave it off unless the query
-collections are large and the instance's disk is tight; the cleanup report says how many
-bytes each compaction returned.
+orphans a broken deletion or an interrupted insert left behind; WiredTiger keeps the freed
+pages inside the collection files and reuses them for later inserts, so disk usage does not
+shrink on its own. `compact` returns that space to the file system. It needs the `compact`
+privilege on the database (the default `readWrite` role does not carry it - grant `dbAdmin`
+or a custom role). Since MongoDB 4.4 it no longer blocks reads and writes, but it holds off
+index builds and drops on the collection it is working on, and it is I/O-heavy for as long as
+it runs (seconds to minutes, depending on collection size). On a replica set it runs on the
+member it is sent to only. Leave it off unless the query collections are large and the
+instance's disk is tight; the cleanup report says how many bytes each compaction returned.
 
+The job queue's GridFS (`fs.files`, `fs.chunks`) is not compacted by this, although the
+cleanup deletes query jobs and so their results: it lives in the queue's database
+(`QUEUE_MONGODB_DBNAME`), which is not necessarily the storage database, and reclaiming it is
+the queue's own business.

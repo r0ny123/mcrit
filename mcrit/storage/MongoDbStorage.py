@@ -993,45 +993,32 @@ class MongoDbStorage(StorageInterface):
 
     def deleteOrphanedQueryData(self) -> Dict[str, int]:
         """Delete the query functions no query sample refers to and the query disassembly no
-        query function refers to. Both are left behind when a deletion is interrupted halfway,
-        and a query job can be deleted without its sample (#68).
+        query function refers to. Both are left behind when a deletion or an insert is
+        interrupted halfway, and a query job can be deleted without its sample (#68).
 
-        Safe next to a query being inserted on another worker: the boundary is taken first,
-        and only records older than it (a larger, i.e. less negative, id) are judged. A query
-        inserted afterwards has ids below the boundary and is never looked at, however its
-        sample and functions interleave with this walk.
+        Safe next to a query being inserted on another worker. A query is inserted as its
+        sample, then the disassembly of every function, then the functions. Each boundary is
+        taken first, and only records older than it (a larger, i.e. less negative, id) are
+        judged: a query whose ids are handed out afterwards is never looked at. For the
+        functions that is enough, as their sample is written before them. The disassembly is
+        written before its function, so it is judged only once no query sample is still short
+        of its functions - see _aQueryInsertMayBeInFlight.
 
         No single command carries the whole collection. The sample ids come from an
         aggregation cursor rather than distinct(), which answers with one document and fails
         past MongoDB's 16 MiB limit, and every `$in` below is one batch wide.
         """
         db = self._getDb()
-        newest = db.query_functions.find_one({}, {"function_id": 1, "_id": 0}, sort=[("function_id", 1)])
-        if newest is None:
-            return {"query_functions": 0, "query_xcfg": self._deleteQueryXcfgWithoutAnyFunction()}
-        function_boundary = newest["function_id"]
-        return {
-            "query_functions": self._deleteQueryFunctionsWithoutASample(function_boundary),
-            "query_xcfg": self._deleteQueryXcfgWithoutAFunction(function_boundary),
-        }
-
-    def _deleteQueryXcfgWithoutAnyFunction(self) -> int:
-        """Every query_xcfg document, for the case where no query function exists at all.
-
-        This is what the boundary cannot cover: with query_functions empty there is no id to
-        take a boundary from, so the early return this replaces left the residue behind
-        forever. It is reachable rather than theoretical - addSmdaReport writes the
-        disassembly before the functions, so an insert interrupted between the two leaves
-        exactly this, and once the queries around it are deleted the collection is empty.
-
-        An existing query sample is what stops us. The sample is written before the
-        disassembly, so an empty query_samples proves no insert has yet reached the step that
-        could have written what is about to be deleted.
-        """
-        db = self._getDb()
-        if db.query_samples.find_one({}, {"_id": 1}) is not None:
-            return 0
-        return db.query_xcfg.delete_many({}).deleted_count
+        # both boundaries before anything is judged
+        newest_function = db.query_functions.find_one({}, {"function_id": 1, "_id": 0}, sort=[("function_id", 1)])
+        newest_xcfg = db.query_xcfg.find_one({}, {"_id": 1}, sort=[("_id", 1)])
+        num_functions_deleted = 0
+        if newest_function is not None:
+            num_functions_deleted = self._deleteQueryFunctionsWithoutASample(newest_function["function_id"])
+        num_xcfg_deleted = 0
+        if newest_xcfg is not None:
+            num_xcfg_deleted = self._deleteQueryXcfgWithoutAFunction(newest_xcfg["_id"])
+        return {"query_functions": num_functions_deleted, "query_xcfg": num_xcfg_deleted}
 
     def _judgedQuerySampleIds(self, function_boundary: int) -> Iterable[List[int]]:
         """The distinct sample ids of the query functions old enough to judge, one batch at a
@@ -1062,12 +1049,56 @@ class MongoDbStorage(StorageInterface):
                 deleted += db.query_functions.delete_many({"sample_id": {"$in": orphans}, "function_id": {"$gte": function_boundary}}).deleted_count
         return deleted
 
-    def _deleteQueryXcfgWithoutAFunction(self, function_boundary: int) -> int:
+    def _aQueryInsertMayBeInFlight(self) -> bool:
+        """Whether some query sample does not have all of its functions yet.
+
+        Such a sample is an insert still running, or one that died between its disassembly and
+        its functions. Either way the disassembly of its missing functions is not an orphan
+        while the sample exists: the first will still write the functions, and the second's is
+        collected in the run that deletes the sample. A disassembly document does not name its
+        sample, so while any sample is short, none is judged.
+
+        addSmdaReport records on the query sample how many functions it is going to write. A
+        query sample written before that has no count and is taken as possibly in flight, which
+        holds the judgment back until the last of them has expired.
+
+        Checked after the boundary is taken: a disassembly old enough to judge had its sample
+        written before that, so the sample is seen here, unless it was deleted - and then its
+        disassembly is an orphan."""
+        db = self._getDb()
+        batch: List[Dict[str, Any]] = []
+
+        def batch_is_short(samples: List[Dict[str, Any]]) -> bool:
+            if any(not isinstance(sample.get("num_query_functions"), int) for sample in samples):
+                return True
+            counts = {
+                group["_id"]: group["n"]
+                for group in db.query_functions.aggregate(
+                    [{"$match": {"sample_id": {"$in": [sample["sample_id"] for sample in samples]}}}, {"$group": {"_id": "$sample_id", "n": {"$sum": 1}}}]
+                )
+            }
+            return any(counts.get(sample["sample_id"], 0) < sample["num_query_functions"] for sample in samples)
+
+        for sample in db.query_samples.find({}, {"sample_id": 1, "num_query_functions": 1, "_id": 0}).batch_size(self._ORPHAN_BATCH_SIZE):
+            batch.append(sample)
+            if len(batch) >= self._ORPHAN_BATCH_SIZE:
+                if batch_is_short(batch):
+                    return True
+                batch = []
+        return bool(batch) and batch_is_short(batch)
+
+    def _deleteQueryXcfgWithoutAFunction(self, xcfg_boundary: int) -> int:
+        """The boundary is the newest disassembly document, which also covers the case where no
+        query function exists at all - an insert interrupted before its first function leaves
+        exactly that, and once the queries around it are deleted query_functions is empty."""
+        if self._aQueryInsertMayBeInFlight():
+            LOGGER.info("A query sample is still short of its functions; the query disassembly is judged in a later cleanup.")
+            return 0
         db = self._getDb()
         deleted = 0
         last_id = None
         while True:
-            query = {"_id": {"$gte": function_boundary}} if last_id is None else {"_id": {"$gt": last_id}}
+            query = {"_id": {"$gte": xcfg_boundary}} if last_id is None else {"_id": {"$gt": last_id}}
             batch = [document["_id"] for document in db.query_xcfg.find(query, {"_id": 1}).sort("_id", 1).limit(self._ORPHAN_BATCH_SIZE)]
             if not batch:
                 break
@@ -1079,13 +1110,16 @@ class MongoDbStorage(StorageInterface):
         return deleted
 
     def compactQueryCollections(self) -> Dict[str, Any]:
-        """Run MongoDB's compact on the collections query data and results live in.
+        """Run MongoDB's compact on the collections the query cleanup deletes from.
+
+        GridFS (fs.files, fs.chunks) is not among them: it belongs to the job queue, lives in
+        the queue's database rather than this one, and the queue reclaims it on its own terms.
 
         compact needs the compact privilege on the database; a refusal is reported per
         collection rather than raised, since the cleanup itself has already succeeded."""
         db = self._getDb()
         outcome: Dict[str, Any] = {}
-        for collection in ("query_samples", "query_functions", "query_xcfg", "fs.files", "fs.chunks"):
+        for collection in self.QUERY_COLLECTIONS:
             try:
                 result = db.command("compact", collection)
                 outcome[collection] = {"ok": result.get("ok"), "bytesFreed": result.get("bytesFreed")}
@@ -1093,6 +1127,9 @@ class MongoDbStorage(StorageInterface):
                 LOGGER.warning("compact of %s was refused: %s", collection, error)
                 outcome[collection] = {"ok": 0, "error": str(error)}
         return outcome
+
+    # the collections the query cleanup deletes from, and so the ones compactQueryCollections reclaims
+    QUERY_COLLECTIONS = ("query_samples", "query_functions", "query_xcfg")
 
     def recomputeFamilyStats(self, progress_reporter=None) -> Dict[str, Any]:
         """Set every family's counters from the samples and functions that exist (#151).
@@ -1275,7 +1312,12 @@ class MongoDbStorage(StorageInterface):
         sample_entry = None
         if isQuery:
             sample_entry = SampleEntry(smda_report, sample_id=-1 * self._useCounter("query_samples"), family_id=0)
-            self._dbInsert("query_samples", sample_entry.toDict())
+            sample_document = sample_entry.toDict()
+            # how many functions this insert is about to write, so that deleteOrphanedQueryData
+            # can tell an insert still in flight - whose disassembly precedes its functions -
+            # from a finished one (#68)
+            sample_document["num_query_functions"] = smda_report.num_functions
+            self._dbInsert("query_samples", sample_document)
             function_ids = self._useCounterBulk("query_functions", smda_report.num_functions)
             function_dicts = []
             for function_id, smda_function in zip(function_ids, smda_report.getFunctions()):

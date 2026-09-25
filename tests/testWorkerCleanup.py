@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from smda.common.SmdaReport import SmdaReport
 
+from mcrit.queue.LocalQueue import LocalQueue
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.Worker import Worker
 
@@ -87,6 +88,16 @@ class DbCleanupTest(unittest.TestCase):
         report = worker.doDbCleanup()
         storage.compactQueryCollections.assert_called_once_with()
         self.assertEqual({"query_functions": {"ok": 1.0}}, report["compacted"])
+
+
+class LocalQueueDeletesAJobWithoutAResultTest(unittest.TestCase):
+    def test_a_job_that_left_no_result_is_deleted(self):
+        """The cleanup deletes old query jobs that failed before matching; in the memory queue
+        deleting one looked its missing result up as a file and raised a TypeError (#68)."""
+        queue = LocalQueue()
+        queue._jobs["failed-job"] = {"_id": "failed-job", "result": None, "payload": {"method": "getMatchesForUnmappedBinary", "file_params": "{}"}}
+        self.assertEqual(1, queue.delete_job("failed-job"))
+        self.assertNotIn("failed-job", queue._jobs)
 
 
 if __name__ == "__main__":
