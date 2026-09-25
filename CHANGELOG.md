@@ -654,3 +654,5 @@ date, the version, and what changed.
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#207]: https://github.com/danielplohmann/mcrit/issues/207
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
+[#53]: https://github.com/danielplohmann/mcrit/issues/53
+[#57]: https://github.com/danielplohmann/mcrit/issues/57
