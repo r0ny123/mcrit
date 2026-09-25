@@ -171,6 +171,13 @@ class JobIdsInMemoryMode(unittest.TestCase):
         self.assertNotIn(None, list(queue._files.values()) + list(queue._files_meta.values()))
         queue.clean()
 
+    def test_a_job_id_selection_in_upper_case_finds_the_job(self):
+        # GET /jobs?job_ids=... (#210) matches case-insensitively on MongoQueue, which parses the ids
+        job_id = self.index.recomputeFamilyStats()
+        queue = self.index.queue
+        self.assertEqual([job_id], [job.job_id for job in queue.get_jobs(0, 10, job_ids=[job_id.upper()])])
+        self.assertEqual(1, queue.get_job_count(job_ids=[job_id.upper()]))
+
     def test_an_id_in_upper_case_finds_the_same_job_and_result(self):
         # MongoQueue parses either case into the same ObjectId; LocalQueue keys by the lower-case string
         job_id = self.index.recomputeFamilyStats()

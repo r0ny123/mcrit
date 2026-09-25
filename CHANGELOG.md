@@ -56,7 +56,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   it and then fail as an invalid ObjectId inside `MongoQueue`, which the client saw as a 500
   instead of the 400 it now gets. Ids from either queue have exactly 24, so no valid request is
   affected, and the routes hand them on in lower case, the form both queues store, so an id in
-  upper case now finds its job in `LocalQueue` too, as it always did in `MongoQueue`. Reaching these
+  upper case now finds its job in `LocalQueue` too, as it always did in `MongoQueue` - and so does
+  one in a `GET /jobs?job_ids=...` selection. Reaching these
   routes in that mode exposed `LocalQueue` indexing its file tables with ids they did not hold.
   `/results/{id}/job` for an unknown id and `DELETE /jobs/{id}` for a job without a result (failed
   or terminated; this one also answered 500 and left the job half deleted) each left an empty entry

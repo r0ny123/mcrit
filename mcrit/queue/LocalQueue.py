@@ -432,7 +432,8 @@ class LocalQueue:
         if sample_ids is not None and method is None:
             return []
         selected_sample_ids = set(sample_ids) if sample_ids is not None else None
-        selected_job_ids = set(job_ids) if job_ids is not None else None
+        # ids are keyed as lower-case ObjectId strings (#203), and MongoQueue parses either case
+        selected_job_ids = {str(job_id).lower() for job_id in job_ids} if job_ids is not None else None
         jobs = []
         for job_id, job_document in self._jobs.items():
             if method is not None and job_document["payload"]["method"] != method:
