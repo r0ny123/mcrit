@@ -64,7 +64,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
   client's source and fails for any request added without a timeout.
 
-- Deleting a job left its data in GridFS (#80). `DELETE /jobs/{id}` and the query-sample cleanup
+- Deleting a job left its data in GridFS ([#80]). `DELETE /jobs/{id}` and the query-sample cleanup
   removed only the `fs.files` document of the job's result and of the files it was given, never
   their `fs.chunks`, so every submitted binary and every result stayed in the database for good,
   unreachable. Deleting jobs in bulk (`DELETE /jobs` by method or age) removed the result with its
@@ -623,3 +623,4 @@ date, the version, and what changed.
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#207]: https://github.com/danielplohmann/mcrit/issues/207
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
+[#80]: https://github.com/danielplohmann/mcrit/issues/80
