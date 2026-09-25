@@ -17,6 +17,41 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
+- `QUEUE_SPAWNINGWORKER_CHILD_MAX_MEMORY` bounds the memory of each job a spawning worker runs
+  ([#69]). Off by default. The worker measures the resident size of the job's process tree once a
+  second and kills a job over the limit, which then fails like any other failing job instead of
+  taking the host's memory from the workers beside it - the failure reported, one query growing a
+  worker to tens of GB and starving the rest. Linux only (it reads `/proc`); see `docs/TUNING.md`
+  for sizing.
+
+- A worker running jobs in its own process returns the memory a finished job freed to the operating
+  system (`malloc_trim`, glibc only), instead of holding on to its largest job's peak while idle
+  ([#69]). Sample matching on a 7,244-sample corpus left an idle worker at 1.0-2.3 GiB before and at
+  0.45-0.58 GiB after, for 30-120 ms per job; the reports are identical.
+
+### Changed
+
+- Query matching (a binary or SMDA report matched without being stored) looks up PicHash matches in
+  one query for all of the query's hashes instead of one query per hash, and applies
+  `MINHASH_PICHASH_MAX_MATCHES` as sample matching already did, so a hash held by much of the
+  corpus no longer returns one tuple per holder there either ([#69]). With the knob at its default
+  of 0, the matches are exactly the ones reported before. `MemoryStorage` applies the cutoff too;
+  it ignored it for sample matching as well.
+
+- The pichash and minhash totals of a match report are computed without building the per-function
+  match lists they used to build and throw away, which were two of the three full passes over
+  every match ([#69]). The report is unchanged: tests compare both ways on every call during sample
+  and query matching.
+
+### Fixed
+
+- A spawning worker started its job processes as `python` from `PATH`, which need not be the
+  interpreter MCRIT runs in; it now uses the same one.
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
 - **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
   `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
   `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
@@ -32,30 +67,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
   Family entries carry no sample lists ([#207]).
 
-- `QUEUE_SPAWNINGWORKER_CHILD_MAX_MEMORY` bounds the memory of each job a spawning worker runs
-  ([#69]). Off by default. The worker measures the resident size of the job's process tree once a
-  second and kills a job over the limit, which then fails like any other failing job instead of
-  taking the host's memory from the workers beside it - the failure reported, one query growing a
-  worker to tens of GB and starving the rest. Linux only (it reads `/proc`); see `docs/TUNING.md`
-  for sizing.
-- A worker running jobs in its own process returns the memory a finished job freed to the operating
-  system (`malloc_trim`, glibc only), instead of holding on to its largest job's peak while idle
-  ([#69]). Sample matching on a 7,244-sample corpus left an idle worker at 1.0-2.3 GiB before and at
-  0.45-0.58 GiB after, for 30-120 ms per job; the reports are identical.
-
-### Changed
-
-- Query matching (a binary or SMDA report matched without being stored) looks up PicHash matches in
-  one query for all of the query's hashes instead of one query per hash, and applies
-  `MINHASH_PICHASH_MAX_MATCHES` as sample matching already did, so a hash held by much of the
-  corpus no longer returns one tuple per holder there either ([#69]). With the knob at its default
-  of 0, the matches are exactly the ones reported before. `MemoryStorage` applies the cutoff too;
-  it ignored it for sample matching as well.
-- The pichash and minhash totals of a match report are computed without building the per-function
-  match lists they used to build and throw away, which were two of the three full passes over
-  every match ([#69]). The report is unchanged: tests compare both ways on every call during sample
-  and query matching.
-
 ### Fixed
 
 - **`McritClient` waited forever on a server that did not answer.** None of its requests passed
@@ -70,9 +81,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
   `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
   client's source and fails for any request added without a timeout.
-
-- A spawning worker started its job processes as `python` from `PATH`, which need not be the
-  interpreter MCRIT runs in; it now uses the same one.
 
 ## [1.11.0] - 2026-09-25
 
