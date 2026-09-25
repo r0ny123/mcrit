@@ -3,8 +3,8 @@
 This repository follows the release process shared across the MCRIT ecosystem
 ([smda](https://github.com/danielplohmann/smda), [purepdb](https://github.com/danielplohmann/purepdb),
 [mcrit](https://github.com/familiary/mcrit), [mcritweb](https://github.com/fkie-cad/mcritweb),
-[mcrit-plugin](https://github.com/danielplohmann/mcrit-plugin),
-[docker-mcrit](https://github.com/danielplohmann/docker-mcrit)). The shape is the same everywhere;
+[mcrit-plugin](https://github.com/familiary/mcrit-plugin),
+[docker-mcrit](https://github.com/familiary/docker-mcrit)). The shape is the same everywhere;
 this file states the values that are specific to this repository.
 
 ## Versioning
@@ -31,6 +31,12 @@ nothing is written twice.
   genuinely needs no entry (a typo, a CI-only change), and say why in the PR.
 - An entry says what changed and what it costs the reader: what to do when upgrading, what may
   behave differently, which issue or PR it closes.
+- `.gitattributes` merges `CHANGELOG.md` with `merge=union`. Every open pull request appends to the
+  same `[Unreleased]` section, so without it the PRs in a batch conflict with each other rather than
+  with `main`. Union keeps both sides' lines, which is safe for this file because entries are only
+  ever appended, never edited in place; it would garble two sides rewriting the same line, which a
+  changelog does not do. Keep the line; git applies it to local merges, so a batch that GitHub
+  reports as conflicting can be merged locally and pushed.
 - Dependency bumps need no entry. GitHub lists them under their own heading in the release notes,
   from the `dependencies` / `github_actions` labels (`.github/release.yml`).
 
