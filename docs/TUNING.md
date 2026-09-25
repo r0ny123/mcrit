@@ -273,7 +273,7 @@ it runs (seconds to minutes, depending on collection size). On a replica set it 
 member it is sent to only. Leave it off unless the query collections are large and the
 instance's disk is tight; the cleanup report says how many bytes each compaction returned.
 
-The job queue's GridFS (`fs.files`, `fs.chunks`) is not compacted by this, although the
-cleanup deletes query jobs and so their results: it lives in the queue's database
-(`QUEUE_MONGODB_DBNAME`), which is not necessarily the storage database, and reclaiming it is
-the queue's own business.
+The cleanup deletes query jobs too, and so their results in the job queue's GridFS
+(`fs.files`, `fs.chunks`). Those are compacted as well when the queue keeps its data in the
+storage database - the same server, port and `QUEUE_MONGODB_DBNAME` as `STORAGE_MONGODB_DBNAME`,
+as by default - and left alone when it has a database of its own, which this cannot reach.

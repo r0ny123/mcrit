@@ -1109,17 +1109,36 @@ class MongoDbStorage(StorageInterface):
             last_id = batch[-1]
         return deleted
 
+    # the collections the query cleanup deletes from, and so the ones compactQueryCollections reclaims
+    QUERY_COLLECTIONS = ("query_samples", "query_functions", "query_xcfg")
+    # where the job queue keeps the results of the query jobs the cleanup deletes
+    QUEUE_GRIDFS_COLLECTIONS = ("fs.files", "fs.chunks")
+
+    def _sharesDatabaseWithQueue(self) -> bool:
+        """Whether the job queue's GridFS lives in this database - as it does when both keep the
+        default server, port and database name."""
+        queue_config = getattr(self._config, "QUEUE_CONFIG", None)
+        if queue_config is None or getattr(queue_config, "QUEUE_METHOD", None) != "mongodb":
+            return False
+        return (str(queue_config.QUEUE_SERVER), str(queue_config.QUEUE_PORT), queue_config.QUEUE_MONGODB_DBNAME) == (
+            str(self._storage_config.STORAGE_SERVER),
+            str(self._storage_config.STORAGE_PORT),
+            self._storage_config.STORAGE_MONGODB_DBNAME,
+        )
+
     def compactQueryCollections(self) -> Dict[str, Any]:
         """Run MongoDB's compact on the collections the query cleanup deletes from.
 
-        GridFS (fs.files, fs.chunks) is not among them: it belongs to the job queue, lives in
-        the queue's database rather than this one, and the queue reclaims it on its own terms.
+        The cleanup deletes query jobs too, and with them their results in the queue's GridFS. When
+        the queue shares this database, fs.files and fs.chunks are compacted as well; when it keeps
+        its own, this handle cannot reach them and leaves them alone.
 
         compact needs the compact privilege on the database; a refusal is reported per
         collection rather than raised, since the cleanup itself has already succeeded."""
         db = self._getDb()
         outcome: Dict[str, Any] = {}
-        for collection in self.QUERY_COLLECTIONS:
+        collections = self.QUERY_COLLECTIONS + (self.QUEUE_GRIDFS_COLLECTIONS if self._sharesDatabaseWithQueue() else ())
+        for collection in collections:
             try:
                 result = db.command("compact", collection)
                 outcome[collection] = {"ok": result.get("ok"), "bytesFreed": result.get("bytesFreed")}
@@ -1127,9 +1146,6 @@ class MongoDbStorage(StorageInterface):
                 LOGGER.warning("compact of %s was refused: %s", collection, error)
                 outcome[collection] = {"ok": 0, "error": str(error)}
         return outcome
-
-    # the collections the query cleanup deletes from, and so the ones compactQueryCollections reclaims
-    QUERY_COLLECTIONS = ("query_samples", "query_functions", "query_xcfg")
 
     def recomputeFamilyStats(self, progress_reporter=None) -> Dict[str, Any]:
         """Set every family's counters from the samples and functions that exist (#151).

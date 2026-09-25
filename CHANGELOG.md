@@ -19,22 +19,23 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 - `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP`, default `False`, runs MongoDB's `compact` on
   `query_samples`, `query_functions` and `query_xcfg` after every query cleanup (`DbCleanup`), so
-  the space the cleanup freed goes back to the file system instead of staying inside the
-  collection files for reuse. It needs the `compact` privilege, which `readWrite` does not carry;
-  a refusal is reported per collection in the cleanup's result rather than failing the job. The
-  queue's GridFS is deliberately not compacted: it lives in the queue's database, which is only
-  the storage database when both keep their default name, and it is the queue's to reclaim.
+  the space the cleanup freed goes back to the file system instead of staying inside the collection
+  files for reuse. It needs the `compact` privilege, which `readWrite` does not carry; a refusal is
+  reported per collection in the cleanup's result rather than failing the job. The queue's GridFS
+  (`fs.files`, `fs.chunks`), where the results of the deleted query jobs were, is compacted too when
+  the queue shares the storage database, as it does by default, and left alone when the queue has a
+  database of its own.
 
 ### Fixed
 
 - The query cleanup (`STORAGE_MONGODB_ENABLE_CLEANUP`) failed on the first query job that left no
   result - one that failed before matching, or was terminated - because it read the query sample
-  out of every job's result, and so never deleted anything once such a job existed (#68). It now
+  out of every job's result, and so never deleted anything once such a job existed ([#68]). It now
   deletes an old job without a result and moves on, and it also reaches failed
   `getMatchesForSmdaReport` jobs, which it did not look at. Its result says how many query
   samples and jobs it deleted. The memory queue could not delete such a job at all - it raised on
   the missing result - and now deletes it.
-- The query data nothing refers to any more is deleted by the same cleanup (#68): query functions
+- The query data nothing refers to any more is deleted by the same cleanup ([#68]): query functions
   whose query sample is gone, and query disassembly whose function is gone. Both were left behind
   for good by an interrupted deletion or insert. Each is judged only behind a boundary taken
   before the walk, in batches, so that a query inserted meanwhile is never looked at. The
@@ -563,6 +564,7 @@ date, the version, and what changed.
 [Unreleased]: https://github.com/danielplohmann/mcrit/compare/v1.9.0...HEAD
 [1.9.0]: https://github.com/danielplohmann/mcrit/compare/v1.8.1...v1.9.0
 [#44]: https://github.com/danielplohmann/mcrit/issues/44
+[#68]: https://github.com/danielplohmann/mcrit/issues/68
 [#142]: https://github.com/danielplohmann/mcrit/issues/142
 [#147]: https://github.com/danielplohmann/mcrit/pull/147
 [#149]: https://github.com/danielplohmann/mcrit/issues/149

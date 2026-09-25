@@ -841,16 +841,26 @@ class MongoDbStorageTest(MemoryStorageTest):
         for collection, result in outcome.items():
             self.assertIn("ok", result, collection)
 
-    def testCompactingTheQueryCollectionsLeavesGridFsToTheQueue(self):
-        """GridFS belongs to the job queue, in the queue's database: compacting fs.* here reached
-        it only when both databases happen to share a name, and on a branch where deleting a job
-        left its chunks behind it had nothing to return anyway."""
+    def testCompactingReachesTheQueueGridFsOnlyWhereItSharesTheDatabase(self):
+        """The cleanup deletes query jobs and so their results in the queue's GridFS: those are
+        compacted when the queue keeps its data in this database, and left alone when not."""
         self.storage.clearStorage()
         db = self.storage._getDb()
-        with patch.object(type(db), "command", autospec=True, return_value={"ok": 1.0, "bytesFreed": 0}) as command:
-            self.storage.compactQueryCollections()
-        compacted = [call.args[2] for call in command.call_args_list if call.args[1] == "compact"]
-        self.assertEqual(["query_samples", "query_functions", "query_xcfg"], compacted)
+        shared = QueueConfig()
+        shared.QUEUE_SERVER, shared.QUEUE_PORT = self._storage_config.STORAGE_SERVER, self._storage_config.STORAGE_PORT
+        shared.QUEUE_MONGODB_DBNAME = self._storage_config.STORAGE_MONGODB_DBNAME
+        separate = QueueConfig()
+        separate.QUEUE_SERVER, separate.QUEUE_PORT = shared.QUEUE_SERVER, shared.QUEUE_PORT
+        separate.QUEUE_MONGODB_DBNAME = shared.QUEUE_MONGODB_DBNAME + "_queue"
+        for queue_config, expected in (
+            (shared, ["query_samples", "query_functions", "query_xcfg", "fs.files", "fs.chunks"]),
+            (separate, ["query_samples", "query_functions", "query_xcfg"]),
+        ):
+            with self.subTest(queue_db=queue_config.QUEUE_MONGODB_DBNAME):
+                self.storage._config.QUEUE_CONFIG = queue_config
+                with patch.object(type(db), "command", autospec=True, return_value={"ok": 1.0, "bytesFreed": 0}) as command:
+                    self.storage.compactQueryCollections()
+                self.assertEqual(expected, [call.args[2] for call in command.call_args_list if call.args[1] == "compact"])
 
     def testAnOversizedDisassemblyBlobIsDroppedAndTheFunctionKept(self):
         # #42: MongoDB refuses a document over 16 MiB; the whole batch used to fail as
