@@ -1670,12 +1670,10 @@ class MongoDbStorage(StorageInterface):
             # the index entry alone, so an over-long posting list is never read. Filtering on
             # $size instead still reads every document to measure it, which measured no faster
             # than not filtering at all.
-            match: Dict[str, Any] = {"band_hash": {"$in": band_hashes}, "df": {"$lte": cutoff}}
-            if self._bandBucketSize():
-                # df belongs on bucket 0 alone; one found on a bucket above it - only switching
-                # bucketing back off, which is unsupported, stamps one - must not admit that bucket
-                match["bucket"] = {"$in": [0, None]}
-            return [{"$match": match}]
+            # no bucket predicate here: with one, mongod prefers the (band_hash, bucket) index and
+            # reads every over-cutoff bucket 0 before discarding it. _bandLookupHits drops the stray
+            # upper bucket a df could admit instead.
+            return [{"$match": {"band_hash": {"$in": band_hashes}, "df": {"$lte": cutoff}}}]
         # no trustworthy df yet: fall back to measuring the list, which is correct but only
         # saves the transfer, not the read
         # Only bucket 0 is measured. Under bucketing a hash over the cutoff is split, and each of
@@ -1713,6 +1711,10 @@ class MongoDbStorage(StorageInterface):
         collection = self._getDb()["band_%d" % band_number]
         shrunk = []
         for hit in collection.aggregate(self._bandLookupPipeline(band_hashes, df_index_complete)):
+            if bucket_zero_only and (hit.get("bucket") or 0) != 0:
+                # df belongs on bucket 0 alone; one found on a bucket above it - only switching
+                # bucketing back off, which is unsupported, stamps one - must not admit that bucket
+                continue
             yield hit
             if bucket_zero_only and (hit.get("tail") or 0) > 0:
                 shrunk.append(hit["band_hash"])

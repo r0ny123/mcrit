@@ -313,6 +313,31 @@ class BandBucketingTest(unittest.TestCase):
         self.assertEqual({"dict": [6, 7], "numpy": [6, 7], "single": [6, 7]}, self._candidates(storage, 4242))
         self.assertEqual({"dict": [], "numpy": [], "single": []}, self._candidates(storage, 4242, band_matches_required=2))
 
+    def testTheLookupStaysOnTheDfIndex(self):
+        """Decided from the (band_hash, df) index entries, so an over-cutoff bucket 0 is never read."""
+        storage = self._rawStorage(2, "lookup_df_index", df_cutoff=2)
+        storage._updateBands({0: {**{band_hash: [1] for band_hash in range(200)}, **{band_hash: [1, 2, 3, 4, 5] for band_hash in range(1000, 1050)}}}, method="push")
+        wanted = list(range(200)) + list(range(1000, 1050))
+        explain = storage._getDb().command("aggregate", "band_0", pipeline=storage._bandLookupPipeline(wanted, True), explain=True)
+        stages = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("stage") == "IXSCAN":
+                    stages.append(node)
+                # plans the optimizer rejected say nothing about what runs; their layout also differs
+                # between mongod versions, so they are skipped wherever they appear
+                for key, value in node.items():
+                    if key != "rejectedPlans":
+                        walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(explain)
+        self.assertTrue(stages, explain)
+        self.assertTrue(all(stage["keyPattern"] == {"band_hash": 1, "df": 1} for stage in stages), [stage["keyPattern"] for stage in stages])
+
     def testALookupReadsTheSettingsOnce(self):
         """Not once per band: the df index flag is read once per lookup call and passed down."""
         storage = self._rawStorage(2, "lookup_settings", df_cutoff=2)
