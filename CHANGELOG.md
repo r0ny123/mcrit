@@ -15,6 +15,28 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Added
+
+- `/status` reports `escaper_fingerprints`, and exports record, a fingerprint of how smda escapes
+  AArch64, CIL and Dalvik code next to the Intel one (#93), so that a change in how smda escapes any
+  architecture MCRIT computes MinHashes for shows, not only an Intel one. The Intel fingerprint, and
+  `escaper_fingerprint` in `/status`, are unchanged; an import compares the architectures both sides
+  carry that the export holds samples of, so exports made before compare as they did.
+
+### Fixed
+
+- Sample, query, function query, vs, vs-group and cross match reports included matches against
+  samples of another architecture (#93). A PicHash or MinHash only means the same thing for two
+  functions escaped by one instruction set's rules; across architectures, shingles still collide in
+  bands now and then. On a corpus of 6,315 Intel, 458 CIL, 14 Dalvik and 13 AArch64 samples (and 444
+  SMDA could not disassemble), sample matching reported them at scores of 51 to 61, just over the
+  threshold - one Dalvik sample was reported against 84 samples of other architectures next to 13 of
+  its own. Such matches are now left out, and with `MINHASH_MATCHING_SHORTLIST_SIZE` set, samples of
+  another architecture no longer take places on the shortlist. A corpus of one architecture is
+  matched as before, with the same lookups. A sample whose architecture is unknown (an empty string,
+  as a sample SMDA could not disassemble has) is not taken as another one. Results computed before
+  and kept by the job cache still hold such matches until requested with `force_recalculation`.
+
 ## [1.10.0] - 2026-09-25
 
 ### Added
