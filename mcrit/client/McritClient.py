@@ -237,7 +237,7 @@ class McritClient:
         """
         Schedule a job that rebuilds the function->sample range index two-stage matching needs; answers the job id
         """
-        response = requests.get(f"{self.mcrit_server}/rebuild_function_range_index", headers=self.headers)
+        response = requests.get(f"{self.mcrit_server}/rebuild_function_range_index", headers=self.headers, timeout=self.timeout)
         if self.raw:
             return response
         return self._handle(response)
@@ -246,7 +246,7 @@ class McritClient:
         """
         Schedule a job that stores and indexes each band's posting-list length, so STORAGE_BAND_DF_CUTOFF can skip from the index; answers the job id
         """
-        response = requests.get(f"{self.mcrit_server}/rebuild_band_df_index", headers=self.headers)
+        response = requests.get(f"{self.mcrit_server}/rebuild_band_df_index", headers=self.headers, timeout=self.timeout)
         if self.raw:
             return response
         return self._handle(response)
@@ -349,7 +349,7 @@ class McritClient:
         if not family_ids:
             return {}
         family_id_string = ",".join(["%d" % fid for fid in family_ids])
-        response = requests.post(f"{self.mcrit_server}/families/ids", data=family_id_string, headers=self.headers)
+        response = requests.post(f"{self.mcrit_server}/families/ids", data=family_id_string, headers=self.headers, timeout=self.timeout)
         if self.raw:
             return response
         data = self._handle(response)
@@ -447,7 +447,7 @@ class McritClient:
         if not sample_ids:
             return {}
         sample_id_string = ",".join(["%d" % sid for sid in sample_ids])
-        response = requests.post(f"{self.mcrit_server}/samples/ids", data=sample_id_string, headers=self.headers)
+        response = requests.post(f"{self.mcrit_server}/samples/ids", data=sample_id_string, headers=self.headers, timeout=self.timeout)
         if self.raw:
             return response
         data = self._handle(response)

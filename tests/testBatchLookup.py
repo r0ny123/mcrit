@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import falcon
 import falcon.testing
 
-from mcrit.client.McritClient import McritClient, McritNotFound
+from mcrit.client.McritClient import DEFAULT_TIMEOUT, McritClient, McritNotFound
 from mcrit.server.application_routes import get_app
 from mcrit.server.FamilyResource import FamilyResource
 from mcrit.server.SampleResource import SampleResource
@@ -234,7 +234,7 @@ class ClientGetSamplesByIdsTest(unittest.TestCase):
         body = {"status": "successful", "data": {"5": _sample_dict(5), "-3": _sample_dict(-3, sha256="b" * 64)}}
         with patch("mcrit.client.McritClient.requests.post", return_value=_answer(200, body)) as post:
             result = client.getSamplesByIds([5, -3])
-        post.assert_called_once_with("http://mcrit.test/samples/ids", data="5,-3", headers={})
+        post.assert_called_once_with("http://mcrit.test/samples/ids", data="5,-3", headers={}, timeout=DEFAULT_TIMEOUT)
         self.assertEqual({5, -3}, set(result.keys()))
         for key, entry in result.items():
             self.assertIsInstance(entry, SampleEntry)
@@ -269,7 +269,7 @@ class ClientGetFamiliesByIdsTest(unittest.TestCase):
         body = {"status": "successful", "data": {"1": _family_dict(1, "fam_one"), "2": _family_dict(2, "fam_two")}}
         with patch("mcrit.client.McritClient.requests.post", return_value=_answer(200, body)) as post:
             result = client.getFamiliesByIds([1, 2])
-        post.assert_called_once_with("http://mcrit.test/families/ids", data="1,2", headers={})
+        post.assert_called_once_with("http://mcrit.test/families/ids", data="1,2", headers={}, timeout=DEFAULT_TIMEOUT)
         self.assertEqual({1: "fam_one", 2: "fam_two"}, {k: v.family_name for k, v in result.items()})
         for entry in result.values():
             self.assertIsInstance(entry, FamilyEntry)
