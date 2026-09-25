@@ -70,7 +70,8 @@ class SampleResource:
             return
         # assume the POST body consists of comma separated sample_ids (negative ids are query samples)
         post_body = req.stream.read()
-        if re.match(rb"^-?\d+(?:[\s]*,[\s]*-?\d+)*$", post_body):
+        # at most 18 digits an id: every such number fits the int64 MongoDB stores, and none longer is one
+        if re.match(rb"^-?\d{1,18}(?:[\s]*,[\s]*-?\d{1,18})*$", post_body):
             id_count = post_body.count(b",") + 1
             if id_count > BATCH_LOOKUP_MAX_IDS:
                 resp.data = jsonify(

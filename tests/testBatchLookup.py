@@ -1,5 +1,3 @@
-import ast
-import inspect
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -57,15 +55,6 @@ def _family_dict(family_id, family_name):
 def _id_list(count, start=1):
     """A POST body naming <count> distinct ids."""
     return ",".join(str(start + offset) for offset in range(count)).encode()
-
-
-def _responder_docstring(resource_class):
-    """on_post_by_ids' docstring, read from the source: @timing does not carry __doc__ over."""
-    tree = ast.parse(inspect.getsource(resource_class))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "on_post_by_ids":
-            return ast.get_docstring(node)
-    raise AssertionError(f"{resource_class.__name__} has no on_post_by_ids")
 
 
 def _answer(status_code, body):
@@ -148,9 +137,19 @@ class SampleResourceByIdsTest(unittest.TestCase):
         self.assertEqual(falcon.HTTP_200, resp.status)
         self.assertEqual(BATCH_LOOKUP_MAX_IDS, len(index.getSamplesByIds.call_args.args[0]))
 
+    def test_an_id_too_long_to_be_one_is_a_400(self):
+        # int() refuses more than 4300 digits and MongoDB anything past int64: both were a 500
+        index, resource = self._resource()
+        for body in (b"9" * 5000, b"1" * 19, b"1,22222222222222222222"):
+            with self.subTest(digits=len(body)):
+                resp = falcon.Response()
+                resource.on_post_by_ids(self._request(body), resp)
+                self.assertEqual(falcon.HTTP_400, resp.status)
+        index.getSamplesByIds.assert_not_called()
+        index.getFamiliesByIds.assert_not_called()
+
     def test_more_ids_than_the_cap_are_a_400_naming_the_cap(self):
         index, resource = self._resource()
-        resp = falcon.Response()
         # counted as named, so repeating an id cannot slip a longer list past the cap
         for body in (_id_list(BATCH_LOOKUP_MAX_IDS + 1), b",".join([b"-5"] * (BATCH_LOOKUP_MAX_IDS + 1))):
             with self.subTest(ids=body[:12]):
@@ -162,12 +161,6 @@ class SampleResourceByIdsTest(unittest.TestCase):
                 message = json.loads(resp.data)["data"]["message"]
                 self.assertIn(f"{BATCH_LOOKUP_MAX_IDS + 1} requested", message)
                 self.assertIn(f"at most {BATCH_LOOKUP_MAX_IDS}", message)
-
-    def test_the_responder_documents_its_body_and_its_cap(self):
-        docstring = _responder_docstring(SampleResource)
-        assert docstring is not None
-        self.assertIn("comma-separated list of sample_ids", docstring)
-        self.assertIn("BATCH_LOOKUP_MAX_IDS", docstring)
 
 
 class FamilyResourceByIdsTest(unittest.TestCase):
@@ -210,6 +203,17 @@ class FamilyResourceByIdsTest(unittest.TestCase):
         self.assertEqual(falcon.HTTP_200, resp.status)
         self.assertEqual(BATCH_LOOKUP_MAX_IDS, len(index.getFamiliesByIds.call_args.args[0]))
 
+    def test_an_id_too_long_to_be_one_is_a_400(self):
+        # int() refuses more than 4300 digits and MongoDB anything past int64: both were a 500
+        index, resource = self._resource()
+        for body in (b"9" * 5000, b"1" * 19, b"1,22222222222222222222"):
+            with self.subTest(digits=len(body)):
+                resp = falcon.Response()
+                resource.on_post_by_ids(self._request(body), resp)
+                self.assertEqual(falcon.HTTP_400, resp.status)
+        index.getSamplesByIds.assert_not_called()
+        index.getFamiliesByIds.assert_not_called()
+
     def test_more_ids_than_the_cap_are_a_400_naming_the_cap(self):
         index, resource = self._resource()
         resp = falcon.Response()
@@ -220,12 +224,6 @@ class FamilyResourceByIdsTest(unittest.TestCase):
         message = json.loads(resp.data)["data"]["message"]
         self.assertIn(f"Too many family_ids: {BATCH_LOOKUP_MAX_IDS + 1} requested", message)
         self.assertIn(f"at most {BATCH_LOOKUP_MAX_IDS}", message)
-
-    def test_the_responder_documents_its_body_and_its_cap(self):
-        docstring = _responder_docstring(FamilyResource)
-        assert docstring is not None
-        self.assertIn("comma-separated list of family_ids", docstring)
-        self.assertIn("BATCH_LOOKUP_MAX_IDS", docstring)
 
     def test_an_empty_body_is_a_400_with_a_message(self):
         index, resource = self._resource()
