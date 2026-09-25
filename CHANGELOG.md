@@ -20,8 +20,9 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - `/status` reports `escaper_fingerprints`, and exports record, a fingerprint of how smda escapes
   AArch64, CIL and Dalvik code next to the Intel one (#93), so that a change in how smda escapes any
   architecture MCRIT computes MinHashes for shows, not only an Intel one. The Intel fingerprint, and
-  `escaper_fingerprint` in `/status`, are unchanged; an import compares the architectures both sides
-  carry that the export holds samples of, so exports made before compare as they did.
+  `escaper_fingerprint` in `/status`, are unchanged; an import compares only the architectures the
+  export holds samples of. An export made before carries the Intel fingerprint alone: it is compared
+  as before when it holds Intel samples, and otherwise logs that it has nothing to compare.
 
 ### Fixed
 
@@ -33,9 +34,10 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   threshold - one Dalvik sample was reported against 84 samples of other architectures next to 13 of
   its own. Such matches are now left out, and with `MINHASH_MATCHING_SHORTLIST_SIZE` set, samples of
   another architecture no longer take places on the shortlist. A corpus of one architecture is
-  matched as before, with the same lookups. A sample whose architecture is unknown (an empty string,
-  as a sample SMDA could not disassemble has) is not taken as another one. Results computed before
-  and kept by the job cache still hold such matches until requested with `force_recalculation`.
+  matched as before, with the same lookups (with the shortlist on, the entries of the samples voted
+  for are fetched in one batch as well). A sample whose architecture is unknown (an empty string, as
+  a sample SMDA could not disassemble has) is not taken as another one. Results computed before and
+  kept by the job cache still hold such matches until requested with `force_recalculation`.
 - Block hashes of non-Intel code are computed with that architecture's escaper: MCRIT now requires
   picblocks 2.1.0, which escaped every block as Intel code before (#93). picblocks was unpinned
   above 1.1.2, so installations set up since its 2.1.0 release on 2026-09-13 compute the new hashes

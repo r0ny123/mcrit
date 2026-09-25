@@ -238,17 +238,19 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             shared_architectures = set(local_escapers).intersection(exported_escapers)
             # only the architectures the export holds samples of: a change in how smda escapes
             # another one leaves these minhashes as comparable as before
-            exported_architectures = {
-                sample_entry.get("architecture")
-                for sample_entry in export_data.get("sample_entries", {}).values()
-                if isinstance(sample_entry, dict) and sample_entry.get("architecture")
-            }
-            if exported_architectures:
+            exported_samples = [sample_entry for sample_entry in export_data.get("sample_entries", {}).values() if isinstance(sample_entry, dict)]
+            exported_architectures = {sample_entry.get("architecture") for sample_entry in exported_samples if sample_entry.get("architecture")}
+            if exported_samples:
+                # samples of an unknown architecture only (SMDA could not disassemble them) hold no
+                # minhashes any escaper produced, so there is then nothing to compare at all
                 shared_architectures &= exported_architectures
             shared_architectures = sorted(shared_architectures)
-            if not shared_architectures:
+            if exported_samples and not exported_architectures:
+                pass
+            elif not shared_architectures:
                 LOGGER.warning(
-                    "Export carries no escaper probe this instance can compare (export: %s, local: %s). Imported minhashes may or may not share this instance's escaping behaviour.",
+                    "Export carries no escaper fingerprint for the architectures of its samples (samples: %s, export fingerprints: %s, local: %s). Imported minhashes may or may not share this instance's escaping behaviour.",
+                    sorted(exported_architectures) or "unknown",
                     sorted(exported_escapers),
                     sorted(local_escapers),
                 )

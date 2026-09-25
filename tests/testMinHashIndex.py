@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import unittest
+from unittest.mock import patch
 
 from smda.common.SmdaReport import SmdaReport
 
@@ -311,6 +312,25 @@ class EscaperProvenanceTestSuite(unittest.TestCase):
         self.assertFalse(MinHashIndex(config).addImportData(intel_only)["escaper_mismatch"])
         with_cil = self._exportOf(os.path.join(FIXTURES_PATH, "crossarch_cil_a.smda"), escaper=other_cil)
         self.assertTrue(MinHashIndex(config).addImportData(with_cil)["escaper_mismatch"])
+
+    def testAnOlderExportIsComparedByTheArchitecturesOfItsSamples(self):
+        # an export from before #93 carries the Intel fingerprint only
+        intel_only_fingerprint = {"intel": "0000000000000000"}
+        aarch64 = self._exportOf(os.path.join(FIXTURES_PATH, "crossarch_aarch64_a.smda"), escaper=intel_only_fingerprint)
+        with patch("mcrit.index.MinHashIndex.LOGGER") as logger:
+            self.assertFalse(MinHashIndex(config).addImportData(aarch64)["escaper_mismatch"])
+        # the warning names what the export's samples are, not only which fingerprints it lacks
+        self.assertEqual(["aarch64"], logger.warning.call_args.args[1])
+        intel = self._exportOf(os.path.join(FIXTURES_PATH, "crossarch_intel_a.smda"), escaper=intel_only_fingerprint)
+        self.assertTrue(MinHashIndex(config).addImportData(intel)["escaper_mismatch"])
+
+    def testAnExportOfSamplesWithoutArchitectureHasNothingToCompare(self):
+        export_data = self._exportOf(os.path.join(FIXTURES_PATH, "crossarch_intel_a.smda"), escaper={"intel": "0000000000000000"})
+        for sample_entry in export_data["sample_entries"].values():
+            sample_entry["architecture"] = ""
+        with patch("mcrit.index.MinHashIndex.LOGGER") as logger:
+            self.assertFalse(MinHashIndex(config).addImportData(export_data)["escaper_mismatch"])
+        self.assertFalse([call for call in logger.warning.call_args_list if "escaper" in str(call)])
 
     def testImportWithNoComparableArchitectureIsNotFlagged(self):
         """Nothing shared means nothing comparable - a skip with a warning, not a mismatch."""

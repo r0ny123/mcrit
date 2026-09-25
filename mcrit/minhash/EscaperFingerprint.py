@@ -154,7 +154,7 @@ ESCAPER_PROBE_INSTRUCTIONS: Dict[str, List[List]] = {
         [0xECB, "a2", "stelem.ref", ""],
         [0x2574, "7323000006", "newobj", ".ctor"],
         [0x5DF3, "72630c0070", "ldstr", '",0"'],
-        # float constants stay literal, break and prefixes have groups of their own
+        # float constants stay literal, break has a group of its own, and a prefix escapes as a nop does
         [0x3000, "23000000000000e03f", "ldc.r8", "0.5"],
         [0x3009, "01", "break", ""],
         [0x300A, "fe14", "tail.", ""],
