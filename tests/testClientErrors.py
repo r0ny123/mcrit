@@ -186,5 +186,44 @@ class ClientModesTest(unittest.TestCase):
                         getattr(client, method)()
 
 
+class GetQueueDataTest(unittest.TestCase):
+    """getQueueData's query string for the sample_ids/job_ids selectors, and raw mode."""
+
+    @staticmethod
+    def _success(data=None):
+        return answer(200, {"status": "successful", "data": data if data is not None else []})
+
+    def test_sample_ids_and_job_ids_are_sent_as_comma_separated_lists(self):
+        client = McritClient("http://mcrit.test")
+        with patch("mcrit.client.McritClient.requests.get", return_value=self._success()) as mock_get:
+            client.getQueueData(method="getMatchesForSample", sample_ids=[7, 8, 9], job_ids=["a1b2c3d4e5f6a1b2c3d4e5f6"])
+        url = mock_get.call_args.args[0]
+        self.assertIn("method=getMatchesForSample", url)
+        self.assertIn("sample_ids=7,8,9", url)
+        self.assertIn("job_ids=a1b2c3d4e5f6a1b2c3d4e5f6", url)
+
+    def test_neither_parameter_is_sent_when_not_given(self):
+        client = McritClient("http://mcrit.test")
+        with patch("mcrit.client.McritClient.requests.get", return_value=self._success()) as mock_get:
+            client.getQueueData()
+        url = mock_get.call_args.args[0]
+        self.assertNotIn("sample_ids", url)
+        self.assertNotIn("job_ids", url)
+
+    def test_an_empty_list_is_still_sent_present_but_empty(self):
+        client = McritClient("http://mcrit.test")
+        with patch("mcrit.client.McritClient.requests.get", return_value=self._success()) as mock_get:
+            client.getQueueData(method="getMatchesForSample", sample_ids=[], job_ids=[])
+        url = mock_get.call_args.args[0]
+        self.assertIn("sample_ids=&", url)
+        self.assertTrue(url.endswith("job_ids="))
+
+    def test_raw_mode_returns_the_response_untouched(self):
+        client = McritClient("http://mcrit.test", raw_responses=True)
+        response = self._success()
+        with patch("mcrit.client.McritClient.requests.get", return_value=response):
+            self.assertIs(response, client.getQueueData(sample_ids=[1, 2], job_ids=["x"]))
+
+
 if __name__ == "__main__":
     unittest.main()

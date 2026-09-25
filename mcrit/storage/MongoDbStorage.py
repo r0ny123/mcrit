@@ -2560,6 +2560,18 @@ class MongoDbStorage(StorageInterface):
             return None
         return FamilyEntry.fromDict(family_document)
 
+    def getFamilyEntriesByIds(self, family_ids: List[int]) -> Dict[int, "FamilyEntry"]:
+        """One $in query instead of one find_one per family.
+
+        Ids without a family document are simply absent from the result, matching
+        getFamily's None for them.
+        """
+        entries: Dict[int, FamilyEntry] = {}
+        for family_document in self._getDb().families.find({"family_id": {"$in": family_ids}}, {"_id": 0}):
+            entry = FamilyEntry.fromDict(family_document)
+            entries[entry.family_id] = entry
+        return entries
+
     def getFunctionById(self, function_id: int, with_xcfg=False) -> Optional["FunctionEntry"]:
         field_selection = {"_id": 0}
         if function_id < 0:

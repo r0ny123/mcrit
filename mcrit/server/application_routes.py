@@ -126,6 +126,8 @@ def get_app():
     _app.add_route("/search/functions", status_resource, suffix="search_functions")
 
     _app.add_route("/families", family_resource, suffix="collection")
+    # post only: batch lookup, body is a comma separated list of family_ids
+    _app.add_route("/families/ids", family_resource, suffix="by_ids")
     # supports GET, PUT (for modification of family_name, is_library), DELETE (for all samples)
     _app.add_route("/families/{family_id:int}", family_resource)
 
@@ -133,6 +135,8 @@ def get_app():
     _app.add_route("/samples", sample_resource, suffix="collection")
     # post only
     _app.add_route("/samples/binary", sample_resource, suffix="submit_binary")
+    # post only: batch lookup, body is a comma separated list of sample_ids
+    _app.add_route("/samples/ids", sample_resource, suffix="by_ids")
     # supports GET, PUT (for modification of family_name, version, component, is_library), DELETE (for one sample)
     _app.add_route("/samples/{sample_id:int}", sample_resource)
     #
