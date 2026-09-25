@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import falcon
 import falcon.testing
 
-from mcrit.client.McritClient import McritClient
+from mcrit.client.McritClient import McritClient, McritNotFound, McritServerError
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.server.SampleResource import SampleResource
@@ -116,6 +116,17 @@ class BinaryClientTest(unittest.TestCase):
             self.assertIn("/samples/3/binary", get.call_args.args[0])
         with patch("mcrit.client.McritClient.requests.get", return_value=MagicMock(status_code=404)):
             self.assertIsNone(client.getSampleBinary(3))
+
+    def test_the_client_error_modes_apply(self):
+        failure = MagicMock(status_code=404, url="http://mcrit.test/samples/3/binary")
+        failure.json.return_value = {"status": "failed", "data": {"message": "No binary kept for this sample."}}
+        with patch("mcrit.client.McritClient.requests.get", return_value=failure):
+            with self.assertRaises(McritNotFound):
+                McritClient("http://mcrit.test", raise_client_errors=True).getSampleBinary(3)
+        failure.status_code = 500
+        with patch("mcrit.client.McritClient.requests.get", return_value=failure):
+            with self.assertRaises(McritServerError):
+                McritClient("http://mcrit.test", raise_server_errors=True).getSampleBinary(3)
 
 
 class WorkerKeepsBinariesTest(unittest.TestCase):
