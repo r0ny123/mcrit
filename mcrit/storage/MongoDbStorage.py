@@ -15,7 +15,7 @@ import numpy as np
 from bson import encode as bson_encode
 from packaging import version
 from picblocks.blockhasher import BlockHasher
-from pymongo import MongoClient, UpdateOne
+from pymongo import MongoClient, UpdateMany, UpdateOne
 from pymongo.errors import BulkWriteError, DocumentTooLarge
 from smda.common.BinaryInfo import BinaryInfo
 from smda.common.SmdaFunction import SmdaFunction
@@ -215,6 +215,12 @@ class MongoDbStorage(StorageInterface):
 
     def __init__(self, config: "McritConfig") -> None:
         super().__init__(config)  # sets config
+        bucket_size = self._bandBucketSize()
+        df_cutoff = int(getattr(self._storage_config, "STORAGE_BAND_DF_CUTOFF", 0) or 0)
+        if bucket_size and df_cutoff > bucket_size:
+            # only bucket 0 carries df, so a spilled hash whose total still fits under the cutoff
+            # would be served as bucket 0 alone - a truncated posting list with no error
+            raise ValueError(f"STORAGE_BAND_DF_CUTOFF ({df_cutoff}) must not exceed STORAGE_BAND_BUCKET_SIZE ({bucket_size}).")
         self.blockhasher = BlockHasher()
         self._database = None
         # guards the lazy initialisation in _getDb(); a threading.Lock is per-process, which is
@@ -355,6 +361,7 @@ class MongoDbStorage(StorageInterface):
         for band_id in range(self._storage_config.STORAGE_NUM_BANDS):
             self._getDb()["band_%d" % band_id].create_index("band_hash")
             self._getDb()["band_%d" % band_id].create_index([("band_hash", 1), ("df", 1)])
+            self._getDb()["band_%d" % band_id].create_index([("band_hash", 1), ("bucket", 1)])
         # Add Family "" (family_id 0) if it is not already in storage. Two processes can bootstrap
         # the same database concurrently (e.g. server and worker), so instead of check-then-addFamily
         # (which would hand out two different family_ids for "") this uses a single upsert keyed on
@@ -1443,9 +1450,15 @@ class MongoDbStorage(StorageInterface):
     # lookup could find; it is residue, not index (#149)
     _EMPTY_BAND_DOCUMENT = {"$or": [{"function_ids": {"$size": 0}}, {"function_ids": {"$exists": False}}]}
 
+    def _bandBucketSize(self) -> int:
+        """How many postings one band document may hold, or 0 for the single-document shape."""
+        return max(0, int(getattr(self._storage_config, "STORAGE_BAND_BUCKET_SIZE", 0) or 0))
+
     def _updateBands(self, band_hashes: Dict[int, Dict[int, List[int]]], method="push") -> int:
         if method not in ["push", "pull"]:
             raise ValueError(f"MongoDbStorage._updateBands() can only do 'push' and 'pull', not '{method}'.")
+        if method == "push" and self._bandBucketSize():
+            return self._pushBandsBucketed(band_hashes)
         num_band_updates = 0
         for band_number, band_data in band_hashes.items():
             band_updates = []
@@ -1458,29 +1471,164 @@ class MongoDbStorage(StorageInterface):
                     # index, without reading the list to measure it (#band-df)
                     band_updates.append(UpdateOne({"band_hash": band_hash}, {"$push": {"function_ids": {"$each": function_ids}}, "$inc": {"df": len(function_ids)}}, upsert=True))
                 else:
-                    # pulling from a band hash that has no document must not create one (#149)
-                    band_updates.append(UpdateOne({"band_hash": band_hash}, {"$pull": {"function_ids": {"$in": function_ids}}}))
+                    # pulling from a band hash that has no document must not create one (#149), so
+                    # no upsert; UpdateMany because under bucketing a hash spans several documents
+                    band_updates.append(UpdateMany({"band_hash": band_hash}, {"$pull": {"function_ids": {"$in": function_ids}}}))
             if band_updates:
                 collection = self._getDb()["band_%d" % band_number]
                 collection.bulk_write(band_updates, ordered=False)
                 if method == "pull":
                     # a posting list the pull emptied is removed, not kept as a tombstone; scoped to
                     # the hashes just touched, so it is one indexed delete per band (#149)
-                    collection.delete_many({"band_hash": {"$in": list(band_data)}, **self._EMPTY_BAND_DOCUMENT})
-                    # $pull cannot report how many elements it removed, so df is restored from
-                    # the list itself rather than decremented by a guess
-                    collection.update_many(
-                        {"band_hash": {"$in": list(band_data)}},
-                        [{"$set": {"df": {"$size": {"$ifNull": ["$function_ids", []]}}}}],
-                    )
+                    if self._bandBucketSize():
+                        # bucket 0 carries df/tail/tail_n for the whole hash, so an emptied bucket 0
+                        # is kept until the recompute shows no posting survives anywhere; only
+                        # emptied buckets above it go now
+                        collection.delete_many({"band_hash": {"$in": list(band_data)}, "bucket": {"$nin": [0, None]}, **self._EMPTY_BAND_DOCUMENT})
+                        # under bucketing df on bucket 0 is the total across every bucket, so it
+                        # cannot be restored per document - that would set each bucket's df to its
+                        # own size and silently break the cutoff, which reads bucket 0 alone.
+                        self._recomputeBandBookkeeping(collection, list(band_data))
+                        collection.delete_many({"band_hash": {"$in": list(band_data)}, "df": 0, **self._EMPTY_BAND_DOCUMENT})
+                    else:
+                        collection.delete_many({"band_hash": {"$in": list(band_data)}, **self._EMPTY_BAND_DOCUMENT})
+                        # $pull cannot report how many elements it removed, so df is restored from
+                        # the list itself rather than decremented by a guess
+                        collection.update_many(
+                            {"band_hash": {"$in": list(band_data)}},
+                            [{"$set": {"df": {"$size": {"$ifNull": ["$function_ids", []]}}}}],
+                        )
             num_band_updates += len(band_updates)
         return num_band_updates
+
+    def _pushBandsBucketed(self, band_hashes: Dict[int, Dict[int, List[int]]]) -> int:
+        """Append postings, splitting a band hash across (band_hash, bucket) documents.
+
+        A posting list is an array inside one document and MongoDB caps a document at 16 MB, so a
+        band hash common enough to accumulate ~1.35M postings (~1.05M once ids need int64) stops
+        being writable at all - the $push fails rather than slowing down, and indexing halts.
+        Extrapolated from a 7,244-sample real corpus that wall sits near 270,000 samples, and no
+        amount of sharding moves it, because a document cannot span shards.
+
+        Shape: bucket 0 carries the bookkeeping for the whole hash - `df` (the total across every
+        bucket, which is what STORAGE_BAND_DF_CUTOFF filters on), `tail` (the highest bucket in
+        use) and `tail_n` (how full that one is). Buckets above 0 carry only their slice of the
+        postings. Keeping df on bucket 0 alone means the cutoff filter and its (band_hash, df)
+        index are unchanged: a hash under the cutoff is far below one bucket's worth, so it never
+        spills, and a hash that did spill has a df that rejects it anyway.
+
+        Buckets fill in order rather than by hashing the function id, because the common case is a
+        short posting list: modulo placement would scatter a 200-entry list across 200 documents
+        and make the cheap case expensive. Filling in order keeps every under-cutoff hash in a
+        single document, exactly as before.
+
+        Placement needs to know where the tail is, which costs one indexed read per batch per
+        band - projected to exclude function_ids, so it never pays for the arrays it is placing
+        next to.
+        """
+        bucket_size = self._bandBucketSize()
+        num_band_updates = 0
+        for band_number, band_data in band_hashes.items():
+            wanted = [band_hash for band_hash, function_ids in band_data.items() if len(function_ids) >= 1]
+            if not wanted:
+                continue
+            collection = self._getDb()["band_%d" % band_number]
+            # current tail per hash. Documents written before bucketing was switched on have no
+            # `bucket` field; they are bucket 0 by definition, and tail_n falls back to df.
+            state = {}
+            for document in collection.find(
+                {"band_hash": {"$in": wanted}, "bucket": {"$in": [0, None]}},
+                {"_id": 0, "band_hash": 1, "df": 1, "tail": 1, "tail_n": 1},
+            ):
+                df = int(document.get("df") or 0)
+                state[document["band_hash"]] = {
+                    "df": df,
+                    "tail": int(document.get("tail") or 0),
+                    "tail_n": int(document["tail_n"]) if document.get("tail_n") is not None else df,
+                }
+            band_updates = []
+            for band_hash in wanted:
+                function_ids = list(band_data[band_hash])
+                current = state.get(band_hash, {"df": 0, "tail": 0, "tail_n": 0})
+                tail, tail_n = current["tail"], current["tail_n"]
+                offset = 0
+                touched_bucket_zero = False
+                while offset < len(function_ids):
+                    if tail_n >= bucket_size:
+                        tail += 1
+                        tail_n = 0
+                    space = bucket_size - tail_n
+                    slice_ids = function_ids[offset : offset + space]
+                    update = {"$push": {"function_ids": {"$each": slice_ids}}}
+                    if tail == 0:
+                        # bucket 0 carries the whole hash's bookkeeping, so its own write does both
+                        touched_bucket_zero = True
+                        update["$inc"] = {"df": len(function_ids)}
+                    band_updates.append(UpdateOne({"band_hash": band_hash, "bucket": tail}, update, upsert=True))
+                    tail_n += len(slice_ids)
+                    offset += len(slice_ids)
+                # tail/tail_n are owned by this trailing write alone, so it and a bucket-0 $push in
+                # the same unordered bulk touch disjoint fields and their order does not matter
+                trailing = {"$set": {"tail": tail, "tail_n": tail_n}}
+                if not touched_bucket_zero:
+                    # the postings all landed above bucket 0, so its df needs this write too
+                    trailing["$inc"] = {"df": len(function_ids)}
+                # upsert only when no bucket-0 $push precedes it, so one batch never carries two
+                # upserts for the same new document
+                band_updates.append(UpdateOne({"band_hash": band_hash, "bucket": 0}, trailing, upsert=not touched_bucket_zero))
+            if band_updates:
+                collection.bulk_write(band_updates, ordered=False)
+                num_band_updates += len(band_updates)
+        return num_band_updates
+
+    def _recomputeBandBookkeeping(self, collection, band_hashes: List[int]) -> None:
+        """Restore bucket 0's df/tail/tail_n for the given hashes from the buckets that remain.
+
+        Needed after a pull, which can empty a bucket anywhere in the chain and leaves the
+        counters describing a state that no longer exists. Scoped to the hashes just touched, so
+        the cost follows the deletion rather than the corpus.
+
+        A deletion can also leave a gap - bucket 2 surviving while bucket 1 emptied and was
+        removed - so `tail` is taken as the highest bucket that still exists rather than derived
+        from df, and `tail_n` from that bucket's own length. Placement then appends to a
+        part-filled tail, which is correct if untidy; buckets are a cap, not a promise of packing.
+        """
+        if not band_hashes:
+            return
+        totals = {}
+        for row in collection.aggregate(
+            [
+                {"$match": {"band_hash": {"$in": band_hashes}}},
+                {"$project": {"band_hash": 1, "bucket": {"$ifNull": ["$bucket", 0]}, "n": {"$size": {"$ifNull": ["$function_ids", []]}}}},
+                {"$group": {"_id": "$band_hash", "df": {"$sum": "$n"}, "tail": {"$max": "$bucket"}, "buckets": {"$push": {"bucket": "$bucket", "n": "$n"}}}},
+            ]
+        ):
+            tail = int(row["tail"] or 0)
+            tail_n = 0
+            for entry in row["buckets"]:
+                if int(entry["bucket"] or 0) == tail:
+                    tail_n = int(entry["n"])
+                    break
+            totals[row["_id"]] = (int(row["df"]), tail, tail_n)
+        if not totals:
+            return
+        # upsert while postings survive: bucket 0 holds the only copy of these counters, and a hash
+        # whose bucket 0 is missing (e.g. removed before this was fixed) would otherwise stay
+        # invisible to the cutoff and restart placement at bucket 0 on the next push
+        updates = [
+            UpdateOne({"band_hash": band_hash, "bucket": 0}, {"$set": {"df": df, "tail": tail, "tail_n": tail_n}}, upsert=df > 0)
+            for band_hash, (df, tail, tail_n) in totals.items()
+        ]
+        collection.bulk_write(updates, ordered=False)
 
     def purgeEmptyBandDocuments(self) -> int:
         """Remove the empty band documents that deletions left behind before #149; returns how many."""
         removed = 0
         for band_number in range(self._storage_config.STORAGE_NUM_BANDS):
-            removed += self._getDb()["band_%d" % band_number].delete_many(self._EMPTY_BAND_DOCUMENT).deleted_count
+            # a bucketed hash's bucket 0 can be empty yet still carry df/tail/tail_n for postings in
+            # higher buckets; that is bookkeeping, not residue
+            residue = {"$and": [self._EMPTY_BAND_DOCUMENT, {"$nor": [{"bucket": 0, "df": {"$gt": 0}}]}]}
+            removed += self._getDb()["band_%d" % band_number].delete_many(residue).deleted_count
         return removed
 
     def _collectBandHashTargets(self, function_id_to_minhash: Dict[int, "MinHash"]):
@@ -1517,8 +1665,13 @@ class MongoDbStorage(StorageInterface):
             return [{"$match": {"band_hash": {"$in": band_hashes}, "df": {"$lte": cutoff}}}]
         # no trustworthy df yet: fall back to measuring the list, which is correct but only
         # saves the transfer, not the read
+        # Only bucket 0 is measured. Under bucketing a hash over the cutoff is split, and each of
+        # its buckets on its own could be shorter than the cutoff - measuring per document would
+        # admit exactly the posting lists the cutoff exists to reject. Bucket 0 of such a hash is
+        # full (one bucket's worth, far above any sane cutoff), so testing it alone is correct,
+        # and a hash that never spilled has all of its postings there anyway.
         return [
-            {"$match": {"band_hash": {"$in": band_hashes}}},
+            {"$match": {"band_hash": {"$in": band_hashes}, "bucket": {"$in": [0, None]}}},
             {"$match": {"$expr": {"$lte": [{"$size": {"$ifNull": ["$function_ids", []]}}, cutoff]}}},
         ]
 
@@ -1807,17 +1960,61 @@ class MongoDbStorage(StorageInterface):
         Needed once on a database built before df existed. Until it has run, a configured
         cutoff still applies - it just cannot skip the read, so it saves less.
         """
+        bucket_size = self._bandBucketSize()
         num_updated = 0
         for band_number in range(self._storage_config.STORAGE_NUM_BANDS):
             collection = self._getDb()["band_%d" % band_number]
-            result = collection.update_many({}, [{"$set": {"df": {"$size": {"$ifNull": ["$function_ids", []]}}}}])
-            num_updated += result.modified_count
+            if bucket_size:
+                num_updated += self._rebuildBandBookkeepingBucketed(collection)
+            else:
+                result = collection.update_many({}, [{"$set": {"df": {"$size": {"$ifNull": ["$function_ids", []]}}}}])
+                num_updated += result.modified_count
             collection.create_index([("band_hash", 1), ("df", 1)])
+            collection.create_index([("band_hash", 1), ("bucket", 1)])
             if progress_reporter is not None:
                 progress_reporter.step()
         self._setBandDfIndexComplete(True)
         LOGGER.info("Band df index rebuilt over %d documents.", num_updated)
         return num_updated
+
+    def _rebuildBandBookkeepingBucketed(self, collection) -> int:
+        """Set df/tail/tail_n on bucket 0 for every hash in one band collection; returns hashes done.
+
+        Doubles as the migration onto the bucketed shape. A collection written before bucketing
+        was switched on has one document per hash and no `bucket` field, which the bucketed
+        upsert filter `{band_hash, bucket: 0}` would not match - it would insert a *second*
+        document for the hash and split the posting list invisibly. Stamping `bucket: 0` here is
+        what makes those documents addressable, so this has to run after enabling the knob and
+        before the next write.
+
+        Writes in batches rather than one bulk_write over the whole collection, because the
+        rebuild is the one operation whose cost does follow corpus size and a single batch of
+        millions of updates is how an offline rebuild turns into an outage.
+        """
+        num_hashes = 0
+        pending = []
+        for row in collection.aggregate(
+            [
+                {"$project": {"band_hash": 1, "bucket": {"$ifNull": ["$bucket", 0]}, "n": {"$size": {"$ifNull": ["$function_ids", []]}}}},
+                {"$group": {"_id": "$band_hash", "df": {"$sum": "$n"}, "tail": {"$max": "$bucket"}, "buckets": {"$push": {"bucket": "$bucket", "n": "$n"}}}},
+            ],
+            allowDiskUse=True,
+        ):
+            tail = int(row["tail"] or 0)
+            tail_n = 0
+            for entry in row["buckets"]:
+                if int(entry["bucket"] or 0) == tail:
+                    tail_n = int(entry["n"])
+                    break
+            pending.append(UpdateOne({"band_hash": row["_id"], "bucket": {"$in": [0, None]}}, {"$set": {"bucket": 0, "df": int(row["df"]), "tail": tail, "tail_n": tail_n}}))
+            if len(pending) >= 5000:
+                collection.bulk_write(pending, ordered=False)
+                num_hashes += len(pending)
+                pending = []
+        if pending:
+            collection.bulk_write(pending, ordered=False)
+            num_hashes += len(pending)
+        return num_hashes
 
     def isPicHashCountIndexComplete(self) -> bool:
         settings_document = self._getDb().settings.find_one({}, {self._PICHASH_COUNT_SETTING: 1})
@@ -2262,6 +2459,9 @@ class MongoDbStorage(StorageInterface):
             # correct df - _updateBands maintains it by $inc from the first write - that no index
             # could serve, so STORAGE_BAND_DF_CUTOFF would silently fall back to scanning
             self._getDb()[c].create_index([("band_hash", 1), ("df", 1)])
+            # bucketed writes upsert on (band_hash, bucket); without this the upsert scans the
+            # hash's buckets and, worse, two concurrent writers can both miss and insert
+            self._getDb()[c].create_index([("band_hash", 1), ("bucket", 1)])
         # re-add minhashes in batches
         total_functions = self._getDb().functions.count_documents(filter={})
         minhash_functions = 0

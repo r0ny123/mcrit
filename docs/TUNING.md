@@ -147,6 +147,46 @@ Tuning the cutoff at 12,500 samples, shortlist held at 100: cutoff 1000 gives a 
 200 gives 0.374 s, 100 gives 0.332 s — all three at top-10 and top-25 recall of 1.000. 200 is
 where the traversal stops scaling; below that there is little left to win.
 
+## Growing past ~270,000 samples: `STORAGE_BAND_BUCKET_SIZE`
+
+Separate from latency, and a hard stop rather than a slowdown. A band posting list is a
+`function_ids` array inside one document, and MongoDB caps a document at 16 MB. Measured by
+pushing ids into one document until the write is refused, a document holds about **1.35 million
+ids** while they fit in 32 bits and about **1.05 million** once they need BSON int64. On a
+7,244-sample real corpus the longest posting list across all 20 bands held 36,183 ids, so
+extrapolating it linearly puts the ceiling near **270,000 samples**.
+
+What happens there is not gradual: `$push` raises `BSONObj size ... is invalid` and the write
+fails, so indexing stops for any sample containing a function whose band hash is already at the
+cap. **Adding machines does not help** - a document cannot span shards, so this is not something
+sharding fixes.
+
+    STORAGE_BAND_BUCKET_SIZE = 100000
+
+splits a hash across `(band_hash, bucket)` documents once it would exceed that. `0` (the default)
+keeps the single-document shape. Set it comfortably above `STORAGE_BAND_DF_CUTOFF`: the cutoff
+selects hashes by the total `df` stored on bucket 0, and that stays exact only while an
+under-cutoff posting list still fits in a single bucket. At the suggested values (100,000 against
+a cutoff of 200) there is a 500x margin.
+
+**Enabling it on an existing database requires a rebuild first:**
+
+    curl http://localhost:8000/rebuild_band_df_index
+
+Documents written before the knob was on have no `bucket` field, so the upsert filter
+`{band_hash, bucket: 0}` will not match them - it would insert a second document for the hash and
+split the posting list invisibly, which no error would report. The rebuild stamps `bucket: 0` and
+is what makes them addressable. Run it after setting the knob and before the next ingest.
+
+Matching results are unchanged with it on or off; the tests assert identical matches against a
+corpus where the split is forced.
+
+The corpus that hits this ceiling depends on more than sample count. Malpedia is curated and
+deduplicated; a collection carrying many near-duplicate packed variants concentrates `df` faster
+and would reach the cap sooner. `df` on bucket 0 is worth watching:
+
+    db.band_0.find({}, {band_hash: 1, df: 1}).sort({df: -1}).limit(5)
+
 ## Caveats
 
 * Constants are measured on one corpus and one host. The relationships generalise; the specific
