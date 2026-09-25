@@ -17,6 +17,17 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
+- **`GET /samples/{id}/smda` and `McritClient.getSmdaReportForSample` rebuild a sample's SMDA
+  report from storage.** `SampleEntry` keeps `smda_extras` - the report's top-level fields and
+  metadata it holds no field for, minus `xcfg` - and the disassembly comes from the functions'
+  blobs in one batched fetch. The example report round-trips byte for byte. NOTE that entries
+  stored before this carry no extras and rebuild with an empty report's defaults for them, and
+  functions whose disassembly was dropped are absent from the rebuilt xcfg ([#94]).
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
 - **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
   `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
   `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
@@ -31,13 +42,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
   as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
   Family entries carry no sample lists ([#207]).
-
-- **`GET /samples/{id}/smda` and `McritClient.getSmdaReportForSample` rebuild a sample's SMDA
-  report from storage.** `SampleEntry` keeps `smda_extras` - the report's top-level fields and
-  metadata it holds no field for, minus `xcfg` - and the disassembly comes from the functions'
-  blobs in one batched fetch. The example report round-trips byte for byte. NOTE that entries
-  stored before this carry no extras and rebuild with an empty report's defaults for them, and
-  functions whose disassembly was dropped are absent from the rebuilt xcfg ([#94]).
 
 ### Fixed
 
