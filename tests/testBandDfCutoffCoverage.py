@@ -228,7 +228,9 @@ class BandDfCutoffCoverageEndToEndTest(unittest.TestCase):
         with mock.patch.object(application_routes, "create_index", return_value=self.index), mock.patch.object(McritConfig, "AUTH_TOKEN", ""):
             self.app = falcon.testing.TestClient(application_routes.get_app())
 
-    def _forward(self, url, headers=None, params=None):
+    def _forward(self, url, headers=None, params=None, timeout=None):
+        # every McritClient request carries a timeout (#216); None would wait on a hung server forever
+        self.assertIsNotNone(timeout)
         path = url.replace("http://mcrit.test", "")
         result = self.app.simulate_get(path, params=params, headers=headers)
         response = mock.MagicMock(status_code=result.status_code, url=url, text=result.text)

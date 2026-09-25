@@ -258,7 +258,7 @@ class McritClient:
         configured one. Answers the job id; the job's result is the coverage report
         """
         params = {} if band_df_cutoff is None else {"band_df_cutoff": band_df_cutoff}
-        response = requests.get(f"{self.mcrit_server}/band_df_cutoff_coverage", headers=self.headers, params=params)
+        response = requests.get(f"{self.mcrit_server}/band_df_cutoff_coverage", headers=self.headers, params=params, timeout=self.timeout)
         if self.raw:
             return response
         return self._handle(response)
