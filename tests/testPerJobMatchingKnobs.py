@@ -213,6 +213,37 @@ class JobCacheTest(unittest.TestCase):
         self.assertEqual(shortlisted, self._requestThroughTheApi())
         self.assertNotIn("cacheable", self.index.getJobData(shortlisted))
 
+    def test_every_matching_job_method_resolves_its_knobs(self):
+        """All six MinHashIndex job methods, as the server and a direct caller reach them."""
+        submitted = {}
+        remote = MinHashIndex.__mro__[1]
+        minhash_config = self.index.config.MINHASH_CONFIG
+        expected = {
+            "minhash_threshold": minhash_config.MINHASH_MATCHING_THRESHOLD,
+            "pichash_size": minhash_config.PICHASH_SIZE,
+            "band_matches_required": minhash_config.BAND_MATCHES_REQUIRED,
+            "band_df_cutoff": 0,
+        }
+        calls = {
+            "getMatchesForSample": ((7,), True),
+            "getMatchesForSmdaReport": (({},), True),
+            "getMatchesForMappedBinary": ((b"MZ", 0x1000), True),
+            "getMatchesForUnmappedBinary": ((b"MZ",), True),
+            "getMatchesForSampleVs": ((7, 8), False),
+            "getMatchesForSampleVsGroup": ((7, [8, 9]), False),
+        }
+        for name, (args, takes_shortlist) in calls.items():
+            with self.subTest(name), patch.object(remote, name, create=True) as submit:
+                submit.side_effect = lambda *a, **kw: submitted.__setitem__("kwargs", kw) or "job"
+                getattr(self.index, name)(*args, username="alice")
+                kwargs = submitted["kwargs"]
+                self.assertEqual("alice", kwargs["username"])
+                self.assertEqual(expected, {knob: kwargs[knob] for knob in expected})
+                self.assertEqual(takes_shortlist, "shortlist_size" in kwargs)
+                if not takes_shortlist:
+                    with self.assertRaises(TypeError):
+                        getattr(self.index, name)(*args, shortlist_size=3)
+
     def test_direct_callers_are_keyed_on_the_values_too(self):
         """Resolution happens in MinHashIndex, so a script or library caller gets it as the server does."""
         minhash_config = self.index.config.MINHASH_CONFIG
@@ -383,6 +414,8 @@ class MatchingInfoTest(unittest.TestCase):
         index, worker, sample_id = self._index(configured(shortlist_size=1))
         info = worker.getMatchesForSampleVs(sample_id, sample_id + 1)["info"]["matching"]
         self.assertIsNone(info["applied"]["shortlist_size"])
+        group_info = worker.getMatchesForSampleVsGroup(sample_id, [sample_id + 1, sample_id + 2])["info"]["matching"]
+        self.assertIsNone(group_info["applied"]["shortlist_size"])
         self.assertEqual({}, info["fallbacks"])
 
     def test_without_a_minhash_stage_neither_shortlist_nor_cutoff_applies(self):
@@ -494,9 +527,20 @@ class ForwardingTest(unittest.TestCase):
             "MatcherQuery  ": lambda: worker.getMatchesForUnmappedBinary(b"", **knobs),
         }
         for matcher_name, call in cases.items():
-            with self.subTest(matcher_name), patch(f"mcrit.Worker.{matcher_name.strip()}") as matcher, patch("mcrit.Worker.SmdaReport"), patch("mcrit.Worker.Disassembler"):
-                call()
-                self.assertEqual(knobs, {knob: matcher.call_args.kwargs[knob] for knob in knobs})
+            for fell_back in (False, True):
+                with (
+                    self.subTest(matcher_name, fell_back=fell_back),
+                    patch(f"mcrit.Worker.{matcher_name.strip()}") as matcher,
+                    patch("mcrit.Worker.SmdaReport"),
+                    patch("mcrit.Worker.Disassembler"),
+                ):
+                    matcher.return_value.fellBackUnforeseen.return_value = fell_back
+                    matcher.return_value.getMatchesForSample.return_value = {"info": {}}
+                    matcher.return_value.getMatchesForSmdaReport.return_value = {"info": {}}
+                    result = call()
+                    self.assertEqual(knobs, {knob: matcher.call_args.kwargs[knob] for knob in knobs})
+                    # a fallback its arguments did not foresee keeps the job from being reused
+                    self.assertEqual(fell_back, isinstance(result, UncacheableResult))
 
     def test_vs_matching_takes_the_cutoff_and_no_shortlist(self):
         worker = Worker.__new__(Worker)
@@ -637,8 +681,8 @@ class BucketSizeTest(unittest.TestCase):
     def _config(self):
         mcrit_config = configured(band_df_cutoff=50)
         server, port = getTestMongoServerAndPort()
-        # never the default server: the storage connects lazily today, but nothing here should
-        # depend on that to stay away from a database that is not a test one
+        # the test server, as every mongo-backed test resolves it: the storage connects lazily
+        # and these tests never make it connect, but its configuration should not name another
         mcrit_config.STORAGE_CONFIG = StorageConfig(STORAGE_METHOD="mongodb", STORAGE_SERVER=server, STORAGE_PORT=port, STORAGE_BAND_DF_CUTOFF=50, STORAGE_BAND_BUCKET_SIZE=100)
         return mcrit_config
 

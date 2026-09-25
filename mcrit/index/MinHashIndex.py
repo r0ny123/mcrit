@@ -402,6 +402,10 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
     # a caller left out (#217). The server resolves them as well; resolving again is a no-op.
 
     def _submitMatchingJob(self, method_name, job_args, knobs, job_options, with_shortlist=True):
+        if not with_shortlist and {"shortlist_size", "shortlist_unavailable"} & set(job_options):
+            # refused here rather than stored as an argument the worker method does not take,
+            # which would fail the job on every attempt
+            raise TypeError(f"{method_name} takes no shortlist: it is restricted to the samples it names.")
         resolved = resolveMatchingParams(knobs, self.config, storage=self._storage, with_shortlist=with_shortlist)
         return getattr(super(), method_name)(*job_args, **resolved, **job_options)
 
