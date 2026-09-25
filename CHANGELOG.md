@@ -154,6 +154,17 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   documents and 2.38 GB of indexes). Also fixed: **paging stopped early whenever a page ended on
   id 0** (function 0, sample 0, the unknown family), as the cursor was tested for truthiness
   ([mcritweb#59]).
+- **A function name search that found nothing examined every function document** - the
+  reported ~30 s on larger databases - since an unanchored case-insensitive regex cannot bound an
+  index. `findFunctionByString` now lists the distinct names over the `function_name` index,
+  matches the term against them in Python and hands MongoDB an `$in` / `$nin`. On two million
+  functions with 5,000 distinct names, a no-result search went 4.2 s -> 22 ms and a sorted
+  search 1.5 s -> 62 ms. NOTE that a common term at the default sort got slower by tens of
+  milliseconds (`main` 15 ms -> 78 ms), and above 10,000 distinct names the search keeps the
+  regex, unbounded as before ([mcritweb#76]). Finding out that a corpus is past that cap is not
+  free - on 11.6M functions with 314,144 distinct names the capped scan takes ~0.9 s - so each
+  process remembers the over-cap verdict for an hour instead of rescanning on every search. Only
+  that verdict is kept, never the names, so writes need not invalidate it.
 
 
 ## [1.9.0] - 2026-09-08
@@ -444,3 +455,4 @@ date, the version, and what changed.
 [#209]: https://github.com/danielplohmann/mcrit/issues/209
 [mcritweb#47]: https://github.com/fkie-cad/mcritweb/issues/47
 [mcritweb#59]: https://github.com/fkie-cad/mcritweb/issues/59
+[mcritweb#76]: https://github.com/fkie-cad/mcritweb/issues/76
