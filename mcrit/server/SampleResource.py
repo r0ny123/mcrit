@@ -213,7 +213,15 @@ class SampleResource:
 
     @timing
     def on_get_binary(self, req, resp, sample_id=None):
-        """The raw binary the sample was submitted as, when STORAGE_KEEP_SUBMITTED_BINARIES kept it (#95)."""
+        """The raw binary the sample was submitted as, when STORAGE_KEEP_SUBMITTED_BINARIES kept it
+        and STORAGE_SERVE_SUBMITTED_BINARIES allows handing it out (#95)."""
+        # checked first, and answered the same for every sample: with serving off, the route does
+        # not even tell which samples exist or have a binary kept
+        if not self.index.isServingSampleBinaries():
+            resp.data = jsonify({"status": "failed", "data": {"message": "Serving stored binaries is disabled on this instance (STORAGE_SERVE_SUBMITTED_BINARIES)."}})
+            resp.status = falcon.HTTP_403
+            db_log_msg(self.index, req, "SampleResource.on_get_binary - failed - serving binaries is disabled.")
+            return
         if not self.index.isSampleId(sample_id):
             resp.data = jsonify({"status": "failed", "data": {"message": "We don't have a sample with that id."}})
             resp.status = falcon.HTTP_404

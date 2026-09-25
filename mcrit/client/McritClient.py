@@ -412,7 +412,7 @@ class McritClient:
 
     def getSampleBinary(self, sample_id):
         """
-        The raw binary the sample was submitted as, when the server keeps them (STORAGE_KEEP_SUBMITTED_BINARIES); None otherwise
+        The raw binary the sample was submitted as, when the server keeps them (STORAGE_KEEP_SUBMITTED_BINARIES) and serves them (STORAGE_SERVE_SUBMITTED_BINARIES); None otherwise
         """
         response = requests.get(f"{self.mcrit_server}/samples/{sample_id}/binary", headers=self.headers)
         if self.raw:

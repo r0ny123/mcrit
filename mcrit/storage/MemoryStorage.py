@@ -1,5 +1,6 @@
 import datetime
 import functools
+import hashlib
 import io
 import logging
 import operator
@@ -148,7 +149,8 @@ class MemoryStorage(StorageInterface):
         self._db_timestamp = self._getCurrentTimestamp()
         self._families = {}
         self._samples = {}
-        self._sample_binaries: Dict[int, bytes] = {}
+        # keyed by sha256 like MongoDbStorage's bucket: the bytes, and the ids of the samples they belong to (#95)
+        self._sample_binaries: Dict[str, Tuple[bytes, Set[int]]] = {}
         self._functions = {}
         self._query_samples = {}
         self._query_functions = {}
@@ -233,7 +235,7 @@ class MemoryStorage(StorageInterface):
         self._updateFamilyStats(sample_entry.family_id, -1, -len(function_ids), -int(sample_entry.is_library))
         # remove sample
         del self._samples[sample_id]
-        self._sample_binaries.pop(sample_id, None)
+        self.deleteSampleBinary(sample_id)
         if sample_entry.family_id != 0 and not any(s.family_id == sample_entry.family_id for s in self._samples.values()):
             self._families.pop(sample_entry.family_id, None)
         return True
@@ -338,21 +340,39 @@ class MemoryStorage(StorageInterface):
     def storeSampleBinary(self, sample_id: int, binary: bytes) -> bool:
         if not self.isSampleId(sample_id):
             return False
-        self._sample_binaries[sample_id] = bytes(binary)
+        binary = bytes(binary)
+        sha256 = hashlib.sha256(binary).hexdigest()
+        for other_sha256 in [key for key, (_, sample_ids) in self._sample_binaries.items() if sample_id in sample_ids and key != sha256]:
+            self._releaseSampleBinary(other_sha256, sample_id)
+        self._sample_binaries.setdefault(sha256, (binary, set()))[1].add(sample_id)
         return True
 
+    def _releaseSampleBinary(self, sha256: str, sample_id: int) -> None:
+        sample_ids = self._sample_binaries[sha256][1]
+        sample_ids.discard(sample_id)
+        if not sample_ids:
+            del self._sample_binaries[sha256]
+
+    def _findSampleBinary(self, sample_id: int) -> Optional[str]:
+        return next((sha256 for sha256, (_, sample_ids) in self._sample_binaries.items() if sample_id in sample_ids), None)
+
     def getSampleBinary(self, sample_id: int) -> Optional[bytes]:
-        return self._sample_binaries.get(sample_id)
+        sha256 = self._findSampleBinary(sample_id)
+        return self._sample_binaries[sha256][0] if sha256 is not None else None
 
     def hasSampleBinary(self, sample_id: int) -> bool:
-        return sample_id in self._sample_binaries
+        return self._findSampleBinary(sample_id) is not None
 
     def openSampleBinary(self, sample_id: int) -> Optional[BinaryStream]:
-        binary = self._sample_binaries.get(sample_id)
+        binary = self.getSampleBinary(sample_id)
         return io.BytesIO(binary) if binary is not None else None
 
     def deleteSampleBinary(self, sample_id: int) -> bool:
-        return self._sample_binaries.pop(sample_id, None) is not None
+        sha256 = self._findSampleBinary(sample_id)
+        if sha256 is None:
+            return False
+        self._releaseSampleBinary(sha256, sample_id)
+        return True
 
     def recomputeFamilyStats(self, progress_reporter=None) -> Dict[str, Any]:
         report: Dict[str, Any] = {"num_families": 0, "num_families_corrected": 0, "num_families_created": 0, "corrections": {}}

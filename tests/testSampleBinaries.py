@@ -2,12 +2,15 @@ import io
 import json
 import unittest
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import falcon
 import falcon.testing
 
 from mcrit.client.McritClient import McritClient
+from mcrit.config.StorageConfig import StorageConfig
+from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.server.SampleResource import SampleResource
 from mcrit.Worker import Worker
 
@@ -21,8 +24,37 @@ class BinaryRouteTest(unittest.TestCase):
     def _request():
         return falcon.Request(falcon.testing.create_environ(path="/samples/1/binary"))
 
-    def test_the_stored_binary_is_served_as_octets(self):
+    @staticmethod
+    def _servingIndex():
         index = MagicMock()
+        index.isServingSampleBinaries.return_value = True
+        return index
+
+    def test_nothing_is_served_while_serving_is_off(self):
+        """Keeping binaries and serving them are separate switches: with serving off the route
+        refuses every sample alike, without looking up whether it exists or has a binary."""
+        index = MagicMock()
+        index.isServingSampleBinaries.return_value = False
+        index.isSampleId.return_value = True
+        index.openSampleBinary.return_value = io.BytesIO(b"MZ")
+        resp = falcon.Response()
+        SampleResource(index).on_get_binary(self._request(), resp, 1)
+        self.assertEqual(falcon.HTTP_403, resp.status)
+        self.assertIsNone(resp.stream)
+        assert resp.data is not None
+        self.assertEqual("failed", json.loads(resp.data)["status"])
+        index.isSampleId.assert_not_called()
+        index.openSampleBinary.assert_not_called()
+        index.getSampleBinary.assert_not_called()
+
+    def test_serving_is_off_by_default_and_follows_its_own_switch(self):
+        self.assertFalse(StorageConfig().STORAGE_SERVE_SUBMITTED_BINARIES)
+        self.assertFalse(MinHashIndex.isServingSampleBinaries(cast(Any, SimpleNamespace(_storage_config=StorageConfig(STORAGE_KEEP_SUBMITTED_BINARIES=True)))))
+        serving = StorageConfig(STORAGE_SERVE_SUBMITTED_BINARIES=True)
+        self.assertTrue(MinHashIndex.isServingSampleBinaries(cast(Any, SimpleNamespace(_storage_config=serving))))
+
+    def test_the_stored_binary_is_served_as_octets(self):
+        index = self._servingIndex()
         index.isSampleId.return_value = True
         index.openSampleBinary.return_value = io.BytesIO(b"MZ\x90\x00binary")
         resp = falcon.Response()
@@ -35,7 +67,7 @@ class BinaryRouteTest(unittest.TestCase):
     def test_the_binary_is_streamed_rather_than_read_into_memory(self):
         """The point of serving through openSampleBinary: the response carries the handle, so
         the file is read out chunk by chunk by the server instead of being buffered whole."""
-        index = MagicMock()
+        index = self._servingIndex()
         index.isSampleId.return_value = True
         handle = io.BytesIO(b"MZ" * 100)
         index.openSampleBinary.return_value = handle
@@ -48,7 +80,7 @@ class BinaryRouteTest(unittest.TestCase):
 
     def test_a_gridfs_handle_sets_the_content_length(self):
         """GridOut carries `length`; BytesIO does not, and an absent one must not be invented."""
-        index = MagicMock()
+        index = self._servingIndex()
         index.isSampleId.return_value = True
         index.openSampleBinary.return_value = SimpleNamespace(read=lambda size=-1: b"MZ", close=lambda: None, length=1234)
         resp = falcon.Response()
@@ -62,7 +94,7 @@ class BinaryRouteTest(unittest.TestCase):
         self.assertIsNone(resp.content_length)
 
     def test_an_unknown_sample_and_a_sample_without_binary_are_404(self):
-        index = MagicMock()
+        index = self._servingIndex()
         index.isSampleId.return_value = False
         resp = falcon.Response()
         SampleResource(index).on_get_binary(self._request(), resp, 1)

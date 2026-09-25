@@ -527,7 +527,10 @@ class StorageInterface:
         raise NotImplementedError
 
     def storeSampleBinary(self, sample_id: int, binary: bytes) -> bool:
-        """Keep the raw binary a sample was submitted as; replaces an earlier one (#95)."""
+        """Keep the raw binary a sample was submitted as; replaces an earlier one (#95).
+
+        Binaries are stored once per content (sha256), listing the samples they belong to, so
+        storing bytes that are already kept only adds the sample to them."""
         raise NotImplementedError
 
     def getSampleBinary(self, sample_id: int) -> Optional[bytes]:
@@ -549,7 +552,8 @@ class StorageInterface:
         raise NotImplementedError
 
     def deleteSampleBinary(self, sample_id: int) -> bool:
-        """Drop the raw binary kept for the sample; True when there was one (#95)."""
+        """Take the sample off the raw binary kept for it, deleting the binary once no sample is
+        left on it; True when the sample had one (#95)."""
         raise NotImplementedError
 
     def recomputeFamilyStats(self, progress_reporter=None) -> Dict[str, Any]:
