@@ -580,6 +580,18 @@ class StorageInterface:
         """
         raise NotImplementedError
 
+    def getFamilyEntriesByIds(self, family_ids: List[int]) -> Dict[int, "FamilyEntry"]:
+        """Batch form of getFamily: one lookup for many ids.
+
+        Args:
+            family_ids: family ids to resolve
+
+        Returns:
+            family_id -> FamilyEntry for every id that exists; missing ids are absent.
+            Entries carry no sample lists, same as getFamily.
+        """
+        raise NotImplementedError
+
     # TODO find out if it is really possible that a Function Object has no MinHash.
     def getMinHashByFunctionId(self, function_id: int) -> Optional[bytes]:
         """Get the MinHash's bytes of a function, if the function exists and has a MinHash object.
