@@ -260,6 +260,19 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   collection still fails, now naming it ([#42]).
 
 
+- **`McritClient` waited forever on a server that did not answer.** None of its 55 requests passed
+  a timeout, and requests has none by default, so a server that was down behind a firewall, or up
+  but hung, blocked the caller for good: against a socket that accepts and never replies, a
+  `getVersion()` was still waiting after 15 s and would have waited indefinitely. In MCRITweb that
+  is a gunicorn request thread, which gunicorn's own `-t` does not reclaim under the `gthread`
+  worker. Every request now passes `timeout=`, from a new `timeout` argument, also settable as
+  `client.timeout`, that defaults to `(10, None)`: the connect is bounded at 10 s, and the read is
+  left open, because `/import`, `/export` and `/status` on a large corpus answer only once their
+  work is done. A caller that knows its bound sets one; MCRITweb, behind an NGINX that gives up
+  after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
+  `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
+  client's source and fails for any request added without a timeout.
+
 ## [1.9.0] - 2026-09-08
 
 Correctness and operator-recovery release, plus a large `getUniqueBlocks` speedup. **Matching
