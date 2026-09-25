@@ -5,6 +5,13 @@ from bson import json_util
 
 LOGGER = logging.getLogger(__name__)
 
+# Most ids one POST /samples/ids or POST /families/ids request may ask for. A sample entry
+# serialises to roughly 0.6 KB of JSON, so the cap bounds one answer near 6 MB, the size of a
+# large matching report, and the $in array handed to MongoDB near 150 KB, far below its 16 MB
+# document limit. It still covers every sample of a 7,244-sample corpus in one request; a caller
+# holding more ids splits them across several requests.
+BATCH_LOOKUP_MAX_IDS = 10000
+
 
 def get_username(req):
     """The user a request was made for, as MCRITweb and McritClient send it, or None."""

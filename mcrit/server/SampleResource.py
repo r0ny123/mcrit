@@ -4,7 +4,7 @@ import re
 import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
-from mcrit.server.utils import db_log_msg, get_username, jsonify, timing
+from mcrit.server.utils import BATCH_LOOKUP_MAX_IDS, db_log_msg, get_username, jsonify, timing
 
 
 class SampleResource:
@@ -57,6 +57,7 @@ class SampleResource:
 
     @timing
     def on_post_by_ids(self, req, resp):
+        """Look up several samples at once; the body is a comma-separated list of sample_ids, at most BATCH_LOOKUP_MAX_IDS of them. Negative ids name query samples, as for GET /samples/<id>. Answers 200 with the entries keyed by sample_id, unknown ids left out, and 400 for an empty or malformed body or one naming more ids than the cap."""
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -70,6 +71,17 @@ class SampleResource:
         # assume the POST body consists of comma separated sample_ids (negative ids are query samples)
         post_body = req.stream.read()
         if re.match(rb"^-?\d+(?:[\s]*,[\s]*-?\d+)*$", post_body):
+            id_count = post_body.count(b",") + 1
+            if id_count > BATCH_LOOKUP_MAX_IDS:
+                resp.data = jsonify(
+                    {
+                        "status": "failed",
+                        "data": {"message": f"Too many sample_ids: {id_count} requested, at most {BATCH_LOOKUP_MAX_IDS} per request."},
+                    }
+                )
+                resp.status = falcon.HTTP_400
+                db_log_msg(self.index, req, f"SampleResource.on_post_by_ids - failed - {id_count} ids exceed the cap of {BATCH_LOOKUP_MAX_IDS}.")
+                return
             target_sample_ids = [int(sample_id) for sample_id in post_body.split(b",")]
             sample_entries = self.index.getSamplesByIds(target_sample_ids)
             data = {sample_id: sample_entry.toDict() for sample_id, sample_entry in sample_entries.items()}
@@ -77,6 +89,12 @@ class SampleResource:
             resp.status = falcon.HTTP_200
             db_log_msg(self.index, req, "SampleResource.on_post_by_ids - success.")
             return
+        resp.data = jsonify(
+            {
+                "status": "failed",
+                "data": {"message": "The POST body must be a comma-separated list of sample_ids."},
+            }
+        )
         resp.status = falcon.HTTP_400
         db_log_msg(self.index, req, "SampleResource.on_post_by_ids - failed - invalid body format.")
 

@@ -332,6 +332,8 @@ class McritClient:
         """
         Get all FamilyEntry objects identified by the provided list of family_ids, in a dict with <family_id> as key.
         Entries carry no sample lists, like getFamily(..., with_samples=False).
+        The server answers at most 10,000 ids per request (BATCH_LOOKUP_MAX_IDS in mcrit.server.utils)
+        and a longer list with a 400, so split a longer list across several calls.
         """
         if not family_ids:
             return {}
@@ -430,6 +432,8 @@ class McritClient:
         """
         Get all SampleEntries identified by the provided list of sample_ids, in a dict with <sample_id> as key.
         Negative ids are resolved against query samples, like getSampleById.
+        The server answers at most 10,000 ids per request (BATCH_LOOKUP_MAX_IDS in mcrit.server.utils)
+        and a longer list with a 400, so split a longer list across several calls.
         """
         if not sample_ids:
             return {}

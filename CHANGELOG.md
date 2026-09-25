@@ -22,7 +22,10 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
   206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
   as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
-  Family entries carry no sample lists ([#207]).
+  One request may name at most **10,000 ids**, and more answer 400 saying so rather than building
+  an unbounded answer: a sample entry is about 0.6 KB of JSON, so the cap holds one answer near
+  6 MB while still covering a 7,244-sample corpus in one call. The client calls do not split a
+  longer list for you. Family entries carry no sample lists ([#207]).
 
 ## [1.11.0] - 2026-09-25
 

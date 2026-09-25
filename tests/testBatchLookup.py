@@ -1,3 +1,5 @@
+import ast
+import inspect
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -9,6 +11,7 @@ from mcrit.client.McritClient import McritClient, McritNotFound
 from mcrit.server.application_routes import get_app
 from mcrit.server.FamilyResource import FamilyResource
 from mcrit.server.SampleResource import SampleResource
+from mcrit.server.utils import BATCH_LOOKUP_MAX_IDS
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.SampleEntry import SampleEntry
 
@@ -49,6 +52,20 @@ def _family_dict(family_id, family_name):
         "num_functions": 0,
         "num_library_samples": 0,
     }
+
+
+def _id_list(count, start=1):
+    """A POST body naming <count> distinct ids."""
+    return ",".join(str(start + offset) for offset in range(count)).encode()
+
+
+def _responder_docstring(resource_class):
+    """on_post_by_ids' docstring, read from the source: @timing does not carry __doc__ over."""
+    tree = ast.parse(inspect.getsource(resource_class))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "on_post_by_ids":
+            return ast.get_docstring(node)
+    raise AssertionError(f"{resource_class.__name__} has no on_post_by_ids")
 
 
 def _answer(status_code, body):
@@ -120,6 +137,37 @@ class SampleResourceByIdsTest(unittest.TestCase):
                 resource.on_post_by_ids(self._request(malformed), resp)
                 index.getSamplesByIds.assert_not_called()
                 self.assertEqual(falcon.HTTP_400, resp.status)
+                assert resp.data is not None
+                self.assertIn("comma-separated list of sample_ids", json.loads(resp.data)["data"]["message"])
+
+    def test_as_many_ids_as_the_cap_are_answered(self):
+        index, resource = self._resource()
+        index.getSamplesByIds.return_value = {}
+        resp = falcon.Response()
+        resource.on_post_by_ids(self._request(_id_list(BATCH_LOOKUP_MAX_IDS)), resp)
+        self.assertEqual(falcon.HTTP_200, resp.status)
+        self.assertEqual(BATCH_LOOKUP_MAX_IDS, len(index.getSamplesByIds.call_args.args[0]))
+
+    def test_more_ids_than_the_cap_are_a_400_naming_the_cap(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        # counted as named, so repeating an id cannot slip a longer list past the cap
+        for body in (_id_list(BATCH_LOOKUP_MAX_IDS + 1), b",".join([b"-5"] * (BATCH_LOOKUP_MAX_IDS + 1))):
+            with self.subTest(ids=body[:12]):
+                resp = falcon.Response()
+                resource.on_post_by_ids(self._request(body), resp)
+                index.getSamplesByIds.assert_not_called()
+                self.assertEqual(falcon.HTTP_400, resp.status)
+                assert resp.data is not None
+                message = json.loads(resp.data)["data"]["message"]
+                self.assertIn(f"{BATCH_LOOKUP_MAX_IDS + 1} requested", message)
+                self.assertIn(f"at most {BATCH_LOOKUP_MAX_IDS}", message)
+
+    def test_the_responder_documents_its_body_and_its_cap(self):
+        docstring = _responder_docstring(SampleResource)
+        assert docstring is not None
+        self.assertIn("comma-separated list of sample_ids", docstring)
+        self.assertIn("BATCH_LOOKUP_MAX_IDS", docstring)
 
 
 class FamilyResourceByIdsTest(unittest.TestCase):
@@ -151,6 +199,33 @@ class FamilyResourceByIdsTest(unittest.TestCase):
         resource.on_post_by_ids(self._request(b"-1"), resp)
         index.getFamiliesByIds.assert_not_called()
         self.assertEqual(falcon.HTTP_400, resp.status)
+        assert resp.data is not None
+        self.assertIn("comma-separated list of non-negative family_ids", json.loads(resp.data)["data"]["message"])
+
+    def test_as_many_ids_as_the_cap_are_answered(self):
+        index, resource = self._resource()
+        index.getFamiliesByIds.return_value = {}
+        resp = falcon.Response()
+        resource.on_post_by_ids(self._request(_id_list(BATCH_LOOKUP_MAX_IDS)), resp)
+        self.assertEqual(falcon.HTTP_200, resp.status)
+        self.assertEqual(BATCH_LOOKUP_MAX_IDS, len(index.getFamiliesByIds.call_args.args[0]))
+
+    def test_more_ids_than_the_cap_are_a_400_naming_the_cap(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_post_by_ids(self._request(_id_list(BATCH_LOOKUP_MAX_IDS + 1)), resp)
+        index.getFamiliesByIds.assert_not_called()
+        self.assertEqual(falcon.HTTP_400, resp.status)
+        assert resp.data is not None
+        message = json.loads(resp.data)["data"]["message"]
+        self.assertIn(f"Too many family_ids: {BATCH_LOOKUP_MAX_IDS + 1} requested", message)
+        self.assertIn(f"at most {BATCH_LOOKUP_MAX_IDS}", message)
+
+    def test_the_responder_documents_its_body_and_its_cap(self):
+        docstring = _responder_docstring(FamilyResource)
+        assert docstring is not None
+        self.assertIn("comma-separated list of family_ids", docstring)
+        self.assertIn("BATCH_LOOKUP_MAX_IDS", docstring)
 
     def test_an_empty_body_is_a_400_with_a_message(self):
         index, resource = self._resource()

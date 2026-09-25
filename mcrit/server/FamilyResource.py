@@ -3,7 +3,7 @@ import re
 import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
-from mcrit.server.utils import db_log_msg, get_username, jsonify, timing
+from mcrit.server.utils import BATCH_LOOKUP_MAX_IDS, db_log_msg, get_username, jsonify, timing
 
 
 class FamilyResource:
@@ -39,6 +39,7 @@ class FamilyResource:
 
     @timing
     def on_post_by_ids(self, req, resp):
+        """Look up several families at once; the body is a comma-separated list of family_ids, at most BATCH_LOOKUP_MAX_IDS of them. Answers 200 with the entries keyed by family_id, unknown ids left out, family entries without sample lists, and 400 for an empty or malformed body or one naming more ids than the cap."""
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -52,6 +53,17 @@ class FamilyResource:
         # assume the POST body consists of comma separated family_ids
         post_body = req.stream.read()
         if re.match(rb"^\d+(?:[\s]*,[\s]*\d+)*$", post_body):
+            id_count = post_body.count(b",") + 1
+            if id_count > BATCH_LOOKUP_MAX_IDS:
+                resp.data = jsonify(
+                    {
+                        "status": "failed",
+                        "data": {"message": f"Too many family_ids: {id_count} requested, at most {BATCH_LOOKUP_MAX_IDS} per request."},
+                    }
+                )
+                resp.status = falcon.HTTP_400
+                db_log_msg(self.index, req, f"FamilyResource.on_post_by_ids - failed - {id_count} ids exceed the cap of {BATCH_LOOKUP_MAX_IDS}.")
+                return
             target_family_ids = [int(family_id) for family_id in post_body.split(b",")]
             family_entries = self.index.getFamiliesByIds(target_family_ids)
             data = {family_id: family_entry.toDict() for family_id, family_entry in family_entries.items()}
@@ -59,6 +71,12 @@ class FamilyResource:
             resp.status = falcon.HTTP_200
             db_log_msg(self.index, req, "FamilyResource.on_post_by_ids - success.")
             return
+        resp.data = jsonify(
+            {
+                "status": "failed",
+                "data": {"message": "The POST body must be a comma-separated list of non-negative family_ids."},
+            }
+        )
         resp.status = falcon.HTTP_400
         db_log_msg(self.index, req, "FamilyResource.on_post_by_ids - failed - invalid body format.")
 
