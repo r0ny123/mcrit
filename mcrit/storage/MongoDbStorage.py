@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import threading
+import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -11,9 +12,11 @@ from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import numpy as np
+from bson import encode as bson_encode
 from packaging import version
 from picblocks.blockhasher import BlockHasher
 from pymongo import MongoClient, UpdateOne
+from pymongo.errors import BulkWriteError, DocumentTooLarge
 from smda.common.BinaryInfo import BinaryInfo
 from smda.common.SmdaFunction import SmdaFunction
 from smda.SmdaConfig import SmdaConfig
@@ -24,6 +27,7 @@ from mcrit.index.SearchQueryTree import (
     BaseVisitor,
     FilterSingleElementLists,
     NodeType,
+    NotNode,
     OrNode,
     PropagateNot,
     SearchConditionNode,
@@ -54,6 +58,12 @@ class MongoSearchTranspiler(BaseVisitor):
     """
     Converts a tree to a MongoDB query.
     The input tree MUST NOT contain Not or SearchTerm nodes.
+
+    known_values maps a field to the complete list of distinct values it holds. A substring
+    condition on such a field is evaluated against that list here and emitted as an $in / $nin
+    of the values that match, which MongoDB answers from the index. The unanchored,
+    case-insensitive regex it replaces cannot use index bounds and makes MongoDB examine every
+    document of the collection when nothing matches (fkie-cad/mcritweb#76).
     """
 
     @staticmethod
@@ -80,7 +90,24 @@ class MongoSearchTranspiler(BaseVisitor):
         visited_children = [self.visit(child) for child in node.children]
         return self._or_query(*visited_children)
 
+    def __init__(self, known_values: Optional[Dict[str, List[Any]]] = None) -> None:
+        super().__init__()
+        self.known_values = known_values or {}
+
+    def _substring_condition_from_known_values(self, node: SearchConditionNode) -> Optional[Dict[str, Any]]:
+        # an empty search term matches everything, so the regex is left alone there
+        if not node.operator.endswith("?") or node.field not in self.known_values or not node.value:
+            return None
+        pattern = re.compile(re.escape(node.value), re.IGNORECASE)
+        matching = [value for value in self.known_values[node.field] if isinstance(value, str) and pattern.search(value)]
+        if node.operator == "!?":
+            return {node.field: {"$nin": matching}}
+        return {node.field: {"$in": matching}}
+
     def visitSearchConditionNode(self, node: SearchConditionNode):
+        condition_from_known_values = self._substring_condition_from_known_values(node)
+        if condition_from_known_values is not None:
+            return condition_from_known_values
         operator_to_mongo = {
             "<": "$lt",
             "<=": "$lte",
@@ -118,9 +145,35 @@ class MongoSearchTranspiler(BaseVisitor):
         return condition
 
 
+def _hasSubstringCondition(tree: NodeType, field: str) -> bool:
+    """True when the (resolved) tree holds a substring condition on the field."""
+    if isinstance(tree, SearchConditionNode):
+        return tree.field == field and tree.operator.endswith("?")
+    if isinstance(tree, (AndNode, OrNode)):
+        return any(_hasSubstringCondition(child, field) for child in tree.children)
+    if isinstance(tree, NotNode):
+        return _hasSubstringCondition(tree.child, field)
+    return False
+
+
 class MongoDbStorage(StorageInterface):
     _DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
+    # A substring search on function_name is answered through the distinct names of the
+    # collection when there are at most this many (fkie-cad/mcritweb#76); above the cap the search
+    # falls back to the regex, unbounded as before. Listing them is a $group that stops one past
+    # the cap: tens of milliseconds for 5,000 names over two million functions, but ~0.9 s to find
+    # out that 11.6M functions carry more than 10,000 (314,144) names. That negative verdict is
+    # therefore remembered per (collection, field) for _OVER_CAP_TTL seconds, see _getDistinctValues.
+    _DISTINCT_VALUES_CAP = 10000
+    # and at most this many bytes of them in total: the matching values go into one $in, which
+    # must stay well inside MongoDB's 16 MiB command limit even when they are long mangled symbols
+    _DISTINCT_VALUES_MAX_BYTES = 1 << 20
+    # Only "over the cap" is cached, never the values: a corpus that grew past the cap stays past it,
+    # so no write has to invalidate anything and each worker process may keep its own copy. Should
+    # deletions bring it back under, the cost is the regex - today's behaviour - until the verdict
+    # expires and the scan runs again.
+    _OVER_CAP_TTL = 3600
     # Inverted index over picblockhashes: {_id: <block hash>, sample_ids: [<sample_id>, ...]}.
     # getUniqueBlocks only ever asks "does this block hash occur outside the requested samples?",
     # so the sample list is all it needs - deliberately not function ids or offsets, which would
@@ -168,6 +221,8 @@ class MongoDbStorage(StorageInterface):
         # what we want: forking servers (gunicorn) fork before the first request, so every child
         # inherits an unlocked copy and synchronises its own threads independently
         self._database_lock = threading.Lock()
+        # (collection, field) -> time.monotonic() at which it was found over the distinct-values cap
+        self._over_cap_since: Dict[Tuple[str, str], float] = {}
 
     def _getDb(self):
         # because of gunicorn and forking workers, we want to delay creation of MongoClient until actual usage and avoid it within __init__()
@@ -266,6 +321,17 @@ class MongoDbStorage(StorageInterface):
         self._getDb()["functions"].create_index("function_name")
         self._getDb()["functions"].create_index("_pichash")
         self._getDb()["functions"].create_index("_picblockhashes.hash")
+        # Searches sorted by a field other than the id (fkie-cad/mcritweb#59): the search cursor sorts by that
+        # field and breaks ties by the id, in the same direction, so one compound index per
+        # sortable field serves both directions by being walked backwards. Without it the
+        # server sorts every filtered document in memory, which is where the reported 10x
+        # goes. The fields are the ones the search results can be sorted by in MCRITweb.
+        for field in ("family_name", "num_samples", "num_library_samples", "num_functions"):
+            self._getDb()["families"].create_index([(field, 1), ("family_id", 1)])
+        for field in ("family_id", "family", "filename", "version", "bitness", "sha256", "statistics.num_functions"):
+            self._getDb()["samples"].create_index([(field, 1), ("sample_id", 1)])
+        for field in ("family_id", "sample_id", "function_name", "offset", "num_instructions", "num_blocks"):
+            self._getDb()["functions"].create_index([(field, 1), ("function_id", 1)])
         # stored without guarantee of existence
         self._getDb()["query_samples"].create_index("sample_id")
         self._getDb()["query_samples"].create_index("sha256")
@@ -364,14 +430,84 @@ class MongoDbStorage(StorageInterface):
             )
             raise ValueError("Database insert failed.")
 
+    # MongoDB refuses a document over this size; pymongo raises DocumentTooLarge for the whole
+    # batch before anything is written (#42)
+    _MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
+    # collections whose documents are droppable when oversized: a function without its stored
+    # disassembly is still a function, one that cannot be inserted takes the whole sample down
+    _DROPPABLE_WHEN_OVERSIZED = ("xcfg", "query_xcfg")
+
+    @staticmethod
+    def _describeDocument(document: Dict) -> Dict[str, Any]:
+        keys = ("_id", "function_id", "sample_id", "family_id", "sha256", "offset")
+        return {key: document[key] for key in keys if key in document}
+
+    def _splitOversizedDocuments(self, documents: List[Dict]) -> Tuple[List[Dict], List[Tuple[Dict, int]]]:
+        fitting, oversized = [], []
+        for document in documents:
+            size = len(bson_encode(document))
+            if size > self._MAX_DOCUMENT_BYTES:
+                oversized.append((document, size))
+            else:
+                fitting.append(document)
+        return fitting, oversized
+
+    @staticmethod
+    def _isTooLargeError(error: Exception) -> bool:
+        """pymongo rejects a clearly oversized document itself (DocumentTooLarge); one just over
+        the limit reaches the server, which answers a write error (code 2 or 10334, "too large")."""
+        if isinstance(error, DocumentTooLarge):
+            return True
+        if isinstance(error, BulkWriteError):
+            return any(write_error.get("code") in (2, 10334) or "too large" in str(write_error.get("errmsg", "")) for write_error in error.details.get("writeErrors", []))
+        return False
+
     def _dbInsertMany(self, collection: str, data: List["Dict"]):
         if len(data) == 0:
             return []
+        documents = [self._toBinary(document) for document in data]
+        # measure before the first wire batch goes out: once pymongo has sent earlier batches
+        # and then hits an oversized document, DocumentTooLarge carries no nInserted, so the
+        # committed documents could not be told apart from the rest (review of #42)
+        if collection in self._DROPPABLE_WHEN_OVERSIZED:
+            documents, oversized = self._splitOversizedDocuments(documents)
+            if oversized:
+                offenders = [{"document": self._describeDocument(document), "bytes": size} for document, size in oversized]
+                self._dbLogError(
+                    'Database insert_many for collection "%s": %d document(s) exceed the 16 MiB limit and are dropped.' % (collection, len(oversized)),
+                    details={"oversized": offenders, "dropped": True},
+                )
+                LOGGER.warning("Dropping the disassembly of %d function(s) over MongoDB's 16 MiB document limit: %s", len(oversized), offenders)
+                if not documents:
+                    return []
         try:
-            insert_result = self._getDb()[collection].insert_many([self._toBinary(document) for document in data])
+            insert_result = self._getDb()[collection].insert_many(documents)
             if insert_result.acknowledged:
                 return insert_result.inserted_ids
             return None
+        except (DocumentTooLarge, BulkWriteError) as error:
+            if not self._isTooLargeError(error):
+                self._dbLogError('Database insert_many for collection "%s" failed.' % collection, details={"traceback": traceback.format_exc().split("\n")})
+                raise ValueError("Database insert failed.")
+            # an ordered insert stops at the first oversized document: what came before it is
+            # in, the rest is not. Find out which documents are too large and say so, since
+            # MongoDB's own message only carries a size (#42)
+            inserted = documents[: error.details.get("nInserted", 0)] if isinstance(error, BulkWriteError) else []
+            if "_id" in documents[0]:
+                # whatever earlier wire batches committed is in; never retry those ids
+                present = set(document["_id"] for document in self._getDb()[collection].find({"_id": {"$in": [document["_id"] for document in documents]}}, {"_id": 1}))
+                inserted = [document for document in documents if document["_id"] in present]
+            remaining = [document for document in documents if document not in inserted]
+            fitting, oversized = self._splitOversizedDocuments(remaining)
+            offenders = [{"document": self._describeDocument(document), "bytes": size} for document, size in oversized]
+            self._dbLogError(
+                'Database insert_many for collection "%s" failed: %d document(s) exceed the 16 MiB limit.' % (collection, len(oversized)),
+                details={"oversized": offenders, "dropped": collection in self._DROPPABLE_WHEN_OVERSIZED},
+            )
+            if collection not in self._DROPPABLE_WHEN_OVERSIZED:
+                raise ValueError(f"Database insert failed: {len(oversized)} document(s) for '{collection}' exceed MongoDB's 16 MiB document limit ({offenders})")
+            LOGGER.warning("Dropping the disassembly of %d function(s) over MongoDB's 16 MiB document limit: %s", len(oversized), offenders)
+            return [document["_id"] for document in inserted] + (self._dbInsertMany(collection, fitting) or [])
         except Exception:
             self._dbLogError(
                 'Database insert_many for collection "%s" failed.' % collection,
@@ -968,6 +1104,8 @@ class MongoDbStorage(StorageInterface):
             collections.append("band_%d" % band_id)
         for c in collections:
             self._getDb()[c].drop()
+        # an emptied corpus is under every cap again; other processes simply wait out the TTL
+        self._over_cap_since.clear()
         self._ensureIndexAndUnknownFamily()
 
     def getSampleBySha256(self, sha256: str, is_query=False) -> Optional["SampleEntry"]:
@@ -2496,7 +2634,41 @@ class MongoDbStorage(StorageInterface):
         sort_list = [(key, 1 if direction ^ is_backward_search else -1) for key, direction in full_cursor.sort_by_list]
         return sort_list
 
-    def _get_search_query(self, search_fields: List[str], search_tree: NodeType, cursor: Optional[FullSearchCursor], conditional_search_fields=None):
+    def _getDistinctValues(self, collection: str, field: str) -> Optional[List[Any]]:
+        """All distinct values of the field, or None when there are more than _DISTINCT_VALUES_CAP
+        of them or they exceed _DISTINCT_VALUES_MAX_BYTES in total. A None is remembered for
+        _OVER_CAP_TTL seconds, so a large corpus pays for the capped scan once, not per search."""
+        found_over_cap = self._over_cap_since.get((collection, field))
+        if found_over_cap is not None and time.monotonic() - found_over_cap < self._OVER_CAP_TTL:
+            return None
+        values = self._scanDistinctValues(collection, field)
+        if values is None:
+            self._over_cap_since[(collection, field)] = time.monotonic()
+        return values
+
+    def _scanDistinctValues(self, collection: str, field: str) -> Optional[List[Any]]:
+        pipeline = [{"$group": {"_id": "$" + field}}, {"$limit": self._DISTINCT_VALUES_CAP + 1}]
+        values = []
+        total_bytes = 0
+        for document in self._getDb()[collection].aggregate(pipeline):
+            value = document["_id"]
+            if isinstance(value, str):
+                total_bytes += len(value.encode("utf-8"))
+                if total_bytes > self._DISTINCT_VALUES_MAX_BYTES:
+                    return None
+            values.append(value)
+        if len(values) > self._DISTINCT_VALUES_CAP:
+            return None
+        return values
+
+    def _get_search_query(
+        self, search_fields: List[str], search_tree: NodeType, cursor: Optional[FullSearchCursor], conditional_search_fields=None, distinct_fields: Optional[Dict[str, str]] = None
+    ):
+        """
+        distinct_fields maps a field to its collection: a substring condition on it is rewritten to
+        the distinct values that match, when the collection has few enough of them (see
+        MongoSearchTranspiler.known_values).
+        """
         # checked here as well as when the sort list is built, because this runs first: paging by an
         # unsortable field would otherwise fail in the transpiler, blaming the range operator that
         # the cursor tree happens to use instead of naming the field that cannot be sorted by
@@ -2508,7 +2680,13 @@ class MongoDbStorage(StorageInterface):
         full_tree = SearchFieldResolver(search_fields, conditional_search_fields=conditional_search_fields).visit(full_tree)
         full_tree = FilterSingleElementLists().visit(full_tree)
         full_tree = PropagateNot().visit(full_tree)
-        query = MongoSearchTranspiler().visit(full_tree)
+        known_values = {}
+        for field, collection in (distinct_fields or {}).items():
+            if _hasSubstringCondition(full_tree, field):
+                values = self._getDistinctValues(collection, field)
+                if values is not None:
+                    known_values[field] = values
+        query = MongoSearchTranspiler(known_values).visit(full_tree)
         return query
 
     ##### search ####
@@ -2543,7 +2721,7 @@ class MongoDbStorage(StorageInterface):
         result_dict = {}
         # TODO also search through function labels once we have implemented them
         search_fields = ["function_name"]
-        query = self._get_search_query(search_fields, search_tree, cursor)
+        query = self._get_search_query(search_fields, search_tree, cursor, distinct_fields={"function_name": "functions"})
         sort_list = self._get_sort_list_from_cursor(cursor)
         for function_document in self._getDb().functions.find(query, {"_id": 0}, sort=sort_list, limit=max_num_results):
             self._decodeFunction(function_document)

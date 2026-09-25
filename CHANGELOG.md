@@ -95,6 +95,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Fixed
 
+- **`McritClient`'s error modes reach the three maintenance jobs.** `rebuildPicBlockHashIndex`,
+  `repairMinHashes` and `recomputeFamilyStats` parsed their answer with `handle_response`
+  directly instead of `self._handle`, so a client built with `raise_client_errors` or
+  `raise_server_errors` still got `None` from them - a refused or failed job request that looked
+  like one nothing had answered. They landed while the modes were being written, which is how
+  they were missed. `testClientErrors` now fails on any method that parses outside the client's
+  mode, not only on these three.
 - **`LogBucket` raised `KeyError` for any value past its precomputed table**, which aborts the
   whole indexing job. The table covers `0..SHINGLER_LOGBUCKETS-1` (100,000 by default) and
   `FuzzyStatPairShingler` buckets `max_block_size`, `num_ins_C`, `num_ins_S` and `num_calls`
@@ -123,6 +130,50 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   still applies. MemoryStorage also failed an ordinary rename with `KeyError` whenever the
   renamed family's samples were not the last ones stored. NOTE that a same-name rename now writes
   nothing on MongoDB and so no longer advances `db_state` there ([#208]).
+- **`PUT /samples/<id>` and `PUT /families/<id>` refused `""` and every one-character family
+  name**, although their messages allow 0-64 characters, so a version or component could not be
+  cleared once set and no sample could be moved into family 0, whose name is `""`. The patterns
+  now accept what the messages describe, and end in `\Z` rather than `$`, which also matched
+  before a trailing newline: `"ab\n"` as a family name and `"1.0\n"` as a version are now
+  refused. Checked over 37,210 generated strings against the old patterns: nothing else changes.
+  **Needs the same-name family rename fix ([#208])** - with `""` accepted, renaming family 0 to
+  its own name would otherwise double its counters ([#209]).
+- **A repeated request could be served by a queued or running force rematch** instead of the
+  finished job whose result it could use, because the cache picked the newest job with the same
+  descriptor whatever its state. Both queues now prefer a finished job, then the newest, and
+  never reuse a failed or terminated one. NOTE that this changes which job answers: a pending
+  forced rematch no longer shadows an earlier finished result, verified against a running
+  instance ([mcritweb#47]).
+- **Searches sorted by anything but the id had no index to be served from**, so MongoDB sorted
+  every filtered document in memory. A compound `(field, id)` index now exists for every field
+  MCRITweb sorts families, samples and functions by, and the tie-break follows the sort
+  direction so one index serves both; `explain()` on a real database went from
+  `SORT -> FETCH -> IXSCAN` to `LIMIT -> FETCH -> IXSCAN`. NOTE that the first start after
+  upgrading builds these indexes - six of them on `functions` - which on a large corpus takes
+  noticeable time before the server is ready (for scale: one instance holds 11.6M function
+  documents and 2.38 GB of indexes). Also fixed: **paging stopped early whenever a page ended on
+  id 0** (function 0, sample 0, the unknown family), as the cursor was tested for truthiness
+  ([mcritweb#59]).
+- **A function name search that found nothing examined every function document** - the
+  reported ~30 s on larger databases - since an unanchored case-insensitive regex cannot bound an
+  index. `findFunctionByString` now lists the distinct names over the `function_name` index,
+  matches the term against them in Python and hands MongoDB an `$in` / `$nin`. On two million
+  functions with 5,000 distinct names, a no-result search went 4.2 s -> 22 ms and a sorted
+  search 1.5 s -> 62 ms. NOTE that a common term at the default sort got slower by tens of
+  milliseconds (`main` 15 ms -> 78 ms), and above 10,000 distinct names the search keeps the
+  regex, unbounded as before ([mcritweb#76]). Finding out that a corpus is past that cap is not
+  free - on 11.6M functions with 314,144 distinct names the capped scan takes ~0.9 s - so each
+  process remembers the over-cap verdict for an hour instead of rescanning on every search. Only
+  that verdict is kept, never the names, so writes need not invalidate it.
+- **A document over MongoDB's 16 MiB limit lost the whole sample behind a bare
+  `ValueError("Database insert failed.")`** that named nothing - reported 4 times in 120k files,
+  typically one giant function's `xcfg` blob. `_dbInsertMany` now recognises both shapes of the
+  error (pymongo's `DocumentTooLarge` and the server's write error after an ordered insert) and
+  logs the offending documents with their ids and byte sizes. An oversized `xcfg` / `query_xcfg`
+  blob is dropped with a warning and the rest stored, so the sample survives; NOTE that the
+  affected function then has no disassembly and so no MinHash. An oversized document in any other
+  collection still fails, now naming it ([#42]).
+
 
 ## [1.9.0] - 2026-09-08
 
@@ -409,3 +460,8 @@ date, the version, and what changed.
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
 [#208]: https://github.com/danielplohmann/mcrit/issues/208
+[#209]: https://github.com/danielplohmann/mcrit/issues/209
+[mcritweb#47]: https://github.com/fkie-cad/mcritweb/issues/47
+[mcritweb#59]: https://github.com/fkie-cad/mcritweb/issues/59
+[mcritweb#76]: https://github.com/fkie-cad/mcritweb/issues/76
+[#42]: https://github.com/danielplohmann/mcrit/issues/42

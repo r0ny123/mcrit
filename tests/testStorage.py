@@ -13,8 +13,11 @@ from mcrit.config.QueueConfig import QueueConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.index.SearchCursor import FullSearchCursor
+from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.minhash.MinHash import MinHash
 from mcrit.storage.FunctionEntry import FunctionEntry
+from mcrit.storage.MongoDbStorage import MongoDbStorage
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
 
@@ -722,6 +725,51 @@ class MongoDbStorageTest(MemoryStorageTest):
         PROJECT_ROOT = str(os.path.abspath(os.sep.join([THIS_FILE_PATH, "..", ".."])))
         self.example_file_path = os.sep.join([PROJECT_ROOT, "tests", "example_report.smda"])
 
+    def testAnOversizedDisassemblyBlobIsDroppedAndTheFunctionKept(self):
+        # #42: MongoDB refuses a document over 16 MiB; the whole batch used to fail as
+        # "Database insert failed." with nothing saying which document, and the sample was lost
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        huge = "x" * (16 * 1024 * 1024 + 1)
+        with patch("mcrit.storage.MongoDbStorage.LOGGER") as logger:
+            self.storage._insertXcfgDocuments([{"function_id": 5, "_xcfg": huge}, {"function_id": 6, "_xcfg": "{}"}])
+        self.assertIn("Dropping the disassembly of %d function(s)", logger.warning.call_args.args[0])
+        self.assertEqual(1, logger.warning.call_args.args[1])
+        self.assertEqual([6], [document["_id"] for document in db.xcfg.find({}, {"_id": 1})])
+        error = db.error.find_one({}, sort=[("ts", -1)])
+        assert error is not None
+        self.assertIn("exceed the 16 MiB limit", error["error_msg"])
+        self.assertEqual(5, error["error_details"]["oversized"][0]["document"]["_id"])
+        self.assertGreater(error["error_details"]["oversized"][0]["bytes"], 16 * 1024 * 1024)
+        self.assertTrue(error["error_details"]["dropped"])
+
+    def testAnOversizedFunctionDocumentFailsNamingItself(self):
+        self.storage.clearStorage()
+        huge = "x" * (16 * 1024 * 1024 + 1)
+        with self.assertRaises(ValueError) as raised:
+            self.storage._dbInsertMany("functions", [{"function_id": 8, "sample_id": 1}, {"function_id": 9, "sample_id": 1, "blob": huge}, {"function_id": 10, "sample_id": 1}])
+        self.assertIn("16 MiB", str(raised.exception))
+        self.assertIn("'function_id': 9", str(raised.exception))
+        self.assertNotIn("'function_id': 10", str(raised.exception))
+        # the ordered insert stopped at the oversized document
+        self.assertEqual([8], [d["function_id"] for d in self.storage._getDb().functions.find({}, {"function_id": 1})])
+
+    def testAnOversizedBlobInTheMiddleKeepsTheOthers(self):
+        self.storage.clearStorage()
+        huge = "x" * (16 * 1024 * 1024 + 1)
+        with patch("mcrit.storage.MongoDbStorage.LOGGER"):
+            inserted = self.storage._insertXcfgDocuments(
+                [
+                    {"function_id": 1, "_xcfg": "{}"},
+                    {"function_id": 2, "_xcfg": huge},
+                    {"function_id": 3, "_xcfg": "{}"},
+                    {"function_id": 4, "_xcfg": huge},
+                    {"function_id": 5, "_xcfg": "{}"},
+                ]
+            )
+        self.assertIsNone(inserted)
+        self.assertEqual([1, 3, 5], sorted(document["_id"] for document in self.storage._getDb().xcfg.find({}, {"_id": 1})))
+
     def _driftFamilyCounters(self, family_id, num_samples, num_functions):
         self.storage._getDb().families.update_one({"family_id": family_id}, {"$set": {"num_samples": num_samples, "num_functions": num_functions}})
 
@@ -796,6 +844,99 @@ class MongoDbStorageTest(MemoryStorageTest):
         mcrit_config.SHINGLER_CONFIG = ShinglerConfig()
         mcrit_config.QUEUE_CONFIG = QueueConfig()
         return StorageFactory.getStorage(mcrit_config)
+
+    # --- substring search on function_name over the distinct names (fkie-cad/mcritweb#76) ----
+
+    def _storageWithNamedFunctions(self):
+        self.storage.clearStorage()
+        with open(self.example_file_path) as fjson:
+            smda_report = SmdaReport.fromDict(json.load(fjson))
+        self.storage.addSmdaReport(smda_report)
+        function_ids = sorted(entry.function_id for entry in self.storage.getFunctionsBySampleId(0))
+        names = ["qz_alpha", "QZ_Alphabet", "kryptos_config", "KryptosConfig", "sub_401000"]
+        for function_id, name in zip(function_ids, names):
+            self.storage._getDb().functions.update_one({"function_id": function_id}, {"$set": {"function_name": name}})
+        return dict(zip(names, function_ids))
+
+    def _searchFunctionNames(self, term, sort_by="function_id", is_ascending=True):
+        parsed = SearchQueryParser().parse(term)
+        cursor = FullSearchCursor(None, [(sort_by, is_ascending), ("function_id", True)] if sort_by != "function_id" else [("function_id", is_ascending)])
+        return [entry.function_name for entry in self.storage.findFunctionByString(parsed, cursor=cursor, max_num_results=100).values()]
+
+    def testSubstringSearchOnFunctionNamesUsesTheDistinctNames(self):
+        by_name = self._storageWithNamedFunctions()
+        self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+        self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+        self.assertEqual(["QZ_Alphabet", "qz_alpha"], self._searchFunctionNames("qz_alph", is_ascending=False))
+        self.assertEqual([], self._searchFunctionNames("zzzzq"))
+        # the query MongoDB gets is an $in of the matching names, not a regex
+        query = self.storage._get_search_query(["function_name"], SearchQueryParser().parse("qz_alph"), None, distinct_fields={"function_name": "functions"})
+        self.assertEqual({"function_name": {"$in": ["QZ_Alphabet", "qz_alpha"]}}, {k: {op: sorted(v) for op, v in c.items()} for k, c in query.items()})
+        self.assertEqual([entry.function_id for entry in self.storage.findFunctionByString(SearchQueryParser().parse("zzzzq")).values()], [])
+        self.assertEqual(sorted(by_name.values())[:2], sorted(entry.function_id for entry in self.storage.findFunctionByString(SearchQueryParser().parse("qz_alph")).values()))
+
+    def testSubstringSearchFallsBackToTheRegexAboveTheCap(self):
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_CAP
+        try:
+            MongoDbStorage._DISTINCT_VALUES_CAP = 2
+            self.assertIsNone(self.storage._getDistinctValues("functions", "function_name"))
+            query = self.storage._get_search_query(["function_name"], SearchQueryParser().parse("qz_alph"), None, distinct_fields={"function_name": "functions"})
+            self.assertTrue(hasattr(query["function_name"], "search"))
+            # same answers either way
+            self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+            self.assertEqual([], self._searchFunctionNames("zzzzq"))
+            self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_CAP = original_cap
+
+    def testSubstringSearchFallsBackToTheRegexAboveTheByteCap(self):
+        # thousands of long mangled symbols stay under the count cap but would not fit one $in
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_MAX_BYTES
+        try:
+            MongoDbStorage._DISTINCT_VALUES_MAX_BYTES = 16
+            self.assertIsNone(self.storage._getDistinctValues("functions", "function_name"))
+            query = self.storage._get_search_query(["function_name"], SearchQueryParser().parse("qz_alph"), None, distinct_fields={"function_name": "functions"})
+            self.assertTrue(hasattr(query["function_name"], "search"))
+            self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_MAX_BYTES = original_cap
+
+    def testSubstringSearchCombinesWithOtherConditionsAndNegation(self):
+        self._storageWithNamedFunctions()
+        self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("sample_id:0 qz_alph"))
+        self.assertEqual([], self._searchFunctionNames("sample_id:1 qz_alph"))
+        excluded = self._searchFunctionNames("function_name:!?qz_alph")
+        self.assertNotIn("qz_alpha", excluded)
+        self.assertNotIn("QZ_Alphabet", excluded)
+        self.assertIn("kryptos_config", excluded)
+        self.assertEqual(len(self.storage.getFunctionsBySampleId(0)) - 2, len(excluded))
+
+    def testTheOverCapVerdictIsCachedAcrossSearches(self):
+        # on a corpus past the cap the capped scan costs ~0.9 s and always gives the same answer,
+        # so it runs once, not on every search
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_CAP
+        try:
+            MongoDbStorage._DISTINCT_VALUES_CAP = 2
+            functions = self.storage._getDb().functions
+            with patch.object(type(functions), "aggregate", autospec=True, side_effect=type(functions).aggregate) as scan:
+                self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+                self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+                self.assertEqual(1, scan.call_count)
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_CAP = original_cap
+
+    def testDistinctValuesAreListedOnlyForSubstringSearches(self):
+        self._storageWithNamedFunctions()
+        with patch.object(self.storage, "_getDistinctValues", wraps=self.storage._getDistinctValues) as listing:
+            self.storage.findFunctionByString(SearchQueryParser().parse("sample_id:0"))
+            self.assertEqual(0, listing.call_count)
+            self.storage.findFunctionByString(SearchQueryParser().parse("function_name:qz_alpha"))
+            self.assertEqual(0, listing.call_count)
+            self.storage.findFunctionByString(SearchQueryParser().parse("qz_alph"))
+            self.assertEqual(1, listing.call_count)
 
     def testCounterInitIsIdempotent(self):
         # constructing storage repeatedly against the same database must not add counter documents (#105)
