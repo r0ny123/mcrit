@@ -165,6 +165,14 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   free - on 11.6M functions with 314,144 distinct names the capped scan takes ~0.9 s - so each
   process remembers the over-cap verdict for an hour instead of rescanning on every search. Only
   that verdict is kept, never the names, so writes need not invalidate it.
+- **A document over MongoDB's 16 MiB limit lost the whole sample behind a bare
+  `ValueError("Database insert failed.")`** that named nothing - reported 4 times in 120k files,
+  typically one giant function's `xcfg` blob. `_dbInsertMany` now recognises both shapes of the
+  error (pymongo's `DocumentTooLarge` and the server's write error after an ordered insert) and
+  logs the offending documents with their ids and byte sizes. An oversized `xcfg` / `query_xcfg`
+  blob is dropped with a warning and the rest stored, so the sample survives; NOTE that the
+  affected function then has no disassembly and so no MinHash. An oversized document in any other
+  collection still fails, now naming it ([#42]).
 
 
 ## [1.9.0] - 2026-09-08
@@ -456,3 +464,4 @@ date, the version, and what changed.
 [mcritweb#47]: https://github.com/fkie-cad/mcritweb/issues/47
 [mcritweb#59]: https://github.com/fkie-cad/mcritweb/issues/59
 [mcritweb#76]: https://github.com/fkie-cad/mcritweb/issues/76
+[#42]: https://github.com/danielplohmann/mcrit/issues/42
