@@ -31,7 +31,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   file's chunks before its document, and so is a file still claimed by a submission that died before
   creating its job. The submitted files it deletes include binaries of indexed samples that an
   earlier bulk deletion left in the queue: MCRIT never serves those, but they may be a deployment's
-  only copy of a binary, so take one first if that matters - the dry run lists how many there are.
+  only copy of a binary, so take one first if that matters; the dry run counts them among the file
+  parameters.
 
 ### Fixed
 
