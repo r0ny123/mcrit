@@ -46,7 +46,14 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `repair_minhashes` nor pic-hash recalculation reaches it - such samples have to be deleted and
   submitted again. smda 4.4.5 through 4.7.0 also move Intel and AArch64 function recovery, so
   re-disassembling a file can yield a different function set than the stored report has.
-  *Measured:* the 191 database-free tests pass unchanged under 4.8.0; no corpus was re-indexed.
+  The one staleness threshold still fits 4.8.0: every per-architecture pic_hash escape gate in smda
+  (AArch64 4.2.0, Intel 4.3.5, CIL 4.3.8, Dalvik 4.4.2) is at or below 4.4.5, which a test now
+  asserts, and the `MCRIT4IDA cli via SMDA <version>` string the IDA producer writes parses as
+  current. The fields `SmdaFunction.fromDict` requires did not change between 4.4.5 and 4.8.0, and
+  older releases read the same ones unconditionally, so an `xcfg` stored by an older smda still
+  loads; a test loads every function of the smda 1.5.12 and 4.2.16 reports under `tests/` to hold
+  that. *Measured:* merged with 1.11.0, 300 database-free tests and the full suite of 456 pass
+  under smda 4.8.0; no corpus was re-indexed.
 
 ### Fixed
 

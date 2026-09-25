@@ -214,6 +214,6 @@ def produceIdaReport(filepath: str, sig_root: Optional[str] = None, min_matches:
         report.sha256 = hashlib.file_digest(input_file, "sha256").hexdigest()
     report.filename = os.path.basename(filepath)
     report.binary_size = os.path.getsize(filepath)
-    # MongoDbStorage.updateMinHashesForSamples() parses the trailing token as the smda version
+    # MongoDbStorage.recalculateAllPicHashes() parses the trailing token as the smda version
     report.smda_version = f"MCRIT4IDA cli via SMDA {SmdaConfig().VERSION}"
     return report
