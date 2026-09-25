@@ -134,12 +134,13 @@ class ParseSampleIdTest(unittest.TestCase):
     """What both queues and JobResource accept as a sample id in a selector."""
 
     def test_an_int_or_a_string_of_one_is_a_sample_id(self):
-        for value, expected in ((7, 7), (-3, -3), (0, 0), ("7", 7), (" -3 ", -3), ("007", 7)):
+        for value, expected in ((7, 7), (-3, -3), (0, 0), ("7", 7), (" -3 ", -3), ("007", 7), ("9" * 18, int("9" * 18))):
             with self.subTest(value=value):
                 self.assertEqual(expected, parse_sample_id(value))
 
     def test_anything_else_is_none_rather_than_what_int_makes_of_it(self):
-        for value in (True, False, 7.0, 7.9, "7.0", "x", "", "0x7", "1_000", "+7", None, [7]):
+        # no int64 has 19 digits to spare, and int() refuses a string past 4,300 digits
+        for value in (True, False, 7.0, 7.9, "7.0", "x", "", "0x7", "1_000", "+7", None, [7], "1" * 19, "9" * 5000):
             with self.subTest(value=value):
                 self.assertIsNone(parse_sample_id(value))
 

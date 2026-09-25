@@ -150,6 +150,7 @@ class JobCollectionSelectorsTest(unittest.TestCase):
             for query, named, not_named in (
                 ("method=getMatchesForSample&sample_ids=7,x,9", ("'x'",), ("'7'", "'9'")),
                 ("method=getMatchesForSample&sample_ids=x,7.0,0x7", ("'x'", "'7.0'", "'0x7'"), ("'7'",)),
+                ("method=getMatchesForSample&sample_ids=7," + "9" * 5000, ("'999",), ("'7'",)),
             ):
                 with self.subTest(responder=responder, query=query):
                     index, resource = self._resource()

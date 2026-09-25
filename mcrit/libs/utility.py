@@ -89,6 +89,8 @@ def parse_sample_id(value: Any) -> Optional[int]:
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and re.fullmatch(r"\s*-?[0-9]+\s*", value):
+    # at most 18 digits: every such number is an int64 as MongoDB stores it, and int() refuses
+    # strings past 4,300 digits, which would otherwise surface as a 500
+    if isinstance(value, str) and re.fullmatch(r"\s*-?[0-9]{1,18}\s*", value):
         return int(value)
     return None
