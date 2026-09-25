@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 import pymongo
 import pytest
+from picblocks.blockhasher import BlockHasher
 from smda.common.SmdaReport import SmdaReport
+from smda.intel.IntelInstructionEscaper import IntelInstructionEscaper
 
 from mcrit.config.McritConfig import McritConfig
 from mcrit.config.MinHashConfig import MinHashConfig
@@ -141,6 +143,26 @@ class ArchitectureShortlistTest(unittest.TestCase):
         # (function id, family id, sample id, function id, score, flags): some are MinHash matches
         self.assertTrue(any(match[4] < 100 for match in expected))
         self.assertEqual(expected, matches_against(MatcherSample(shortlisted).getMatchesForSample(own), same))
+
+
+class BlockHashEscaperTest(unittest.TestCase):
+    def test_stored_block_hashes_are_escaped_by_their_own_architecture(self):
+        """picblocks 2.1.0 escapes with the function's own escaper; before, every block as Intel."""
+        config = McritConfig()
+        config.STORAGE_CONFIG = StorageConfig(STORAGE_METHOD=StorageFactory.STORAGE_METHOD_MEMORY)
+        config.QUEUE_CONFIG = QueueConfig(QUEUE_METHOD=QueueFactory.QUEUE_METHOD_FAKE)
+
+        def stored_hashes():
+            index = MinHashIndex(config=config)
+            entry = index._storage.addSmdaReport(load_report("crossarch_aarch64_a.smda"))
+            return {block["hash"] for function in index._storage.getFunctionsBySampleId(entry.sample_id) for block in function.picblockhashes}
+
+        own = stored_hashes()
+        with patch.object(BlockHasher, "_getInstructionEscaper", lambda self, block: IntelInstructionEscaper):
+            as_intel = stored_hashes()
+        self.assertTrue(own)
+        # a block may escape alike under both, most do not
+        self.assertLess(len(own & as_intel), len(own) // 2)
 
 
 if __name__ == "__main__":

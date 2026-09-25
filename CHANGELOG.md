@@ -36,6 +36,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   matched as before, with the same lookups. A sample whose architecture is unknown (an empty string,
   as a sample SMDA could not disassemble has) is not taken as another one. Results computed before
   and kept by the job cache still hold such matches until requested with `force_recalculation`.
+- Block hashes of non-Intel code are computed with that architecture's escaper: MCRIT now requires
+  picblocks 2.1.0, which escaped every block as Intel code before (#93). picblocks was unpinned
+  above 1.1.2, so installations set up since its 2.1.0 release on 2026-09-13 compute the new hashes
+  already; this makes it the floor. Intel block hashes are unchanged. Non-Intel samples indexed
+  before keep the block hashes they were stored with, and `recalculatePicHashes` only revisits
+  samples of old SMDA versions, so their unique blocks compare correctly only with samples indexed
+  before; submitting such samples again gives them the new hashes.
 
 ## [1.10.0] - 2026-09-25
 
