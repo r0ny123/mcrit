@@ -94,6 +94,9 @@ class MemorySearchTranspiler(BaseVisitor):
         }
         # NOTE: the substring operators "?" / "!?" are handled by the early return below
         # and deliberately have no entry here.
+        # A list field (tags, #53) is compared element-wise, the way MongoDB treats an array: a
+        # condition holds when some element satisfies it, and the negated operators "!=" / "!?"
+        # hold when no element matches the positive one - so an empty list satisfies only those.
         value = node.value
         if node.operator.endswith("?"):
             regex = re.compile(re.escape(node.value), re.IGNORECASE)
@@ -101,6 +104,8 @@ class MemorySearchTranspiler(BaseVisitor):
 
             def check_regex(entry):
                 value = _get_field(entry, node.field)
+                if isinstance(value, list):
+                    return any(isinstance(element, str) and regex.search(element) is not None for element in value) ^ inverse
                 if not isinstance(value, str):
                     return False
                 return (regex.search(value) is not None) ^ inverse
@@ -116,7 +121,13 @@ class MemorySearchTranspiler(BaseVisitor):
         chosen_operator = string_to_operator[node.operator]
 
         def compare(entry):
-            return chosen_operator(_get_field(entry, node.field), value)
+            field_value = _get_field(entry, node.field)
+            if isinstance(field_value, list):
+                if node.operator == "!=":
+                    return not any(element == value for element in field_value)
+                # like MongoDB, a range only compares elements of the same type as the value
+                return any(type(element) is type(value) and chosen_operator(element, value) for element in field_value)
+            return chosen_operator(field_value, value)
 
         return compare
 

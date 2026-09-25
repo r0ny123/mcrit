@@ -12,6 +12,8 @@ from smda.common.SmdaReport import SmdaReport
 from mcrit.config.McritConfig import McritConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.index.SearchCursor import FullSearchCursor
+from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.libs.tags import isValidTag, normalizeTags
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
@@ -181,6 +183,46 @@ class MemoryStorageTags(unittest.TestCase):
         self.assertEqual(["only-b", "shared", "only-a"], self.storage.getFamily(family_b).tags)
         # the samples' and functions' own tags do not move
         self.assertEqual([], self.storage.getSampleById(self.sample.sample_id).tags)
+
+    def _search(self, kind, term):
+        parsed = SearchQueryParser().parse(term)
+        id_field = f"{kind}_id"
+        cursor = FullSearchCursor(None, [(id_field, True)])
+        finder = {"family": self.storage.findFamilyByString, "sample": self.storage.findSampleByString, "function": self.storage.findFunctionByString}[kind]
+        return sorted(finder(parsed, cursor=cursor, max_num_results=1000))
+
+    def test_search_on_tags_is_element_wise(self):
+        first, second, third = self.function_ids[:3]
+        self.storage.addTags("function", first, ["packed", "source:vt"])
+        self.storage.addTags("function", second, ["packed"])
+        self.storage.addTags("function", third, ["unpacked"])
+        all_functions = sorted(self.storage.getFunctionIdsBySampleId(self.sample.sample_id) + self.storage.getFunctionIdsBySampleId(self.other_sample.sample_id))
+        # some element equals the value; "tag" is the same field, and the value is normalised like a tag
+        self.assertEqual([first, second], self._search("function", "tags:packed"))
+        self.assertEqual([first, second], self._search("function", "tag:packed"))
+        self.assertEqual([first, second], self._search("function", "tag:PACKED"))
+        self.assertEqual([first], self._search("function", 'tags:"source:vt"'))
+        # no element equals the value, which includes every untagged function
+        self.assertEqual([function_id for function_id in all_functions if function_id not in (first, second)], self._search("function", "tags:!=packed"))
+        self.assertEqual(self._search("function", "tags:!=packed"), self._search("function", "NOT tag:packed"))
+        # some element contains the value
+        self.assertEqual([first, second, third], self._search("function", "tags:?pack"))
+        self.assertEqual([first], self._search("function", "tag:?vt"))
+        self.assertEqual([function_id for function_id in all_functions if function_id not in (first, second, third)], self._search("function", "tags:!?pack"))
+        # combined with another field
+        self.assertEqual([second], self._search("function", f"tag:packed function_id:{second}"))
+        # a plain term does not search the tags: existing searches find what they found before
+        self.assertEqual([], self._search("function", "unpacked"))
+
+    def test_search_on_family_and_sample_tags(self):
+        self.storage.addTags("family", self.other_sample.family_id, ["apt"])
+        self.storage.addTags("sample", self.sample.sample_id, ["reviewed"])
+        self.assertEqual([self.other_sample.family_id], self._search("family", "tag:apt"))
+        self.assertNotIn(self.other_sample.family_id, self._search("family", "tags:!=apt"))
+        self.assertEqual([self.sample.sample_id], self._search("sample", "tags:reviewed"))
+        self.assertEqual([self.other_sample.sample_id], self._search("sample", "tags:!=reviewed"))
+        self.assertEqual([self.sample.sample_id], self._search("sample", "tag:?view"))
+        self.assertEqual([], self._search("sample", "reviewed"))
 
 
 @pytest.mark.mongo
