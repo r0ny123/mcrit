@@ -17,6 +17,40 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
+- `/status` reports `escaper_fingerprints`, and exports record, a fingerprint of how smda escapes
+  AArch64, CIL and Dalvik code next to the Intel one ([#93]), so that a change in how smda escapes any
+  architecture MCRIT computes MinHashes for shows, not only an Intel one. The Intel fingerprint, and
+  `escaper_fingerprint` in `/status`, are unchanged; an import compares only the architectures the
+  export holds samples of. An export made before carries the Intel fingerprint alone: it is compared
+  as before when it holds Intel samples, and otherwise logs that it has nothing to compare.
+
+### Fixed
+
+- Sample, query, function query, vs, vs-group and cross match reports included matches against
+  samples of another architecture ([#93]). A PicHash or MinHash only means the same thing for two
+  functions escaped by one instruction set's rules; across architectures, shingles still collide in
+  bands now and then. On a corpus of 6,315 Intel, 458 CIL, 14 Dalvik and 13 AArch64 samples (and 444
+  SMDA could not disassemble), sample matching reported them at scores of 51 to 61, just over the
+  threshold - one Dalvik sample was reported against 84 samples of other architectures next to 13 of
+  its own. Such matches are now left out, and with `MINHASH_MATCHING_SHORTLIST_SIZE` set, samples of
+  another architecture no longer take places on the shortlist. A corpus of one architecture is
+  matched as before, with the same lookups (with the shortlist on, the entries of the samples voted
+  for are fetched in one batch as well). A sample whose architecture is unknown (an empty string, as
+  a sample SMDA could not disassemble has) is not taken as another one. Results computed before and
+  kept by the job cache still hold such matches until requested with `force_recalculation`.
+
+- Block hashes of non-Intel code are computed with that architecture's escaper: MCRIT now requires
+  picblocks 2.1.0, which escaped every block as Intel code before ([#93]). picblocks was unpinned
+  above 1.1.2, so installations set up since its 2.1.0 release on 2026-09-13 compute the new hashes
+  already; this makes it the floor. Intel block hashes are unchanged. Non-Intel samples indexed
+  before keep the block hashes they were stored with, and `recalculatePicHashes` only revisits
+  samples of old SMDA versions, so their unique blocks compare correctly only with samples indexed
+  before; submitting such samples again gives them the new hashes.
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
 - **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
   `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
   `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
@@ -32,13 +66,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
   Family entries carry no sample lists ([#207]).
 
-- `/status` reports `escaper_fingerprints`, and exports record, a fingerprint of how smda escapes
-  AArch64, CIL and Dalvik code next to the Intel one ([#93]), so that a change in how smda escapes any
-  architecture MCRIT computes MinHashes for shows, not only an Intel one. The Intel fingerprint, and
-  `escaper_fingerprint` in `/status`, are unchanged; an import compares only the architectures the
-  export holds samples of. An export made before carries the Intel fingerprint alone: it is compared
-  as before when it holds Intel samples, and otherwise logs that it has nothing to compare.
-
 ### Fixed
 
 - **`McritClient` waited forever on a server that did not answer.** None of its requests passed
@@ -53,26 +80,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
   `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
   client's source and fails for any request added without a timeout.
-
-- Sample, query, function query, vs, vs-group and cross match reports included matches against
-  samples of another architecture ([#93]). A PicHash or MinHash only means the same thing for two
-  functions escaped by one instruction set's rules; across architectures, shingles still collide in
-  bands now and then. On a corpus of 6,315 Intel, 458 CIL, 14 Dalvik and 13 AArch64 samples (and 444
-  SMDA could not disassemble), sample matching reported them at scores of 51 to 61, just over the
-  threshold - one Dalvik sample was reported against 84 samples of other architectures next to 13 of
-  its own. Such matches are now left out, and with `MINHASH_MATCHING_SHORTLIST_SIZE` set, samples of
-  another architecture no longer take places on the shortlist. A corpus of one architecture is
-  matched as before, with the same lookups (with the shortlist on, the entries of the samples voted
-  for are fetched in one batch as well). A sample whose architecture is unknown (an empty string, as
-  a sample SMDA could not disassemble has) is not taken as another one. Results computed before and
-  kept by the job cache still hold such matches until requested with `force_recalculation`.
-- Block hashes of non-Intel code are computed with that architecture's escaper: MCRIT now requires
-  picblocks 2.1.0, which escaped every block as Intel code before ([#93]). picblocks was unpinned
-  above 1.1.2, so installations set up since its 2.1.0 release on 2026-09-13 compute the new hashes
-  already; this makes it the floor. Intel block hashes are unchanged. Non-Intel samples indexed
-  before keep the block hashes they were stored with, and `recalculatePicHashes` only revisits
-  samples of old SMDA versions, so their unique blocks compare correctly only with samples indexed
-  before; submitting such samples again gives them the new hashes.
 
 ## [1.11.0] - 2026-09-25
 
