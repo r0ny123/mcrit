@@ -17,6 +17,19 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
+- **Families carry `actors`, the names they are attributed to**, set through
+  `PUT /families/{id}` and `McritClient.modifyFamily(family_id, actors=[...])` (an empty list
+  clears them), kept through a rename, and carried by exports as `family_actors`, which imports
+  merge into what the target already knows. Names are 1-64 characters of letters, digits,
+  spaces, dots, dashes and underscores; anything else answers 400 without touching the family.
+  Families stored before read as an empty list, so no migration. NOTE that
+  `McritClient.modifyFamily` now sends its update as JSON, since a list does not survive form
+  encoding; the route accepts both ([#57]).
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
 - **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
   `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
   `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
@@ -31,15 +44,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
   as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
   Family entries carry no sample lists ([#207]).
-
-- **Families carry `actors`, the names they are attributed to**, set through
-  `PUT /families/{id}` and `McritClient.modifyFamily(family_id, actors=[...])` (an empty list
-  clears them), kept through a rename, and carried by exports as `family_actors`, which imports
-  merge into what the target already knows. Names are 1-64 characters of letters, digits,
-  spaces, dots, dashes and underscores; anything else answers 400 without touching the family.
-  Families stored before read as an empty list, so no migration. NOTE that
-  `McritClient.modifyFamily` now sends its update as JSON, since a list does not survive form
-  encoding; the route accepts both ([#57]).
 
 ### Fixed
 
