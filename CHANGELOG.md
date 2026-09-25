@@ -15,6 +15,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- `MemoryStorage.getUniqueBlocks` failed with `KeyError` whenever the store held samples other than
+  the ones asked about: it collected the blocks of every stored function and then counted them
+  against the requested samples only. It now reads the blocks of the requested samples, as
+  `MongoDbStorage` does, and answers the same.
+
 ## [1.11.0] - 2026-09-25
 
 ### Added
