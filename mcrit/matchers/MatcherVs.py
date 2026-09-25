@@ -16,6 +16,9 @@ class MatcherVs(MatcherInterface):
         # whole corpus could only drop some of them
         return 0
 
+    def _takesShortlist(self) -> bool:
+        return False
+
     @add_duration
     def getMatchesForSample(self, sample_id: int, other_sample_id: int):
         self._function_entries = self._storage.getFunctionsBySampleId(sample_id)

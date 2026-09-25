@@ -33,7 +33,8 @@ class MatchResource:
 
     @timing
     def on_get_sample_cross(self, req, resp, sample_ids=None):
-        parameters = readMatchingParams(self.index, req, resp, "MatchResource.on_get_sample_cross")
+        # a cross compare takes no shortlist: it could only drop the samples it names
+        parameters = readMatchingParams(self.index, req, resp, "MatchResource.on_get_sample_cross", with_shortlist=False)
         if parameters is None:
             return
         if sample_ids is None:

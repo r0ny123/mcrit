@@ -89,7 +89,9 @@ class QueryResource:
             db_log_msg(self.index, req, "QueryResource.on_post_query_smda_function - failed - no POST body.")
             return
         smda_function = req.media
-        summary = self.index.getMatchesForSmdaFunction(smda_function, **parameters)
+        # McritClient.getMatchesForSmdaFunction sends it; only this route has a use for it
+        exclude_self_matches = str(req.params.get("exclude_self_matches", "")).lower() == "true"
+        summary = self.index.getMatchesForSmdaFunction(smda_function, exclude_self_matches=exclude_self_matches, **parameters)
         resp.data = jsonify({"status": "successful", "data": summary})
         db_log_msg(self.index, req, "QueryResource.on_post_query_smda_function - success.")
 

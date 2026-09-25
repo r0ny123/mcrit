@@ -185,6 +185,10 @@ class MatcherInterface:
     def _getShortlistSize(self) -> int:
         return self._shortlist_size
 
+    def _takesShortlist(self) -> bool:
+        """False for matchers restricted to the samples they name, which never shortlist."""
+        return True
+
     def _resolveSampleIds(self, function_ids: np.ndarray) -> Optional[np.ndarray]:
         """Sample id per candidate function id, or None when storage cannot answer cheaply."""
         resolver = getattr(self._storage, "getSampleIdsForFunctionIdArray", None)
@@ -946,15 +950,30 @@ class MatcherInterface:
                     matches_per_sample[foreign_sample_id][own_function_id].append(("library", 0))
         return matches_per_sample
 
+    def fellBackUnforeseen(self) -> bool:
+        """Whether a knob could not be applied although the job's arguments did not say it would not be."""
+        return self._shortlist_fallback is not None and self._shortlist_unavailable is None
+
     def _getMatchingInfo(self) -> Dict[str, Any]:
         """The knobs this job was asked for and the ones it applied, with why any of them differ (#217).
 
         A job that fell back to matching the whole corpus is a different result from a shortlisted
         one, so the report says so rather than leaving the caller to infer it from the matches.
+        `requested` holds the values the job was submitted with (None where its caller left one to
+        the worker's configuration). In `applied`, None marks a knob that had nothing to act on:
+        the shortlist of a match restricted to named samples, and both the shortlist and the df
+        cutoff when band_matches_required is 0 and no MinHash candidates are looked up at all.
         """
+        minhash_stage = self._band_matches_required > 0
         band_df_cutoff = self._band_df_cutoff
         if band_df_cutoff is None:
             band_df_cutoff = getattr(self._worker.config.STORAGE_CONFIG, "STORAGE_BAND_DF_CUTOFF", 0)
+        if self._sample_shortlist is not None:
+            shortlist_size = self._getShortlistSize()
+        elif minhash_stage and self._takesShortlist():
+            shortlist_size = 0
+        else:
+            shortlist_size = None
         fallbacks = {}
         if self._shortlist_fallback is not None:
             fallbacks["shortlist_size"] = self._shortlist_fallback
@@ -964,8 +983,8 @@ class MatcherInterface:
                 "minhash_threshold": self._minhash_threshold,
                 "pichash_size": self._pichash_size,
                 "band_matches_required": self._band_matches_required,
-                "shortlist_size": self._getShortlistSize() if self._sample_shortlist is not None else 0,
-                "band_df_cutoff": band_df_cutoff,
+                "shortlist_size": shortlist_size,
+                "band_df_cutoff": band_df_cutoff if minhash_stage else None,
             },
             "fallbacks": fallbacks,
         }

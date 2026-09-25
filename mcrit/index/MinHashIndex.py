@@ -13,6 +13,7 @@ from mcrit.config.McritConfig import McritConfig
 from mcrit.config.MinHashConfig import MinHashConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
+from mcrit.index.MatchingParameters import resolveMatchingParams
 from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor
 from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.libs.utility import compress_encode, decompress_decode
@@ -395,12 +396,104 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         # is answered synchronously instead of as a job (fkie-cad/mcritweb#72)
         return self.getStorage().modifyFunction(function_id, update_information, username=username)
 
+    #### MATCHING JOBS ####
+    # Each submits its job with every matching knob resolved to the value the job runs with, so
+    # the job's arguments - its cache key - hold those values rather than the absence of the ones
+    # a caller left out (#217). The server resolves them as well; resolving again is a no-op.
+
+    def _submitMatchingJob(self, method_name, job_args, knobs, job_options, with_shortlist=True):
+        resolved = resolveMatchingParams(knobs, self.config, storage=self._storage, with_shortlist=with_shortlist)
+        return getattr(super(), method_name)(*job_args, **resolved, **job_options)
+
+    def getMatchesForSample(
+        self, sample_id, minhash_threshold=None, pichash_size=None, band_matches_required=None, shortlist_size=None, band_df_cutoff=None, shortlist_unavailable=None, **job_options
+    ):
+        knobs = dict(
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
+            band_matches_required=band_matches_required,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
+        )
+        return self._submitMatchingJob("getMatchesForSample", (sample_id,), knobs, job_options)
+
+    def getMatchesForSmdaReport(
+        self,
+        report_json,
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        shortlist_size=None,
+        band_df_cutoff=None,
+        shortlist_unavailable=None,
+        **job_options,
+    ):
+        knobs = dict(
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
+            band_matches_required=band_matches_required,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
+        )
+        return self._submitMatchingJob("getMatchesForSmdaReport", (report_json,), knobs, job_options)
+
+    def getMatchesForMappedBinary(
+        self,
+        binary,
+        base_address,
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        shortlist_size=None,
+        band_df_cutoff=None,
+        shortlist_unavailable=None,
+        **job_options,
+    ):
+        knobs = dict(
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
+            band_matches_required=band_matches_required,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
+        )
+        return self._submitMatchingJob("getMatchesForMappedBinary", (binary, base_address), knobs, job_options)
+
+    def getMatchesForUnmappedBinary(
+        self, binary, minhash_threshold=None, pichash_size=None, band_matches_required=None, shortlist_size=None, band_df_cutoff=None, shortlist_unavailable=None, **job_options
+    ):
+        knobs = dict(
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
+            band_matches_required=band_matches_required,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
+        )
+        return self._submitMatchingJob("getMatchesForUnmappedBinary", (binary,), knobs, job_options)
+
+    def getMatchesForSampleVs(self, sample_id, other_sample_id, minhash_threshold=None, pichash_size=None, band_matches_required=None, band_df_cutoff=None, **job_options):
+        # restricted to the sample it names: no shortlist
+        knobs = dict(minhash_threshold=minhash_threshold, pichash_size=pichash_size, band_matches_required=band_matches_required, band_df_cutoff=band_df_cutoff)
+        return self._submitMatchingJob("getMatchesForSampleVs", (sample_id, other_sample_id), knobs, job_options, with_shortlist=False)
+
+    def getMatchesForSampleVsGroup(self, sample_id, other_sample_ids, minhash_threshold=None, pichash_size=None, band_matches_required=None, band_df_cutoff=None, **job_options):
+        # restricted to the samples it names: no shortlist
+        knobs = dict(minhash_threshold=minhash_threshold, pichash_size=pichash_size, band_matches_required=band_matches_required, band_df_cutoff=band_df_cutoff)
+        return self._submitMatchingJob("getMatchesForSampleVsGroup", (sample_id, other_sample_ids), knobs, job_options, with_shortlist=False)
+
     def getMatchesCross(self, sample_ids: List[int], sample_group_only=False, force_recalculation=False, username=None, **params):
         sample_to_job_id = {}
+        # a cross compare reads the named samples out of each child's report, so a shortlist -
+        # ranked over the whole corpus - could only drop some of them: vs-group children take
+        # none, and 1-vs-corpus children are asked for none rather than the configured one
+        params.pop("shortlist_unavailable", None)
         if sample_group_only:
-            # vs-group jobs match against the group only, a shortlist does not apply to them
             params.pop("shortlist_size", None)
-            params.pop("shortlist_unavailable", None)
+        else:
+            params["shortlist_size"] = 0
         for id in sample_ids:
             if sample_group_only:
                 job_id = self.getMatchesForSampleVsGroup(id, [sid for sid in sample_ids if sid != id], force_recalculation=force_recalculation, username=username, **params)
@@ -435,7 +528,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             minhash_threshold=minhash_threshold,
             pichash_size=pichash_size,
             band_matches_required=band_matches_required,
-            exclude_self_matches=False,
+            exclude_self_matches=exclude_self_matches,
             shortlist_size=shortlist_size,
             band_df_cutoff=band_df_cutoff,
             shortlist_unavailable=shortlist_unavailable,

@@ -30,7 +30,7 @@ from mcrit.matchers.MatcherVsGroup import MatcherVsGroup
 from mcrit.minhash.MinHasher import MinHasher
 from mcrit.queue.LocalQueue import Job
 from mcrit.queue.QueueFactory import QueueFactory
-from mcrit.queue.QueueRemoteCalls import NoProgressReporter, QueueRemoteCallee, Remote
+from mcrit.queue.QueueRemoteCalls import NoProgressReporter, QueueRemoteCallee, Remote, UncacheableResult
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
 
@@ -499,6 +499,19 @@ class Worker(QueueRemoteCallee):
         progress_reporter.step()
         return blocks_result_dict
 
+    @staticmethod
+    def _asJobResult(matcher, match_report):
+        """The report as the job's result, kept from answering later requests when it fell back unforeseen.
+
+        A shortlist the server found unavailable is part of the job's arguments, so its fallback
+        result has a cache key of its own. One that became unavailable only after submission (a
+        rebuild of the function range index started in between) is not, and would otherwise be
+        served to every later identical request, shortlist or not (#217).
+        """
+        if matcher.fellBackUnforeseen():
+            return UncacheableResult(match_report)
+        return match_report
+
     # Reports PROGRESS
     @Remote(progress=True, json_locations=[0])
     def getMatchesForSmdaReport(
@@ -524,7 +537,7 @@ class Worker(QueueRemoteCallee):
         )
         smda_report = SmdaReport.fromDict(report_json)
         match_report = matcher.getMatchesForSmdaReport(smda_report)
-        return match_report
+        return self._asJobResult(matcher, match_report)
 
     # Reports PROGRESS
     @Remote(progress=True, file_locations=[0])
@@ -555,7 +568,7 @@ class Worker(QueueRemoteCallee):
             shortlist_unavailable=shortlist_unavailable,
         )
         match_report = matcher.getMatchesForSmdaReport(SMDA_REPORT)
-        return match_report
+        return self._asJobResult(matcher, match_report)
 
     # Reports PROGRESS
     @Remote(progress=True, file_locations=[0])
@@ -585,7 +598,7 @@ class Worker(QueueRemoteCallee):
             shortlist_unavailable=shortlist_unavailable,
         )
         match_report = matcher.getMatchesForSmdaReport(SMDA_REPORT)
-        return match_report
+        return self._asJobResult(matcher, match_report)
 
     # Reports PROGRESS
     @Remote(progress=True)
@@ -611,7 +624,7 @@ class Worker(QueueRemoteCallee):
             shortlist_unavailable=shortlist_unavailable,
         )
         match_report = matcher.getMatchesForSample(sample_id)
-        return match_report
+        return self._asJobResult(matcher, match_report)
 
     # Reports PROGRESS
     @Remote(progress=True)

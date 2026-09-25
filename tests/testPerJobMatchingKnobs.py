@@ -12,10 +12,12 @@ from smda.common.SmdaReport import SmdaReport
 from mcrit.client.McritClient import McritClient
 from mcrit.config.MinHashConfig import MinHashConfig
 from mcrit.config.StorageConfig import StorageConfig
+from mcrit.index.MatchingParameters import MATCHING_KNOBS, resolveMatchingParams
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.matchers.MatcherSample import MatcherSample
 from mcrit.matchers.MatcherVs import MatcherVs
 from mcrit.matchers.MatcherVsGroup import MatcherVsGroup
+from mcrit.queue.QueueRemoteCalls import UncacheableResult
 from mcrit.server.MatchResource import MatchResource
 from mcrit.server.QueryResource import QueryResource
 from mcrit.server.utils import MatchingParameterError, getMatchingParams
@@ -23,7 +25,7 @@ from mcrit.storage.MatchingResult import MatchingResult
 from mcrit.storage.MongoDbStorage import MongoDbStorage
 from mcrit.Worker import Worker
 
-from .context import config
+from .context import config, getTestMongoServerAndPort
 
 
 def configured(shortlist_size=0, band_df_cutoff=0):
@@ -70,20 +72,51 @@ class MatchingParamsTest(unittest.TestCase):
         with self.assertRaises(MatchingParameterError):
             getMatchingParams({"shortlist_size": "-1"}, mcrit_config, with_shortlist=False)
 
+    def test_a_repeated_parameter_is_refused_for_the_new_knobs(self):
+        """falcon hands a repeated query parameter over as a list."""
+        for key in ("shortlist_size", "band_df_cutoff"):
+            with self.subTest(key), self.assertRaisesRegex(MatchingParameterError, "must be an integer"):
+                getMatchingParams({key: ["1", "2"]})
+
+
+class ResolveMatchingParamsTest(unittest.TestCase):
+    """The resolution MinHashIndex applies to every matching job, whoever submits it."""
+
     def test_a_shortlist_the_storage_cannot_apply_is_marked_in_the_arguments(self):
         """So a fallback result gets its own cache key and is not served once the shortlist works again."""
         mcrit_config = configured(shortlist_size=100)
         storage = MagicMock()
         storage.isFunctionRangeIndexComplete.return_value = False
-        self.assertEqual("function_range_index_incomplete", getMatchingParams({}, mcrit_config, storage=storage)["shortlist_unavailable"])
+        self.assertEqual("function_range_index_incomplete", resolveMatchingParams({}, mcrit_config, storage=storage)["shortlist_unavailable"])
         storage.isFunctionRangeIndexComplete.return_value = True
-        self.assertNotIn("shortlist_unavailable", getMatchingParams({}, mcrit_config, storage=storage))
+        self.assertNotIn("shortlist_unavailable", resolveMatchingParams({}, mcrit_config, storage=storage))
         # a storage that cannot resolve samples at all
-        self.assertEqual("function_range_index_unsupported", getMatchingParams({}, mcrit_config, storage=object())["shortlist_unavailable"])
+        self.assertEqual("function_range_index_unsupported", resolveMatchingParams({}, mcrit_config, storage=object())["shortlist_unavailable"])
         # nothing to check, and no read, when no shortlist is asked for
         storage.reset_mock()
-        self.assertNotIn("shortlist_unavailable", getMatchingParams({"shortlist_size": "0"}, mcrit_config, storage=storage))
+        self.assertNotIn("shortlist_unavailable", resolveMatchingParams({"shortlist_size": 0}, mcrit_config, storage=storage))
         storage.isFunctionRangeIndexComplete.assert_not_called()
+        # a mark the server already made is kept, and not checked again
+        marked = resolveMatchingParams({"shortlist_unavailable": "function_range_index_incomplete"}, mcrit_config, storage=storage)
+        self.assertEqual("function_range_index_incomplete", marked["shortlist_unavailable"])
+        storage.isFunctionRangeIndexComplete.assert_not_called()
+
+    def test_the_knobs_come_first_in_a_fixed_order(self):
+        """So a job listing shows each knob in the same position whichever of them a request named."""
+        resolved = resolveMatchingParams({"force_recalculation": True, "band_df_cutoff": 3, "shortlist_size": 5}, configured())
+        self.assertEqual([*MATCHING_KNOBS[:5], "force_recalculation"], list(resolved))
+
+    def test_named_samples_take_no_shortlist(self):
+        resolved = resolveMatchingParams({"shortlist_size": 5, "shortlist_unavailable": "function_range_index_incomplete"}, configured(shortlist_size=10), with_shortlist=False)
+        self.assertNotIn("shortlist_size", resolved)
+        self.assertNotIn("shortlist_unavailable", resolved)
+
+    def test_a_cutoff_above_the_bucket_size_is_refused_for_direct_callers_too(self):
+        mcrit_config = configured()
+        mcrit_config.STORAGE_CONFIG = StorageConfig(STORAGE_METHOD=config.STORAGE_CONFIG.STORAGE_METHOD, STORAGE_BAND_BUCKET_SIZE=100)
+        with self.assertRaisesRegex(MatchingParameterError, "STORAGE_BAND_BUCKET_SIZE"):
+            resolveMatchingParams({"band_df_cutoff": 101}, mcrit_config)
+        self.assertEqual(100, resolveMatchingParams({"band_df_cutoff": 100}, mcrit_config)["band_df_cutoff"])
 
 
 class JobCacheTest(unittest.TestCase):
@@ -145,6 +178,41 @@ class JobCacheTest(unittest.TestCase):
         self.index._storage._function_range_index_complete = True
         self.assertNotEqual(during_rebuild, self._requestThroughTheApi())
 
+    def test_a_fallback_nobody_foresaw_is_never_served_again(self):
+        """The index was complete at submission and not when the job ran (a rebuild started in between)."""
+        self.index.config = configured(shortlist_size=10)
+        self.index._storage._function_range_index_complete = False
+        # the submission-time check sees a complete index, the job itself does not
+        with patch("mcrit.index.MatchingParameters.shortlistUnavailableReason", return_value=None):
+            first = self._requestThroughTheApi()
+            job_data = self.index.getJobData(first)
+            self.assertNotIn("shortlist_unavailable", json.loads(job_data["payload"]["params"]))
+            self.assertIs(False, job_data["cacheable"])
+            # the identical request is not handed the fallback result
+            self.assertNotEqual(first, self._requestThroughTheApi())
+        self.index._storage._function_range_index_complete = True
+        shortlisted = self._requestThroughTheApi()
+        self.assertEqual(shortlisted, self._requestThroughTheApi())
+        self.assertNotIn("cacheable", self.index.getJobData(shortlisted))
+
+    def test_direct_callers_are_keyed_on_the_values_too(self):
+        """Resolution happens in MinHashIndex, so a script or library caller gets it as the server does."""
+        minhash_config = self.index.config.MINHASH_CONFIG
+        implicit = self.index.getMatchesForSample(self.sample_id)
+        explicit = self.index.getMatchesForSample(
+            self.sample_id,
+            minhash_threshold=minhash_config.MINHASH_MATCHING_THRESHOLD,
+            pichash_size=minhash_config.PICHASH_SIZE,
+            band_matches_required=minhash_config.BAND_MATCHES_REQUIRED,
+            shortlist_size=0,
+            band_df_cutoff=0,
+        )
+        self.assertEqual(implicit, explicit)
+        changed = configured()
+        changed.MINHASH_CONFIG.MINHASH_MATCHING_THRESHOLD = 70
+        self.index.config = changed
+        self.assertNotEqual(implicit, self.index.getMatchesForSample(self.sample_id))
+
 
 class MinHashThresholdTest(unittest.TestCase):
     """A request's minhash_score is applied: matching used to filter on the configured threshold only."""
@@ -163,9 +231,12 @@ class MinHashThresholdTest(unittest.TestCase):
             report = worker.getMatchesForSample(sample_ids[0], **knobs)
             return [match[3] for function in report["matches"]["functions"] for match in function["matches"] if match[1] != sample_ids[0]]
 
-        for vectorized in (True, False):
-            with self.subTest(vectorized=vectorized):
+        # every path that filters on the threshold: vectorized, and the pairwise one both in this
+        # process and in the process pool (the default configuration)
+        for vectorized, pool in ((True, False), (False, False), (False, True)):
+            with self.subTest(vectorized=vectorized, pool=pool):
                 mcrit_config.MINHASH_CONFIG.MINHASH_MATCHING_VECTORIZED = vectorized
+                mcrit_config.MINHASH_CONFIG.MINHASH_POOL_MATCHING = pool
                 by_default = foreign_scores()
                 self.assertTrue(any(score <= 80 for score in by_default), "the fixture must have matches the higher threshold drops")
                 stricter = foreign_scores(minhash_threshold=80)
@@ -177,11 +248,23 @@ class MinHashThresholdTest(unittest.TestCase):
 class MatchingInfoTest(unittest.TestCase):
     """The report says which knobs the job was asked for, which it applied, and why they differ (#217)."""
 
+    # on these three reports a shortlist of 1 drops one of the two samples sample 0 matches
+    REPORTS = ("example_report.smda", "example_report_2.smda", "example_report_3.smda")
+
+    def _index(self, mcrit_config):
+        mcrit_config.MINHASH_CONFIG.MINHASH_POOL_INDEXING = False
+        mcrit_config.MINHASH_CONFIG.MINHASH_POOL_MATCHING = False
+        index = MinHashIndex(config=mcrit_config)
+        sample_ids = [index._storage.addSmdaReport(SmdaReport.fromFile(f"tests/{name}")).sample_id for name in self.REPORTS]
+        for sample_id in sample_ids:
+            index.queue._worker.updateMinHashesForSample(sample_id)
+        return index, index.queue._worker, sample_ids[0]
+
     def setUp(self):
-        self.index = MinHashIndex(config=configured())
-        self.worker = self.index.queue._worker
-        self.sample_id = self.index._storage.addSmdaReport(SmdaReport.fromFile("tests/example_report.smda")).sample_id
-        self.worker.updateMinHashesForSample(self.sample_id)
+        self.index, self.worker, self.sample_id = self._index(configured())
+        self.unshortlisted = self.worker.getMatchesForSample(self.sample_id)["matches"]
+        self.shortlisted = self.worker.getMatchesForSample(self.sample_id, shortlist_size=1)["matches"]
+        self.assertNotEqual(self.unshortlisted, self.shortlisted, "the fixture must be one a shortlist changes")
 
     def test_the_defaults_are_recorded_as_applied(self):
         info = self.worker.getMatchesForSample(self.sample_id)["info"]["matching"]
@@ -199,33 +282,66 @@ class MatchingInfoTest(unittest.TestCase):
         )
         self.assertEqual({}, info["fallbacks"])
 
+    def test_the_knobs_a_job_was_given_are_recorded_as_requested_and_applied(self):
+        index, worker, sample_id = self._index(configured(band_df_cutoff=7))
+        info = worker.getMatchesForSample(sample_id, minhash_threshold=70, pichash_size=20, band_matches_required=1)["info"]["matching"]
+        self.assertEqual({"minhash_threshold": 70, "pichash_size": 20, "band_matches_required": 1, "shortlist_size": None, "band_df_cutoff": None}, info["requested"])
+        # the cutoff the job left to the configuration is the configured one
+        self.assertEqual({"minhash_threshold": 70, "pichash_size": 20, "band_matches_required": 1, "shortlist_size": 0, "band_df_cutoff": 7}, info["applied"])
+
     def test_an_applied_shortlist_is_recorded(self):
-        info = self.worker.getMatchesForSample(self.sample_id, shortlist_size=5, band_df_cutoff=7)["info"]["matching"]
-        self.assertEqual((5, 7), (info["requested"]["shortlist_size"], info["requested"]["band_df_cutoff"]))
-        self.assertEqual((5, 7), (info["applied"]["shortlist_size"], info["applied"]["band_df_cutoff"]))
+        report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=1, band_df_cutoff=7)
+        info = report["info"]["matching"]
+        self.assertEqual((1, 7), (info["requested"]["shortlist_size"], info["requested"]["band_df_cutoff"]))
+        self.assertEqual((1, 7), (info["applied"]["shortlist_size"], info["applied"]["band_df_cutoff"]))
         self.assertEqual({}, info["fallbacks"])
+        self.assertNotIsInstance(report, UncacheableResult)
 
     def test_a_shortlist_the_server_found_unavailable_is_reported_not_applied(self):
-        report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=5, shortlist_unavailable="function_range_index_incomplete")
+        report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=1, shortlist_unavailable="function_range_index_incomplete")
         info = report["info"]["matching"]
-        self.assertEqual((5, 0), (info["requested"]["shortlist_size"], info["applied"]["shortlist_size"]))
+        self.assertEqual((1, 0), (info["requested"]["shortlist_size"], info["applied"]["shortlist_size"]))
         self.assertEqual({"shortlist_size": "function_range_index_incomplete"}, info["fallbacks"])
-        # and it is the unshortlisted result
-        self.assertEqual(report["matches"], self.worker.getMatchesForSample(self.sample_id)["matches"])
+        self.assertEqual(self.unshortlisted, report["matches"])
+        # its arguments say it fell back, so its cache key is its own: an ordinary result
+        self.assertNotIsInstance(report, UncacheableResult)
 
-    def test_a_shortlist_that_became_unavailable_by_run_time_is_reported(self):
+    def test_a_shortlist_that_became_unavailable_by_run_time_is_reported_and_not_cached(self):
         self.index._storage._function_range_index_complete = False
-        info = self.worker.getMatchesForSample(self.sample_id, shortlist_size=5)["info"]["matching"]
-        self.assertEqual(0, info["applied"]["shortlist_size"])
-        self.assertEqual({"shortlist_size": "function_range_index_incomplete"}, info["fallbacks"])
+        report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=1)
+        self.assertEqual(0, report["info"]["matching"]["applied"]["shortlist_size"])
+        self.assertEqual({"shortlist_size": "function_range_index_incomplete"}, report["info"]["matching"]["fallbacks"])
+        self.assertEqual(self.unshortlisted, report["matches"])
+        self.assertIsInstance(report, UncacheableResult)
 
-    def test_vs_matching_records_no_shortlist(self):
-        info = self.worker.getMatchesForSampleVs(self.sample_id, self.sample_id)["info"]["matching"]
-        self.assertEqual(0, info["applied"]["shortlist_size"])
+    def test_a_storage_that_cannot_shortlist_is_reported(self):
+        with patch.object(self.index._storage, "getSampleIdsForFunctionIdArray", None):
+            report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=1)
+        self.assertEqual({"shortlist_size": "function_range_index_unsupported"}, report["info"]["matching"]["fallbacks"])
+        self.assertIsInstance(report, UncacheableResult)
+
+    def test_an_index_that_goes_incomplete_mid_job_is_reported(self):
+        # complete for the check before shortlisting starts, incomplete once it resolves candidates
+        answers = iter([True])
+        with patch.object(self.index._storage, "isFunctionRangeIndexComplete", side_effect=lambda: next(answers, False)):
+            report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=1)
+        self.assertEqual({"shortlist_size": "function_range_index_incomplete"}, report["info"]["matching"]["fallbacks"])
+        self.assertEqual(self.unshortlisted, report["matches"])
+        self.assertIsInstance(report, UncacheableResult)
+
+    def test_vs_matching_records_that_no_shortlist_applies(self):
+        index, worker, sample_id = self._index(configured(shortlist_size=1))
+        info = worker.getMatchesForSampleVs(sample_id, sample_id + 1)["info"]["matching"]
+        self.assertIsNone(info["applied"]["shortlist_size"])
+        self.assertEqual({}, info["fallbacks"])
+
+    def test_without_a_minhash_stage_neither_shortlist_nor_cutoff_applies(self):
+        info = self.worker.getMatchesForSample(self.sample_id, band_matches_required=0, shortlist_size=1, band_df_cutoff=7)["info"]["matching"]
+        self.assertEqual((None, None), (info["applied"]["shortlist_size"], info["applied"]["band_df_cutoff"]))
         self.assertEqual({}, info["fallbacks"])
 
     def test_it_survives_a_round_trip_through_matching_result(self):
-        report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=5, shortlist_unavailable="function_range_index_incomplete")
+        report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=1, shortlist_unavailable="function_range_index_incomplete")
         result = MatchingResult.fromDict(report)
         self.assertEqual(report["info"]["matching"], result.matching_info)
         self.assertEqual(report["info"]["matching"], result.toDict()["info"]["matching"])
@@ -351,16 +467,53 @@ class ForwardingTest(unittest.TestCase):
             smda_report.fromDict.return_value = report
             matcher.return_value.getMatchesForSmdaFunction.return_value = {"info": {"job": {}}}
             # force_recalculation arrives as a query parameter and must not break the call
-            MinHashIndex.getMatchesForSmdaFunction(MagicMock(), report, force_recalculation=True, **knobs)
+            MinHashIndex.getMatchesForSmdaFunction(MagicMock(), report, force_recalculation=True, exclude_self_matches=True, **knobs)
         self.assertEqual(knobs, {knob: matcher.call_args.kwargs[knob] for knob in knobs})
+        self.assertIs(True, matcher.call_args.kwargs["exclude_self_matches"])
+
+    def test_the_function_query_route_hands_on_exclude_self_matches(self):
+        """McritClient.getMatchesForSmdaFunction sends it; the route used to drop it."""
+        index = MagicMock()
+        index.config = configured()
+        app = falcon.App()
+        app.add_route("/query/function", QueryResource(index), suffix="query_smda_function")
+        client = falcon.testing.TestClient(app)
+        for query, expected in (("exclude_self_matches=True", True), ("", False)):
+            with self.subTest(query=query):
+                client.simulate_post("/query/function", query_string=query, json={})
+                self.assertIs(expected, index.getMatchesForSmdaFunction.call_args.kwargs["exclude_self_matches"])
 
     def test_group_only_cross_matching_leaves_the_shortlist_out(self):
         index = MagicMock()
         MinHashIndex.getMatchesCross(index, [1, 2], sample_group_only=True, shortlist_unavailable="function_range_index_incomplete", **KNOBS)
         self.assertEqual({"band_df_cutoff": 4}, {knob: value for knob, value in index.getMatchesForSampleVsGroup.call_args.kwargs.items() if knob in KNOBS})
         self.assertNotIn("shortlist_unavailable", index.getMatchesForSampleVsGroup.call_args.kwargs)
-        MinHashIndex.getMatchesCross(index, [1, 2], **KNOBS)
-        self.assertEqual(KNOBS, {knob: index.getMatchesForSample.call_args.kwargs[knob] for knob in KNOBS})
+
+    def test_cross_matching_asks_its_children_for_no_shortlist(self):
+        """A cross compare reads the named samples out of each child's report; a shortlist could drop them."""
+        index = MagicMock()
+        MinHashIndex.getMatchesCross(index, [1, 2], shortlist_unavailable="function_range_index_incomplete", **KNOBS)
+        kwargs = index.getMatchesForSample.call_args.kwargs
+        # explicitly 0, since a child left without one would take the configured shortlist
+        self.assertEqual({"shortlist_size": 0, "band_df_cutoff": 4}, {knob: kwargs[knob] for knob in KNOBS})
+        self.assertNotIn("shortlist_unavailable", kwargs)
+
+    def test_cross_matching_keeps_the_samples_it_names(self):
+        """End to end: a configured shortlist of 1 used to zero the pairs a cross compare exists for."""
+        mcrit_config = configured(shortlist_size=1)
+        mcrit_config.MINHASH_CONFIG.MINHASH_POOL_INDEXING = False
+        mcrit_config.MINHASH_CONFIG.MINHASH_POOL_MATCHING = False
+        index = MinHashIndex(config=mcrit_config)
+        sample_ids = [index._storage.addSmdaReport(SmdaReport.fromFile(f"tests/{name}")).sample_id for name in MatchingInfoTest.REPORTS]
+        for sample_id in sample_ids:
+            index.queue._worker.updateMinHashesForSample(sample_id)
+        cross = index.getResultForJob(index.getMatchesCross(sample_ids))
+        unrestricted = index.queue._worker.getMatchesForSample(sample_ids[0], shortlist_size=0)
+        matched = {sample["sample_id"] for sample in unrestricted["matches"]["samples"]} - {sample_ids[0]}
+        self.assertEqual(2, len(matched))
+        for other_id in matched:
+            with self.subTest(other_id=other_id):
+                self.assertGreater(cross["unweighted"]["matching_percent"][str(sample_ids[0])][str(other_id)], 0)
 
     def test_the_client_sends_them_on_every_matching_request(self):
         client = McritClient("http://mcrit.test")
@@ -403,7 +556,10 @@ class VsShortlistTest(unittest.TestCase):
         client.simulate_get("/matches/sample/cross/1,2", query_string="sample_group_only=true&shortlist_size=5")
         self.assertNotIn("shortlist_size", index.getMatchesCross.call_args.kwargs)
         client.simulate_get("/matches/sample/cross/1,2", query_string="shortlist_size=5")
-        self.assertEqual(5, index.getMatchesCross.call_args.kwargs["shortlist_size"])
+        self.assertNotIn("shortlist_size", index.getMatchesCross.call_args.kwargs)
+        # still validated on these routes
+        self.assertEqual(400, client.simulate_get("/matches/sample/1/2", query_string="shortlist_size=-1").status_code)
+        self.assertEqual(400, client.simulate_get("/matches/sample/cross/1,2", query_string="shortlist_size=abc").status_code)
 
     def test_vs_matchers_ignore_a_configured_shortlist(self):
         index = MinHashIndex(config=configured(shortlist_size=1))
@@ -419,7 +575,10 @@ class BucketSizeTest(unittest.TestCase):
 
     def _config(self):
         mcrit_config = configured(band_df_cutoff=50)
-        mcrit_config.STORAGE_CONFIG = StorageConfig(STORAGE_METHOD="mongodb", STORAGE_BAND_DF_CUTOFF=50, STORAGE_BAND_BUCKET_SIZE=100)
+        server, port = getTestMongoServerAndPort()
+        # never the default server: the storage connects lazily today, but nothing here should
+        # depend on that to stay away from a database that is not a test one
+        mcrit_config.STORAGE_CONFIG = StorageConfig(STORAGE_METHOD="mongodb", STORAGE_SERVER=server, STORAGE_PORT=port, STORAGE_BAND_DF_CUTOFF=50, STORAGE_BAND_BUCKET_SIZE=100)
         return mcrit_config
 
     def test_the_storage_refuses_a_job_cutoff_above_the_bucket_size(self):
