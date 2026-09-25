@@ -17,7 +17,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Fixed
 
-- **`McritClient` waited forever on a server that did not answer.** None of its 57 requests passed
+- **`McritClient` waited forever on a server that did not answer.** None of its requests passed
   a timeout, and requests has none by default, so a server that was down behind a firewall, or up
   but hung, blocked the caller for good: against a socket that accepts and never replies, a
   `getVersion()` was still waiting after 15 s and would have waited indefinitely. In MCRITweb that
