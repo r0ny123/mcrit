@@ -56,9 +56,11 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
     semantics for an array field, which the in-memory storage now follows for list fields too.
     The value is normalised like a tag, so `tag:Packed` finds `packed`. A plain search term does
     not look at tags, so existing searches find what they found before.
-  - A rename that merges a family into another unions their tags, as it does their actors. A
-    merge is not capped at 256, since a rename is no tagging request to refuse and dropping tags
-    would lose them; a family merged past the cap takes no new tag until some are removed.
+  - A rename takes the family's tags along, as it does its actors: onto an unused name they move
+    with it, onto an existing family they are merged into that family's, behind its own. Renaming
+    family 0 (the unknown family) copies them instead, because family 0 stays and keeps its tags.
+    A merge is not capped at 256, since a rename is no tagging request to refuse and dropping
+    tags would lose them; a family merged past the cap takes no new tag until some are removed.
     Moving a sample to another family moves none: family tags stay on the family, and go with it
     when its last sample leaves and it is deleted, as its actors do.
   - Exports carry sample and function tags in their entries and family tags as `family_tags`,

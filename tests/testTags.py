@@ -211,6 +211,14 @@ class MemoryStorageTags(unittest.TestCase):
         # the samples' and functions' own tags do not move
         self.assertEqual([], self.storage.getSampleById(self.sample.sample_id).tags)
 
+    def test_renaming_family_0_copies_its_tags(self):
+        """family 0 (unknown family) stays when its samples are renamed away, and keeps its tags"""
+        self.storage.addTags("family", 0, ["unsorted"])
+        self.storage.addTags("family", self.other_sample.family_id, ["apt"])
+        self.assertTrue(self.storage.modifyFamily(0, {"family_name": "family_b"}))
+        self.assertEqual(["unsorted"], self.storage.getFamily(0).tags)
+        self.assertEqual(["apt", "unsorted"], self.storage.getFamily(self.other_sample.family_id).tags)
+
     def test_an_entity_carries_at_most_the_cap(self):
         many_tags = [f"t{number}" for number in range(MAX_TAGS_PER_ENTITY)]
         for entity, entity_id in (("family", self.sample.family_id), ("sample", self.sample.sample_id), ("function", self.function_ids[0])):
