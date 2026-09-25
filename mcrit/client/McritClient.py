@@ -3,7 +3,7 @@ import functools
 import logging
 import time
 import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests
 from smda.common.SmdaReport import SmdaReport
@@ -193,7 +193,7 @@ class McritClient:
         raw_responses: bool = False,
         raise_client_errors: bool = False,
         raise_server_errors: bool = False,
-        timeout: Any = DEFAULT_TIMEOUT,
+        timeout: Union[None, float, Tuple[Optional[float], Optional[float]]] = DEFAULT_TIMEOUT,
     ) -> None:
         self.mcrit_server = "http://localhost:8000"
         self.headers = {}
@@ -1117,21 +1117,27 @@ class McritClient:
             return None
         return SearchResult.fromDict(data, entry_class)
 
-    def searchFamilies(self, search_term, cursor=None, is_ascending=True, sort_by=None, limit=None) -> Optional[SearchResult[FamilyEntry]]:
+    def searchFamilies(
+        self, search_term: str, cursor: Optional[str] = None, is_ascending: bool = True, sort_by: Optional[str] = None, limit: Optional[int] = None
+    ) -> Optional[SearchResult[FamilyEntry]]:
         """
         Search families by <search_term>, answered as FamilyEntry objects
         Supported by mcritweb API pass-through (as /search/families)
         """
         return self._typed_search("families", FamilyEntry, search_term, cursor=cursor, is_ascending=is_ascending, sort_by=sort_by, limit=limit)
 
-    def searchSamples(self, search_term, cursor=None, is_ascending=True, sort_by=None, limit=None) -> Optional[SearchResult[SampleEntry]]:
+    def searchSamples(
+        self, search_term: str, cursor: Optional[str] = None, is_ascending: bool = True, sort_by: Optional[str] = None, limit: Optional[int] = None
+    ) -> Optional[SearchResult[SampleEntry]]:
         """
         Search samples by <search_term>, answered as SampleEntry objects
         Supported by mcritweb API pass-through (as /search/samples)
         """
         return self._typed_search("samples", SampleEntry, search_term, cursor=cursor, is_ascending=is_ascending, sort_by=sort_by, limit=limit)
 
-    def searchFunctions(self, search_term, cursor=None, is_ascending=True, sort_by=None, limit=None) -> Optional[SearchResult[FunctionEntry]]:
+    def searchFunctions(
+        self, search_term: str, cursor: Optional[str] = None, is_ascending: bool = True, sort_by: Optional[str] = None, limit: Optional[int] = None
+    ) -> Optional[SearchResult[FunctionEntry]]:
         """
         Search functions by <search_term>, answered as FunctionEntry objects
         Supported by mcritweb API pass-through (as /search/functions)
