@@ -1042,7 +1042,6 @@ class MemoryStorage(StorageInterface):
             "band_hashes": len(lengths),
             "postings": sum(lengths),
             "max_df": max(lengths, default=0),
-            "band_hashes_without_df": 0,
             "over": {threshold: [sum(1 for df in lengths if df > threshold), sum(df for df in lengths if df > threshold)] for threshold in thresholds},
         }
 

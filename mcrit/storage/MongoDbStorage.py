@@ -1989,21 +1989,28 @@ class MongoDbStorage(StorageInterface):
 
     @staticmethod
     def _bandDfCountPipeline(thresholds: List[int]) -> List[Dict[str, Any]]:
-        """The aggregation _countBandDf runs per band; it reads band_hash and df and nothing else."""
+        """The aggregation _countBandDf runs per band: one $group over df and nothing else.
+
+        Only bucket 0 of a hash carries df (the total across its buckets; the buckets above it carry
+        none), so a document with df > 0 is exactly one band hash and its df is that hash's whole
+        posting-list length. Counting those documents and summing their df therefore needs no
+        grouping by band_hash: one running total per band, whose memory does not grow with the
+        number of hashes and so never needs allowDiskUse. A document without df (a bucket above 0)
+        or with df 0 (an empty one) adds nothing to any of the counts.
+        """
+        with_df = {"$gt": ["$df", 0]}
         over_accumulators: Dict[str, Any] = {}
         for threshold in thresholds:
             over = {"$gt": ["$df", threshold]}
             over_accumulators["hashes_over_%d" % threshold] = {"$sum": {"$cond": [over, 1, 0]}}
             over_accumulators["postings_over_%d" % threshold] = {"$sum": {"$cond": [over, "$df", 0]}}
         return [
-            {"$group": {"_id": "$band_hash", "df": {"$max": "$df"}}},
             {
                 "$group": {
                     "_id": None,
-                    "band_hashes": {"$sum": {"$cond": [{"$gt": ["$df", 0]}, 1, 0]}},
-                    "postings": {"$sum": "$df"},
+                    "band_hashes": {"$sum": {"$cond": [with_df, 1, 0]}},
+                    "postings": {"$sum": {"$cond": [with_df, "$df", 0]}},
                     "max_df": {"$max": "$df"},
-                    "band_hashes_without_df": {"$sum": {"$cond": [{"$eq": [{"$ifNull": ["$df", None]}, None]}, 1, 0]}},
                     **over_accumulators,
                 }
             },
@@ -2012,25 +2019,22 @@ class MongoDbStorage(StorageInterface):
     def _countBandDf(self, band_number: int, thresholds: List[int]) -> Dict[str, Any]:
         """Count one band's posting lists from the (band_hash, df) index alone.
 
-        The pipeline only reads band_hash and df, both in the hinted index, so the plan is a covered
-        index scan: no band document - and no posting list - is fetched. Measured on a 7,244-sample
-        corpus at about 2 s per band.
+        The pipeline only reads df, which the hinted index carries, so the plan is a covered index
+        scan: no band document - and no posting list - is fetched. On a 7,244-sample corpus
+        (MongoDB 7.0) a single $group of this shape took 39.3 s for all 20 bands, 1.1 to 2 s per
+        band.
 
-        Grouping by band_hash first is what makes bucketing come out right. Under
-        STORAGE_BAND_BUCKET_SIZE only bucket 0 carries df, as the total across every bucket, and the
-        buckets above it carry none; $max over a hash's documents therefore yields that total. Summing
-        df would come out the same without the grouping, but counting documents would count a spilled
-        hash once per bucket. A hash none of whose documents carries a df ends up as null and is reported as
-        band_hashes_without_df, instead of silently counting as zero postings.
+        Postings in buckets above 0 of a hash whose bucket 0 is missing carry no df and are not
+        counted; with the cutoff on they are never served either. rebuild_band_df_index recreates
+        the missing bucket 0 from the buckets that remain.
         """
         collection = self._getDb()["band_%d" % band_number]
-        rows = list(collection.aggregate(self._bandDfCountPipeline(thresholds), hint=self._bandDfIndexName(band_number), allowDiskUse=True))
+        rows = list(collection.aggregate(self._bandDfCountPipeline(thresholds), hint=self._bandDfIndexName(band_number)))
         row = rows[0] if rows else {}
         return {
             "band_hashes": int(row.get("band_hashes") or 0),
             "postings": int(row.get("postings") or 0),
             "max_df": int(row.get("max_df") or 0),
-            "band_hashes_without_df": int(row.get("band_hashes_without_df") or 0),
             "over": {threshold: [int(row.get("hashes_over_%d" % threshold) or 0), int(row.get("postings_over_%d" % threshold) or 0)] for threshold in thresholds},
         }
 
@@ -2065,7 +2069,8 @@ class MongoDbStorage(StorageInterface):
         upsert filter `{band_hash, bucket: 0}` would not match - it would insert a *second*
         document for the hash and split the posting list invisibly. Stamping `bucket: 0` here is
         what makes those documents addressable, so this has to run after enabling the knob and
-        before the next write.
+        before the next write. It also recreates a hash's bucket 0 where that is missing while
+        buckets above it survive, since bucket 0 holds the hash's only df.
 
         Writes in batches rather than one bulk_write over the whole collection, because the
         rebuild is the one operation whose cost does follow corpus size and a single batch of
@@ -2086,7 +2091,11 @@ class MongoDbStorage(StorageInterface):
                 if int(entry["bucket"] or 0) == tail:
                     tail_n = int(entry["n"])
                     break
-            pending.append(UpdateOne({"band_hash": row["_id"], "bucket": {"$in": [0, None]}}, {"$set": {"bucket": 0, "df": int(row["df"]), "tail": tail, "tail_n": tail_n}}))
+            # upsert while postings survive, as _recomputeBandBookkeeping does: a hash whose bucket 0
+            # is missing carries no df anywhere, so without it the cutoff never serves its postings
+            # and the coverage report does not count them
+            df = int(row["df"])
+            pending.append(UpdateOne({"band_hash": row["_id"], "bucket": {"$in": [0, None]}}, {"$set": {"bucket": 0, "df": df, "tail": tail, "tail_n": tail_n}}, upsert=df > 0))
             if len(pending) >= 5000:
                 collection.bulk_write(pending, ordered=False)
                 num_hashes += len(pending)

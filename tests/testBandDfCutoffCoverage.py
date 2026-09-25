@@ -26,8 +26,9 @@ from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.queue.QueueFactory import QueueFactory
 from mcrit.server import application_routes
 from mcrit.server.StatusResource import StatusResource
+from mcrit.storage.MongoDbStorage import MongoDbStorage
 from mcrit.storage.StorageFactory import StorageFactory
-from mcrit.storage.StorageInterface import BAND_DF_REFERENCE_CUTOFFS
+from mcrit.storage.StorageInterface import BAND_DF_CUTOFF_MAX, BAND_DF_REFERENCE_CUTOFFS
 
 from .context import getTestMongoServerAndPort
 
@@ -131,10 +132,22 @@ class BandDfCutoffCoverageTest(unittest.TestCase):
 
     def testInvalidCutoffIsRefused(self):
         storage = syntheticIndex()._storage
-        for cutoff in (-1, 1.5, True, "200"):
+        for cutoff in (-1, 1.5, True, "200", BAND_DF_CUTOFF_MAX + 1):
             with self.subTest(cutoff=cutoff):
                 with self.assertRaises(ValueError):
                     storage.getBandDfCutoffCoverage(band_df_cutoff=cutoff)
+
+    def testLargestBsonIntegerIsAccepted(self):
+        report = syntheticIndex()._storage.getBandDfCutoffCoverage(band_df_cutoff=BAND_DF_CUTOFF_MAX)
+        self.assertEqual(report["band_df_cutoff"], 2**63 - 1)
+        self.assertEqual(report["totals"]["postings_over_cutoff"], 0)
+
+    def testReportCarriesNoPerHashDiagnostics(self):
+        """band_hashes_without_df is gone: the (band_hash, df) index cannot tell a healthy bucket above 0
+        from one whose bucket 0 is missing, so only a per-hash group could count it."""
+        report = syntheticIndex()._storage.getBandDfCutoffCoverage(band_df_cutoff=2)
+        self.assertNotIn("band_hashes_without_df", report["totals"])
+        self.assertNotIn("band_hashes_without_df", report["bands"][0])
 
     def testHeadlineIsLoggedAtInfo(self):
         storage = syntheticIndex()._storage
@@ -188,9 +201,17 @@ class BandDfCutoffCoverageResourceTest(unittest.TestCase):
                 self.assertEqual(payload, {"status": "successful", "data": "0123456789abcdef01234567"})
                 index.getBandDfCutoffCoverage.assert_called_once_with(band_df_cutoff=expected, force_recalculation=True, username=None)
 
+    def testLargestBsonIntegerIsAccepted(self):
+        index, resp, _ = self._call("band_df_cutoff=%d" % (2**63 - 1))
+        self.assertEqual(resp.status, falcon.HTTP_200)
+        index.getBandDfCutoffCoverage.assert_called_once_with(band_df_cutoff=2**63 - 1, force_recalculation=True, username=None)
+
     def testMalformedCutoffIsABadRequest(self):
-        """Refused, not ignored: measuring the configured cutoff instead would answer another question."""
-        for value in ("-1", "abc", "1.5", ""):
+        """Refused, not ignored: measuring the configured cutoff instead would answer another question.
+
+        2**63 is refused here rather than failing the job: no BSON integer can carry it.
+        """
+        for value in ("-1", "abc", "1.5", "", str(2**63), str(10**30)):
             with self.subTest(value=value):
                 index, resp, payload = self._call("band_df_cutoff=" + value)
                 self.assertEqual(resp.status, falcon.HTTP_400)
@@ -235,6 +256,33 @@ class BandDfCutoffCoverageEndToEndTest(unittest.TestCase):
         self.assertEqual(raw.status_code, 400)
 
 
+class MongoBandDfCountPipelineTest(unittest.TestCase):
+    """The shape of the MongoDB count, checked without a database."""
+
+    def testOneGroupOverDfAlone(self):
+        """One running total per band, not one group entry per band hash: no allowDiskUse needed."""
+        pipeline = MongoDbStorage._bandDfCountPipeline([1, *BAND_DF_REFERENCE_CUTOFFS])
+        self.assertEqual(len(pipeline), 1)
+        self.assertEqual(list(pipeline[0]), ["$group"])
+        self.assertIsNone(pipeline[0]["$group"]["_id"])
+        referenced = json.dumps(pipeline)
+        self.assertIn('"$df"', referenced)
+        self.assertNotIn("$band_hash", referenced)
+
+    def testAggregateIsHintedAndDoesNotSpillToDisk(self):
+        storage = MongoDbStorage(buildConfig(StorageFactory.STORAGE_METHOD_MONGODB))
+        database = mock.MagicMock()
+        collection = database.__getitem__.return_value
+        collection.index_information.return_value = {"_id_": {"key": [("_id", 1)]}, "band_hash_1_df_1": {"key": [("band_hash", 1), ("df", 1)]}}
+        collection.aggregate.return_value = iter([{"_id": None, "band_hashes": 4, "postings": 369, "max_df": 300, "hashes_over_2": 4, "postings_over_2": 369}])
+        with mock.patch.object(storage, "_getDb", return_value=database):
+            counts = storage._countBandDf(0, [2])
+        self.assertEqual(counts, {"band_hashes": 4, "postings": 369, "max_df": 300, "over": {2: [4, 369]}})
+        (pipeline,), kwargs = collection.aggregate.call_args
+        self.assertEqual(pipeline, MongoDbStorage._bandDfCountPipeline([2]))
+        self.assertEqual(kwargs, {"hint": "band_hash_1_df_1"})
+
+
 @pytest.mark.mongo
 class MongoBandDfCutoffCoverageTest(unittest.TestCase):
     """The MongoDB count comes from the (band_hash, df) index alone and must agree with the posting lists."""
@@ -277,7 +325,6 @@ class MongoBandDfCutoffCoverageTest(unittest.TestCase):
                 self.assertTrue(mongo_report["available"], mongo_report["message"])
                 self.assertEqual(numbersOf(mongo_report), numbersOf(memory_report))
                 self.assertTrue(mongo_report["backend_applies_cutoff"])
-                self.assertEqual(mongo_report["totals"]["band_hashes_without_df"], 0)
 
     def testConfiguredCutoffIsReadFromTheMongoConfig(self):
         configured = MinHashIndex(config=buildConfig(StorageFactory.STORAGE_METHOD_MONGODB, band_df_cutoff=1))._storage.getBandDfCutoffCoverage()
@@ -330,17 +377,41 @@ class MongoBandDfCutoffCoverageTest(unittest.TestCase):
         self.assertIn("[3]", report["message"])
         self.assertIsNone(report["totals"])
 
-    def testHashWithoutDfIsReportedNotCountedAsEmpty(self):
-        """A bucket above 0 whose bucket 0 is gone carries postings no df accounts for."""
-        legacy = self._freshMongo("_legacy", bucket_size=2)
-        storage = legacy._storage
-        storage._updateBands({0: {7: [1, 2, 3]}})
-        storage._getDb()["band_0"].insert_one({"band_hash": 9, "bucket": 1, "function_ids": [4, 5]})
-        report = storage.getBandDfCutoffCoverage(band_df_cutoff=1)
-        self.assertTrue(report["available"])
-        self.assertEqual(report["totals"]["band_hashes_without_df"], 1)
-        self.assertEqual(report["totals"]["postings"], 3)
-        self.assertIn("without a df", report["message"])
+    def testSpilledHashWithAnEmptiedBucketZeroCountsOnce(self):
+        """A pull can empty bucket 0 while it keeps the hash's df for the buckets above it."""
+        bucketed = self._freshMongo("_bucketed", bucket_size=2)
+        storage = bucketed._storage
+        storage._updateBands({0: {7: [1, 2, 3, 4, 5]}, 1: {8: [6]}})
+        storage._updateBands({0: {7: [1, 2]}}, method="pull")
+        band_0 = storage._getDb()["band_0"]
+        self.assertEqual(band_0.find_one({"band_hash": 7, "bucket": 0})["function_ids"], [])
+        self.assertGreater(band_0.count_documents({"band_hash": 7}), 1)
+        totals = storage.getBandDfCutoffCoverage(band_df_cutoff=2)["totals"]
+        self.assertEqual((totals["band_hashes"], totals["postings"], totals["max_df"]), (2, 4, 3))
+        self.assertEqual((totals["band_hashes_over_cutoff"], totals["postings_over_cutoff"]), (1, 3))
+
+    def testHashMissingBucketZeroIsCountedOnceTheRebuildRepairsIt(self):
+        """Bucket 0 holds a hash's only df: without it the postings above are neither counted nor served."""
+        bucketed = self._freshMongo("_bucketed", bucket_size=2)
+        storage = bucketed._storage
+        storage._updateBands({0: {7: [1, 2, 3], 9: [4, 5, 6, 10, 11]}})
+        band_0 = storage._getDb()["band_0"]
+        band_0.delete_one({"band_hash": 9, "bucket": 0})
+        totals = storage.getBandDfCutoffCoverage(band_df_cutoff=1)["totals"]
+        self.assertEqual((totals["band_hashes"], totals["postings"]), (1, 3))
+        storage.rebuildBandDfIndex()
+        repaired = band_0.find_one({"band_hash": 9, "bucket": 0})
+        self.assertIsNotNone(repaired, "the rebuild must recreate the missing bucket 0")
+        self.assertEqual((repaired["df"], repaired["tail"], repaired["tail_n"]), (3, 2, 1))
+        totals = storage.getBandDfCutoffCoverage(band_df_cutoff=1)["totals"]
+        self.assertEqual((totals["band_hashes"], totals["postings"], totals["max_df"]), (2, 6, 3))
+        self.assertEqual((totals["band_hashes_over_cutoff"], totals["postings_over_cutoff"]), (2, 6))
+
+    def testLargestBsonIntegerIsAccepted(self):
+        report = self.mongo._storage.getBandDfCutoffCoverage(band_df_cutoff=BAND_DF_CUTOFF_MAX)
+        self.assertTrue(report["available"], report["message"])
+        self.assertEqual(report["totals"]["postings_over_cutoff"], 0)
+        self.assertGreater(report["totals"]["postings"], 0)
 
     def testCountIsCoveredByTheDfIndex(self):
         """No band document is fetched: the plan reads band_hash and df from the index alone."""

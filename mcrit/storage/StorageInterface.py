@@ -39,6 +39,9 @@ Sha256 = str
 # about, so two reports taken months apart stay comparable. 200 is the documented starting point;
 # the rest bracket it by the factors an operator would plausibly move it by.
 BAND_DF_REFERENCE_CUTOFFS = (50, 100, 200, 500, 1000)
+# The largest cutoff a coverage report can be asked about: it is compared against df inside a
+# MongoDB aggregation, and BSON integers are signed 64-bit, so a larger one cannot be encoded.
+BAND_DF_CUTOFF_MAX = 2**63 - 1
 
 
 class StorageInterface:
@@ -810,9 +813,8 @@ class StorageInterface:
         """Count one band's posting lists by length (df).
 
         Returns band_hashes (hashes holding at least one posting), postings (the sum of their df),
-        max_df, band_hashes_without_df (hashes whose documents carry no df, so their postings are not
-        in `postings`) and, under `over`, for each threshold t the pair [hashes with df > t, postings
-        in them]. Only called once _bandDfUnavailableReason() has answered None.
+        max_df and, under `over`, for each threshold t the pair [hashes with df > t, postings in
+        them]. Only called once _bandDfUnavailableReason() has answered None.
         """
         raise NotImplementedError
 
@@ -830,7 +832,6 @@ class StorageInterface:
             "band_hashes_over_cutoff_fraction": hashes_over / band_hashes if band_hashes else 0.0,
             "postings_over_cutoff_fraction": postings_over / postings if postings else 0.0,
             "max_df": int(counts["max_df"]),
-            "band_hashes_without_df": int(counts["band_hashes_without_df"]),
         }
 
     def getBandDfCutoffCoverage(self, band_df_cutoff: Optional[int] = None, progress_reporter=None) -> Dict[str, Any]:
@@ -850,20 +851,20 @@ class StorageInterface:
             a dict carrying the cutoff evaluated and where it came from, `available` (False, with the
             reason in `message` and no numbers, when the df counts cannot be trusted), `totals` and
             `bands` (band_hashes, postings, band_hashes_over_cutoff, postings_over_cutoff, both
-            fractions, max_df, band_hashes_without_df) and `at_reference_cutoffs`, the totals at a
+            fractions, max_df) and `at_reference_cutoffs`, the totals at a
             fixed set of cutoffs, so any two reports can be compared whatever cutoff each evaluated.
         Raises:
-            ValueError: if band_df_cutoff is negative or not an integer
+            ValueError: if band_df_cutoff is not an integer from 0 to BAND_DF_CUTOFF_MAX
         """
         configured_cutoff = int(getattr(self._storage_config, "STORAGE_BAND_DF_CUTOFF", 0) or 0)
         if band_df_cutoff is None:
             cutoff, cutoff_source = configured_cutoff, "STORAGE_BAND_DF_CUTOFF"
         else:
             if isinstance(band_df_cutoff, bool) or int(band_df_cutoff) != band_df_cutoff:
-                raise ValueError(f"band_df_cutoff must be a non-negative integer, not {band_df_cutoff!r}.")
+                raise ValueError(f"band_df_cutoff must be an integer from 0 to {BAND_DF_CUTOFF_MAX}, not {band_df_cutoff!r}.")
             cutoff, cutoff_source = int(band_df_cutoff), "parameter"
-        if cutoff < 0:
-            raise ValueError(f"band_df_cutoff must be a non-negative integer, not {cutoff}.")
+        if not 0 <= cutoff <= BAND_DF_CUTOFF_MAX:
+            raise ValueError(f"band_df_cutoff must be an integer from 0 to {BAND_DF_CUTOFF_MAX}, not {cutoff}.")
         num_bands = self._storage_config.STORAGE_NUM_BANDS
         report: Dict[str, Any] = {
             "available": False,
@@ -887,11 +888,11 @@ class StorageInterface:
         thresholds = sorted(set(BAND_DF_REFERENCE_CUTOFFS) | ({cutoff} if cutoff > 0 else set()))
         if progress_reporter is not None:
             progress_reporter.set_total(num_bands)
-        total: Dict[str, Any] = {"band_hashes": 0, "postings": 0, "max_df": 0, "band_hashes_without_df": 0, "over": {t: [0, 0] for t in thresholds}}
+        total: Dict[str, Any] = {"band_hashes": 0, "postings": 0, "max_df": 0, "over": {t: [0, 0] for t in thresholds}}
         for band_number in range(num_bands):
             counts = self._countBandDf(band_number, thresholds)
             report["bands"].append({"band_number": band_number, **self._summariseBandDfCounts(counts, cutoff)})
-            for key in ("band_hashes", "postings", "band_hashes_without_df"):
+            for key in ("band_hashes", "postings"):
                 total[key] += int(counts[key])
             total["max_df"] = max(total["max_df"], int(counts["max_df"]))
             for threshold in thresholds:
@@ -934,11 +935,6 @@ class StorageInterface:
             )
         if not report["backend_applies_cutoff"]:
             headline += " This storage backend does not apply the cutoff when matching; the numbers are what MongoDbStorage would skip."
-        if totals["band_hashes_without_df"]:
-            headline += (
-                f" {totals['band_hashes_without_df']:,} band hashes have documents without a df (e.g. a bucket whose bucket 0 is gone); "
-                "their postings are not counted, and with the cutoff on they are never served."
-            )
         return headline
 
     def rebuildMinhashBandIndex(self, progress_reporter=None) -> int:
