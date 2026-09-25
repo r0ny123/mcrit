@@ -397,6 +397,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
 
     def getMatchesCross(self, sample_ids: List[int], sample_group_only=False, force_recalculation=False, username=None, **params):
         sample_to_job_id = {}
+        if sample_group_only:
+            # vs-group jobs match against the group only, a shortlist does not apply to them
+            params.pop("shortlist_size", None)
         for id in sample_ids:
             if sample_group_only:
                 job_id = self.getMatchesForSampleVsGroup(id, [sid for sid in sample_ids if sid != id], force_recalculation=force_recalculation, username=username, **params)
@@ -405,7 +408,16 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             sample_to_job_id[id] = job_id
         return self.combineMatchesToCross(sample_to_job_id, await_jobs=[*sample_to_job_id.values()], force_recalculation=force_recalculation, username=username)
 
-    def getMatchesForSmdaFunction(self, smda_report_with_function: SmdaReport, minhash_threshold=None, pichash_size=None, band_matches_required=None, exclude_self_matches=False):
+    def getMatchesForSmdaFunction(
+        self,
+        smda_report_with_function: SmdaReport,
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        exclude_self_matches=False,
+        shortlist_size=None,
+        band_df_cutoff=None,
+    ):
         # convert function to FunctionEntry
         smda_report = SmdaReport.fromDict(smda_report_with_function)
         assert smda_report is not None and smda_report.xcfg is not None and smda_report.sha256 is not None
@@ -413,7 +425,15 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         if len(smda_report.xcfg) != 1:
             raise ValueError("SmdaReport has to contain exactly one function.")
         function_offset = int([k for k in smda_report.xcfg.keys()][0])
-        matcher = MatcherQueryFunction(self, minhash_threshold=None, pichash_size=None, band_matches_required=band_matches_required, exclude_self_matches=False)
+        matcher = MatcherQueryFunction(
+            self,
+            minhash_threshold=None,
+            pichash_size=None,
+            band_matches_required=band_matches_required,
+            exclude_self_matches=False,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+        )
         # run Matcher for a single function
         match_report = matcher.getMatchesForSmdaFunction(smda_report)
         function_identifier = f"{smda_report.sha256[:8]}@0x{function_offset:x}"

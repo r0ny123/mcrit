@@ -13,7 +13,7 @@ class QueryResource:
 
     @timing
     def on_post_query_smda(self, req, resp):
-        parameters = getMatchingParams(req.params)
+        parameters = getMatchingParams(req.params, self.index.config)
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -31,7 +31,7 @@ class QueryResource:
 
     @timing
     def on_post_query_binary(self, req, resp):
-        parameters = getMatchingParams(req.params)
+        parameters = getMatchingParams(req.params, self.index.config)
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -49,7 +49,7 @@ class QueryResource:
 
     @timing
     def on_post_query_binary_mapped(self, req, resp, base_address=None):
-        parameters = getMatchingParams(req.params)
+        parameters = getMatchingParams(req.params, self.index.config)
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -69,7 +69,7 @@ class QueryResource:
 
     @timing
     def on_post_query_smda_function(self, req, resp):
-        parameters = getMatchingParams(req.params)
+        parameters = getMatchingParams(req.params, self.index.config)
         if not req.content_length:
             resp.data = jsonify(
                 {

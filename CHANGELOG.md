@@ -15,6 +15,33 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Added
+
+- `shortlist_size` and `band_df_cutoff` can be set per matching request, overriding
+  `MINHASH_MATCHING_SHORTLIST_SIZE` and `STORAGE_BAND_DF_CUTOFF` for that job alone (#217): as
+  query parameters of the `/matches/sample/...` and `/query/...` endpoints, and as keyword
+  arguments of `McritClient.requestMatchesForSample`, `requestMatchesCross`,
+  `getMatchesForSmdaFunction` and the three `requestMatchesFor...` query methods. Both change which
+  matches are reported, so they are a choice per request rather than per deployment. A value below
+  0 counts as 0 (off), like the configuration knobs; one MongoDB cannot store (2^63 or more) is
+  ignored like any unreadable value. Matching one sample against another, or within a group
+  (`sample_group_only`), takes only `band_df_cutoff`.
+
+### Fixed
+
+- A matching job's cached result could be served for different two-stage settings (#217). A job is
+  reused for any later request with the same arguments, and the shortlist size and df cutoff were
+  not among them, so after changing either knob a repeated request got the result computed under
+  the old one. The server now records the values each job runs with, the configured ones where the
+  request names none. Jobs from before the upgrade carried no such values, so the first repeat of
+  each request after it computes a fresh result instead of reusing the old one. `MemoryStorage`
+  now applies the df cutoff, which it ignored.
+- Matching one sample against another (`/matches/sample/{a}/{b}`) or within a group
+  (`sample_group_only`) with `MINHASH_MATCHING_SHORTLIST_SIZE` set could leave out the very samples
+  it was asked about: the shortlist is ranked over the whole corpus, and a named sample outside its
+  top entries was not matched. Those matches are restricted to the samples they name already and no
+  longer take a shortlist.
+
 ## [1.10.0] - 2026-09-25
 
 ### Added

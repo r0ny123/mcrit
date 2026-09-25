@@ -60,7 +60,17 @@ class MatcherInterface:
     # how many band votes one exact (PicHash) match is worth when ranking the shortlist
     _PICHASH_SHORTLIST_VOTE_WEIGHT = 4
 
-    def __init__(self, worker: "Worker", minhash_threshold=None, pichash_size=None, band_matches_required=None, exclude_self_matches=False, progress_reporter=NoProgressReporter()):
+    def __init__(
+        self,
+        worker: "Worker",
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        exclude_self_matches=False,
+        progress_reporter=NoProgressReporter(),
+        shortlist_size=None,
+        band_df_cutoff=None,
+    ):
         self.matcher_type = "MatcherInterface"
         # Extended by Query, VS, Sample
         self._worker: Worker = worker
@@ -91,6 +101,12 @@ class MatcherInterface:
             band_matches_required = self._worker.config.MINHASH_CONFIG.BAND_MATCHES_REQUIRED
         self._band_matches_required = band_matches_required
         self._pichash_size = pichash_size
+        # the two-stage knobs change which matches are reported, so a job may set them itself
+        # rather than inherit the deployment's (#217): None falls back to the configuration
+        if shortlist_size is None:
+            shortlist_size = getattr(self._worker.config.MINHASH_CONFIG, "MINHASH_MATCHING_SHORTLIST_SIZE", 0)
+        self._shortlist_size = shortlist_size
+        self._band_df_cutoff = band_df_cutoff
         self._additional_setup()
         self._sample_to_lib_info: Dict[int, bool]
         # NOTE: query matchers seed this with a sentinel entry for the query sample itself
@@ -128,13 +144,15 @@ class MatcherInterface:
             function_id_to_minhash = {}
             for function_entry in self._function_entries[start:end]:
                 function_id_to_minhash[function_entry.function_id] = function_entry.getMinHash(minhash_bits=self._worker._minhash_config.MINHASH_SIGNATURE_BITS)
-            candidate_groups = self._storage.getCandidatesForMinHashes(function_id_to_minhash, band_matches_required=self._band_matches_required)
+            candidate_groups = self._storage.getCandidatesForMinHashes(
+                function_id_to_minhash, band_matches_required=self._band_matches_required, band_df_cutoff=self._band_df_cutoff
+            )
         return self._restrictToShortlist(candidate_groups)
 
     # ---- two-stage matching: shortlist the corpus samples worth matching exactly ----------
 
     def _getShortlistSize(self) -> int:
-        return getattr(self._worker.config.MINHASH_CONFIG, "MINHASH_MATCHING_SHORTLIST_SIZE", 0)
+        return self._shortlist_size
 
     def _resolveSampleIds(self, function_ids: np.ndarray) -> Optional[np.ndarray]:
         """Sample id per candidate function id, or None when storage cannot answer cheaply."""
@@ -185,9 +203,11 @@ class MatcherInterface:
             # numpy, and boxing it into sets only to unbox it here is pure overhead
             array_getter = getattr(self._storage, "getCandidateArraysForMinHashes", None)
             if array_getter is not None:
-                candidate_groups = array_getter(function_id_to_minhash, band_matches_required=self._band_matches_required)
+                candidate_groups = array_getter(function_id_to_minhash, band_matches_required=self._band_matches_required, band_df_cutoff=self._band_df_cutoff)
             else:
-                candidate_groups = self._storage.getCandidatesForMinHashes(function_id_to_minhash, band_matches_required=self._band_matches_required)
+                candidate_groups = self._storage.getCandidatesForMinHashes(
+                    function_id_to_minhash, band_matches_required=self._band_matches_required, band_df_cutoff=self._band_df_cutoff
+                )
             for function_id, candidate_ids in candidate_groups.items():
                 if not len(candidate_ids):
                     continue
