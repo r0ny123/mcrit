@@ -56,6 +56,20 @@ def add_duration(func):
     return wrapper
 
 
+def shortlistUnavailableReason(storage) -> Optional[str]:
+    """Why `storage` cannot shortlist right now, or None when it can.
+
+    Shortlisting resolves each candidate function to its sample through the function range index,
+    so it needs that index and needs it complete - it is not while rebuildFunctionRangeIndex runs.
+    The server asks this before submitting a job (#217), and the matcher again when it runs.
+    """
+    if getattr(storage, "getSampleIdsForFunctionIdArray", None) is None or getattr(storage, "isFunctionRangeIndexComplete", None) is None:
+        return "function_range_index_unsupported"
+    if not storage.isFunctionRangeIndexComplete():
+        return "function_range_index_incomplete"
+    return None
+
+
 class MatcherInterface:
     # how many band votes one exact (PicHash) match is worth when ranking the shortlist
     _PICHASH_SHORTLIST_VOTE_WEIGHT = 4
@@ -70,8 +84,18 @@ class MatcherInterface:
         progress_reporter=NoProgressReporter(),
         shortlist_size=None,
         band_df_cutoff=None,
+        shortlist_unavailable=None,
     ):
         self.matcher_type = "MatcherInterface"
+        # what the job was asked for, None where it left the choice to the configuration; the
+        # report shows it next to what was applied (#217)
+        self._requested_knobs = {
+            "minhash_threshold": minhash_threshold,
+            "pichash_size": pichash_size,
+            "band_matches_required": band_matches_required,
+            "shortlist_size": shortlist_size,
+            "band_df_cutoff": band_df_cutoff,
+        }
         # Extended by Query, VS, Sample
         self._worker: Worker = worker
         self._storage = worker.getStorage()
@@ -93,6 +117,8 @@ class MatcherInterface:
         self._shortlist_candidate_cache: Optional[Dict[int, Tuple[np.ndarray, np.ndarray]]] = None
         # the shortlist as a sorted array, for vectorised membership tests
         self._shortlist_array: Optional[np.ndarray] = None
+        if minhash_threshold is None:
+            minhash_threshold = self._worker.config.MINHASH_CONFIG.MINHASH_MATCHING_THRESHOLD
         self._minhash_threshold = minhash_threshold
         self._exclude_self_matches = exclude_self_matches
         if pichash_size is None:
@@ -107,6 +133,11 @@ class MatcherInterface:
             shortlist_size = getattr(self._worker.config.MINHASH_CONFIG, "MINHASH_MATCHING_SHORTLIST_SIZE", 0)
         self._shortlist_size = shortlist_size
         self._band_df_cutoff = band_df_cutoff
+        # set by the server when the storage could not shortlist as the job was submitted, so that
+        # job's arguments, and with them its cache key, differ from a shortlisted one's (#217)
+        self._shortlist_unavailable = shortlist_unavailable
+        # why a requested shortlist was not applied, for the report
+        self._shortlist_fallback: Optional[str] = None
         self._additional_setup()
         self._sample_to_lib_info: Dict[int, bool]
         # NOTE: query matchers seed this with a sentinel entry for the query sample itself
@@ -186,6 +217,11 @@ class MatcherInterface:
         shortlist_size = self._getShortlistSize()
         if shortlist_size <= 0 or not self._function_entries:
             return None
+        reason = self._shortlist_unavailable or shortlistUnavailableReason(self._storage)
+        if reason is not None:
+            LOGGER.warning("Shortlisting requested but not available (%s); matching against the whole corpus instead.", reason)
+            self._shortlist_fallback = reason
+            return None
         signature_bits = self._worker._minhash_config.MINHASH_SIGNATURE_BITS
         votes: Counter = Counter()
         # candidates are kept as arrays, together with the sample each one belongs to, so the
@@ -214,7 +250,9 @@ class MatcherInterface:
                 candidates = candidate_ids if isinstance(candidate_ids, np.ndarray) else np.fromiter(candidate_ids, dtype=np.int64, count=len(candidate_ids))
                 sample_ids = self._resolveSampleIds(candidates)
                 if sample_ids is None:
+                    # the index went incomplete after the check above: a rebuild started mid-job
                     LOGGER.warning("Shortlisting requested but the function range index is unavailable; matching against the whole corpus instead.")
+                    self._shortlist_fallback = "function_range_index_incomplete"
                     return None
                 cached_groups[function_id] = (candidates, sample_ids)
                 # np.unique per query function is what makes this one vote per sample per
@@ -457,7 +495,7 @@ class MatcherInterface:
         """
         minhash_config = self._worker.config.MINHASH_CONFIG
         signature_length = minhash_config.MINHASH_SIGNATURE_LENGTH
-        min_matches = self._minMatchesForThreshold(signature_length, minhash_config.MINHASH_MATCHING_THRESHOLD)
+        min_matches = self._minMatchesForThreshold(signature_length, self._minhash_threshold)
         sorted_ids, rows, matrix = cache.getSignatureMatrix(signature_length=signature_length, signature_bits=minhash_config.MINHASH_SIGNATURE_BITS)
         func_id_to_sample_id = cache._func_id_to_sample_id
         organized_matching_results: Dict[Tuple[int, int, int], Tuple[int, float]] = {}
@@ -542,7 +580,7 @@ class MatcherInterface:
                     for single_result in pool_result:
                         sample_id_a, function_id_a, sample_id_b, function_id_b, score = single_result
                         counted_scores[score] += 1
-                        if score > self._worker.config.MINHASH_CONFIG.MINHASH_MATCHING_THRESHOLD:
+                        if score > self._minhash_threshold:
                             key = (sample_id_a, function_id_a, sample_id_b)
                             new_value = (function_id_b, score)
                             original_value = organized_matching_results[key]
@@ -560,7 +598,7 @@ class MatcherInterface:
                 for single_result in pool_result:
                     sample_id_a, function_id_a, sample_id_b, function_id_b, score = single_result
                     counted_scores[score] += 1
-                    if score > self._worker.config.MINHASH_CONFIG.MINHASH_MATCHING_THRESHOLD:
+                    if score > self._minhash_threshold:
                         key = (sample_id_a, function_id_a, sample_id_b)
                         new_value = (function_id_b, score)
                         original_value = organized_matching_results[key]
@@ -908,6 +946,30 @@ class MatcherInterface:
                     matches_per_sample[foreign_sample_id][own_function_id].append(("library", 0))
         return matches_per_sample
 
+    def _getMatchingInfo(self) -> Dict[str, Any]:
+        """The knobs this job was asked for and the ones it applied, with why any of them differ (#217).
+
+        A job that fell back to matching the whole corpus is a different result from a shortlisted
+        one, so the report says so rather than leaving the caller to infer it from the matches.
+        """
+        band_df_cutoff = self._band_df_cutoff
+        if band_df_cutoff is None:
+            band_df_cutoff = getattr(self._worker.config.STORAGE_CONFIG, "STORAGE_BAND_DF_CUTOFF", 0)
+        fallbacks = {}
+        if self._shortlist_fallback is not None:
+            fallbacks["shortlist_size"] = self._shortlist_fallback
+        return {
+            "requested": dict(self._requested_knobs),
+            "applied": {
+                "minhash_threshold": self._minhash_threshold,
+                "pichash_size": self._pichash_size,
+                "band_matches_required": self._band_matches_required,
+                "shortlist_size": self._getShortlistSize() if self._sample_shortlist is not None else 0,
+                "band_df_cutoff": band_df_cutoff,
+            },
+            "fallbacks": fallbacks,
+        }
+
     def _craftResultDict(self, pichash_matches: HarmonizedMatches, minhash_matches: HarmonizedMatches, num_matches=None) -> Dict:
         # Query, VS, Sample
         # All use this version
@@ -935,6 +997,7 @@ class MatcherInterface:
                 "job": None,
                 "sample": self._sample_info,
                 "type": "",
+                "matching": self._getMatchingInfo(),
             },
             "matches": {
                 "aggregation": {

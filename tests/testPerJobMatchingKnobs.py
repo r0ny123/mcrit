@@ -17,7 +17,9 @@ from mcrit.matchers.MatcherSample import MatcherSample
 from mcrit.matchers.MatcherVs import MatcherVs
 from mcrit.matchers.MatcherVsGroup import MatcherVsGroup
 from mcrit.server.MatchResource import MatchResource
-from mcrit.server.utils import getMatchingParams
+from mcrit.server.QueryResource import QueryResource
+from mcrit.server.utils import MatchingParameterError, getMatchingParams
+from mcrit.storage.MatchingResult import MatchingResult
 from mcrit.storage.MongoDbStorage import MongoDbStorage
 from mcrit.Worker import Worker
 
@@ -36,13 +38,52 @@ class MatchingParamsTest(unittest.TestCase):
     def test_both_knobs_are_read_from_the_request(self):
         self.assertEqual({"shortlist_size": 25, "band_df_cutoff": 200}, getMatchingParams({"shortlist_size": "25", "band_df_cutoff": "200"}))
 
-    def test_negative_values_mean_off_and_garbage_is_ignored(self):
-        self.assertEqual({"shortlist_size": 0}, getMatchingParams({"shortlist_size": "-3", "band_df_cutoff": "many"}))
+    def test_unusable_values_are_refused_not_replaced(self):
+        """Replacing them with the configured value would answer a question the caller did not ask."""
+        for key in ("shortlist_size", "band_df_cutoff"):
+            for value in ("-3", "many", "1.5", "", str(2**63)):
+                with self.subTest(key=key, value=value), self.assertRaises(MatchingParameterError):
+                    getMatchingParams({key: value})
+        self.assertEqual({"shortlist_size": 0, "band_df_cutoff": 2**63 - 1}, getMatchingParams({"shortlist_size": "0", "band_df_cutoff": str(2**63 - 1)}))
 
-    def test_the_server_fills_in_what_the_request_leaves_out(self):
-        parameters = getMatchingParams({"shortlist_size": "5"}, configured(shortlist_size=100, band_df_cutoff=200))
-        self.assertEqual({"shortlist_size": 5, "band_df_cutoff": 200}, parameters)
-        self.assertEqual({"shortlist_size": 100, "band_df_cutoff": 200}, getMatchingParams({}, configured(shortlist_size=100, band_df_cutoff=200)))
+    def test_the_server_fills_in_every_knob_the_request_leaves_out(self):
+        """The job's arguments are its cache key, so they have to hold the values it runs with (#217)."""
+        mcrit_config = configured(shortlist_size=100, band_df_cutoff=200)
+        minhash_config = mcrit_config.MINHASH_CONFIG
+        defaults = {
+            "minhash_threshold": minhash_config.MINHASH_MATCHING_THRESHOLD,
+            "pichash_size": minhash_config.PICHASH_SIZE,
+            "band_matches_required": minhash_config.BAND_MATCHES_REQUIRED,
+            "shortlist_size": 100,
+            "band_df_cutoff": 200,
+        }
+        self.assertEqual(defaults, getMatchingParams({}, mcrit_config))
+        self.assertEqual({**defaults, "shortlist_size": 5, "minhash_threshold": 70}, getMatchingParams({"shortlist_size": "5", "minhash_score": "70"}, mcrit_config))
+        # without the configuration only what the request named, as before
+        self.assertEqual({"band_matches_required": 1}, getMatchingParams({"band_matches_required": "1"}))
+
+    def test_matches_restricted_to_named_samples_carry_no_shortlist(self):
+        mcrit_config = configured(shortlist_size=100)
+        self.assertNotIn("shortlist_size", getMatchingParams({"shortlist_size": "5"}, mcrit_config, with_shortlist=False))
+        self.assertNotIn("shortlist_size", getMatchingParams({"sample_group_only": "true", "shortlist_size": "5"}, mcrit_config))
+        # still validated, so a bad value is not accepted silently on these routes either
+        with self.assertRaises(MatchingParameterError):
+            getMatchingParams({"shortlist_size": "-1"}, mcrit_config, with_shortlist=False)
+
+    def test_a_shortlist_the_storage_cannot_apply_is_marked_in_the_arguments(self):
+        """So a fallback result gets its own cache key and is not served once the shortlist works again."""
+        mcrit_config = configured(shortlist_size=100)
+        storage = MagicMock()
+        storage.isFunctionRangeIndexComplete.return_value = False
+        self.assertEqual("function_range_index_incomplete", getMatchingParams({}, mcrit_config, storage=storage)["shortlist_unavailable"])
+        storage.isFunctionRangeIndexComplete.return_value = True
+        self.assertNotIn("shortlist_unavailable", getMatchingParams({}, mcrit_config, storage=storage))
+        # a storage that cannot resolve samples at all
+        self.assertEqual("function_range_index_unsupported", getMatchingParams({}, mcrit_config, storage=object())["shortlist_unavailable"])
+        # nothing to check, and no read, when no shortlist is asked for
+        storage.reset_mock()
+        self.assertNotIn("shortlist_unavailable", getMatchingParams({"shortlist_size": "0"}, mcrit_config, storage=storage))
+        storage.isFunctionRangeIndexComplete.assert_not_called()
 
 
 class JobCacheTest(unittest.TestCase):
@@ -71,6 +112,126 @@ class JobCacheTest(unittest.TestCase):
         # each job records the settings it ran with, whether or not the request named them
         recorded = [json.loads(self.index.getJobData(job_id)["payload"]["params"]) for job_id in (before, after)]
         self.assertEqual([(0, 0), (10, 0)], [(params["shortlist_size"], params["band_df_cutoff"]) for params in recorded])
+
+    def _requestThroughTheApi(self, query_string=""):
+        app = falcon.App()
+        app.add_route("/matches/sample/{sample_id:int}", MatchResource(self.index), suffix="sample")
+        return falcon.testing.TestClient(app).simulate_get(f"/matches/sample/{self.sample_id}", query_string=query_string).json["data"]
+
+    def test_a_request_relying_on_the_defaults_is_keyed_on_their_values(self):
+        """Not on their absence: naming the configured values is the same job, changing a default is not."""
+        minhash_config = self.index.config.MINHASH_CONFIG
+        implicit = self._requestThroughTheApi()
+        explicit = self._requestThroughTheApi(
+            f"minhash_score={minhash_config.MINHASH_MATCHING_THRESHOLD}&pichash_size={minhash_config.PICHASH_SIZE}"
+            f"&band_matches_required={minhash_config.BAND_MATCHES_REQUIRED}&shortlist_size=0&band_df_cutoff=0"
+        )
+        self.assertEqual(implicit, explicit)
+        for knob, value in (("MINHASH_MATCHING_THRESHOLD", 70), ("PICHASH_SIZE", 20), ("BAND_MATCHES_REQUIRED", 1)):
+            with self.subTest(knob):
+                changed = configured()
+                setattr(changed.MINHASH_CONFIG, knob, value)
+                self.index.config = changed
+                self.assertNotEqual(implicit, self._requestThroughTheApi())
+                self.index.config = configured()
+
+    def test_a_fallback_result_is_not_served_once_the_shortlist_works(self):
+        self.index.config = configured(shortlist_size=10)
+        self.index._storage._function_range_index_complete = False
+        during_rebuild = self._requestThroughTheApi()
+        params = json.loads(self.index.getJobData(during_rebuild)["payload"]["params"])
+        self.assertEqual("function_range_index_incomplete", params["shortlist_unavailable"])
+        self.assertEqual(during_rebuild, self._requestThroughTheApi())
+        self.index._storage._function_range_index_complete = True
+        self.assertNotEqual(during_rebuild, self._requestThroughTheApi())
+
+
+class MinHashThresholdTest(unittest.TestCase):
+    """A request's minhash_score is applied: matching used to filter on the configured threshold only."""
+
+    def test_the_requested_threshold_decides_which_matches_are_reported(self):
+        mcrit_config = configured()
+        mcrit_config.MINHASH_CONFIG.MINHASH_POOL_INDEXING = False
+        mcrit_config.MINHASH_CONFIG.MINHASH_POOL_MATCHING = False
+        index = MinHashIndex(config=mcrit_config)
+        worker = index.queue._worker
+        sample_ids = [index._storage.addSmdaReport(SmdaReport.fromFile(f"tests/{name}")).sample_id for name in ("example_report.smda", "example_report_2.smda")]
+        for sample_id in sample_ids:
+            worker.updateMinHashesForSample(sample_id)
+
+        def foreign_scores(**knobs):
+            report = worker.getMatchesForSample(sample_ids[0], **knobs)
+            return [match[3] for function in report["matches"]["functions"] for match in function["matches"] if match[1] != sample_ids[0]]
+
+        for vectorized in (True, False):
+            with self.subTest(vectorized=vectorized):
+                mcrit_config.MINHASH_CONFIG.MINHASH_MATCHING_VECTORIZED = vectorized
+                by_default = foreign_scores()
+                self.assertTrue(any(score <= 80 for score in by_default), "the fixture must have matches the higher threshold drops")
+                stricter = foreign_scores(minhash_threshold=80)
+                self.assertTrue(stricter)
+                self.assertTrue(all(score > 80 for score in stricter), stricter)
+                self.assertEqual(sorted(score for score in by_default if score > 80), sorted(stricter))
+
+
+class MatchingInfoTest(unittest.TestCase):
+    """The report says which knobs the job was asked for, which it applied, and why they differ (#217)."""
+
+    def setUp(self):
+        self.index = MinHashIndex(config=configured())
+        self.worker = self.index.queue._worker
+        self.sample_id = self.index._storage.addSmdaReport(SmdaReport.fromFile("tests/example_report.smda")).sample_id
+        self.worker.updateMinHashesForSample(self.sample_id)
+
+    def test_the_defaults_are_recorded_as_applied(self):
+        info = self.worker.getMatchesForSample(self.sample_id)["info"]["matching"]
+        minhash_config = self.index.config.MINHASH_CONFIG
+        self.assertEqual({"minhash_threshold": None, "pichash_size": None, "band_matches_required": None, "shortlist_size": None, "band_df_cutoff": None}, info["requested"])
+        self.assertEqual(
+            {
+                "minhash_threshold": minhash_config.MINHASH_MATCHING_THRESHOLD,
+                "pichash_size": minhash_config.PICHASH_SIZE,
+                "band_matches_required": minhash_config.BAND_MATCHES_REQUIRED,
+                "shortlist_size": 0,
+                "band_df_cutoff": 0,
+            },
+            info["applied"],
+        )
+        self.assertEqual({}, info["fallbacks"])
+
+    def test_an_applied_shortlist_is_recorded(self):
+        info = self.worker.getMatchesForSample(self.sample_id, shortlist_size=5, band_df_cutoff=7)["info"]["matching"]
+        self.assertEqual((5, 7), (info["requested"]["shortlist_size"], info["requested"]["band_df_cutoff"]))
+        self.assertEqual((5, 7), (info["applied"]["shortlist_size"], info["applied"]["band_df_cutoff"]))
+        self.assertEqual({}, info["fallbacks"])
+
+    def test_a_shortlist_the_server_found_unavailable_is_reported_not_applied(self):
+        report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=5, shortlist_unavailable="function_range_index_incomplete")
+        info = report["info"]["matching"]
+        self.assertEqual((5, 0), (info["requested"]["shortlist_size"], info["applied"]["shortlist_size"]))
+        self.assertEqual({"shortlist_size": "function_range_index_incomplete"}, info["fallbacks"])
+        # and it is the unshortlisted result
+        self.assertEqual(report["matches"], self.worker.getMatchesForSample(self.sample_id)["matches"])
+
+    def test_a_shortlist_that_became_unavailable_by_run_time_is_reported(self):
+        self.index._storage._function_range_index_complete = False
+        info = self.worker.getMatchesForSample(self.sample_id, shortlist_size=5)["info"]["matching"]
+        self.assertEqual(0, info["applied"]["shortlist_size"])
+        self.assertEqual({"shortlist_size": "function_range_index_incomplete"}, info["fallbacks"])
+
+    def test_vs_matching_records_no_shortlist(self):
+        info = self.worker.getMatchesForSampleVs(self.sample_id, self.sample_id)["info"]["matching"]
+        self.assertEqual(0, info["applied"]["shortlist_size"])
+        self.assertEqual({}, info["fallbacks"])
+
+    def test_it_survives_a_round_trip_through_matching_result(self):
+        report = self.worker.getMatchesForSample(self.sample_id, shortlist_size=5, shortlist_unavailable="function_range_index_incomplete")
+        result = MatchingResult.fromDict(report)
+        self.assertEqual(report["info"]["matching"], result.matching_info)
+        self.assertEqual(report["info"]["matching"], result.toDict()["info"]["matching"])
+        # reports from before this carry none, and gain none
+        del report["info"]["matching"]
+        self.assertNotIn("matching", MatchingResult.fromDict(report).toDict()["info"])
 
 
 class MemoryStorageBandDfCutoffTest(unittest.TestCase):
@@ -159,16 +320,17 @@ class ForwardingTest(unittest.TestCase):
 
     def test_worker_methods_hand_both_knobs_to_their_matcher(self):
         worker = Worker.__new__(Worker)
+        knobs = {**KNOBS, "shortlist_unavailable": "function_range_index_incomplete"}
         cases = {
-            "MatcherSample": lambda: worker.getMatchesForSample(1, **KNOBS),
-            "MatcherQuery": lambda: worker.getMatchesForSmdaReport({}, **KNOBS),
-            "MatcherQuery ": lambda: worker.getMatchesForMappedBinary(b"", 0x1000, **KNOBS),
-            "MatcherQuery  ": lambda: worker.getMatchesForUnmappedBinary(b"", **KNOBS),
+            "MatcherSample": lambda: worker.getMatchesForSample(1, **knobs),
+            "MatcherQuery": lambda: worker.getMatchesForSmdaReport({}, **knobs),
+            "MatcherQuery ": lambda: worker.getMatchesForMappedBinary(b"", 0x1000, **knobs),
+            "MatcherQuery  ": lambda: worker.getMatchesForUnmappedBinary(b"", **knobs),
         }
         for matcher_name, call in cases.items():
             with self.subTest(matcher_name), patch(f"mcrit.Worker.{matcher_name.strip()}") as matcher, patch("mcrit.Worker.SmdaReport"), patch("mcrit.Worker.Disassembler"):
                 call()
-                self.assertEqual(KNOBS, {knob: matcher.call_args.kwargs[knob] for knob in KNOBS})
+                self.assertEqual(knobs, {knob: matcher.call_args.kwargs[knob] for knob in knobs})
 
     def test_vs_matching_takes_the_cutoff_and_no_shortlist(self):
         worker = Worker.__new__(Worker)
@@ -181,18 +343,22 @@ class ForwardingTest(unittest.TestCase):
                 self.assertEqual(4, matcher.call_args.kwargs["band_df_cutoff"])
                 self.assertNotIn("shortlist_size", matcher.call_args.kwargs)
 
-    def test_function_queries_hand_both_knobs_to_their_matcher(self):
+    def test_function_queries_hand_every_knob_to_their_matcher(self):
+        """Including the threshold and PicHash size, which were passed on as None and so never applied."""
         report = MagicMock(xcfg={0x1000: {}}, sha256="ab" * 32)
+        knobs = {**KNOBS, "minhash_threshold": 70, "pichash_size": 20, "band_matches_required": 1, "shortlist_unavailable": "function_range_index_incomplete"}
         with patch("mcrit.index.MinHashIndex.SmdaReport") as smda_report, patch("mcrit.index.MinHashIndex.MatcherQueryFunction") as matcher:
             smda_report.fromDict.return_value = report
             matcher.return_value.getMatchesForSmdaFunction.return_value = {"info": {"job": {}}}
-            MinHashIndex.getMatchesForSmdaFunction(MagicMock(), report, **KNOBS)
-        self.assertEqual(KNOBS, {knob: matcher.call_args.kwargs[knob] for knob in KNOBS})
+            # force_recalculation arrives as a query parameter and must not break the call
+            MinHashIndex.getMatchesForSmdaFunction(MagicMock(), report, force_recalculation=True, **knobs)
+        self.assertEqual(knobs, {knob: matcher.call_args.kwargs[knob] for knob in knobs})
 
     def test_group_only_cross_matching_leaves_the_shortlist_out(self):
         index = MagicMock()
-        MinHashIndex.getMatchesCross(index, [1, 2], sample_group_only=True, **KNOBS)
+        MinHashIndex.getMatchesCross(index, [1, 2], sample_group_only=True, shortlist_unavailable="function_range_index_incomplete", **KNOBS)
         self.assertEqual({"band_df_cutoff": 4}, {knob: value for knob, value in index.getMatchesForSampleVsGroup.call_args.kwargs.items() if knob in KNOBS})
+        self.assertNotIn("shortlist_unavailable", index.getMatchesForSampleVsGroup.call_args.kwargs)
         MinHashIndex.getMatchesCross(index, [1, 2], **KNOBS)
         self.assertEqual(KNOBS, {knob: index.getMatchesForSample.call_args.kwargs[knob] for knob in KNOBS})
 
@@ -248,11 +414,6 @@ class VsShortlistTest(unittest.TestCase):
         self.assertEqual(0, MatcherVs(worker, shortlist_size=5)._getShortlistSize())
 
 
-class ParameterRangeTest(unittest.TestCase):
-    def test_values_mongodb_cannot_store_are_ignored(self):
-        self.assertEqual({"shortlist_size": 2**63 - 1}, getMatchingParams({"shortlist_size": str(2**63 - 1), "band_df_cutoff": str(2**63)}))
-
-
 class BucketSizeTest(unittest.TestCase):
     """Under band bucketing only bucket 0 carries df, so a cutoff above the bucket size cannot be applied."""
 
@@ -268,9 +429,47 @@ class BucketSizeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "STORAGE_BAND_BUCKET_SIZE"):
             storage._bandDfCutoff(101)
 
-    def test_the_server_ignores_it_like_an_unusable_value(self):
-        self.assertEqual({"shortlist_size": 0, "band_df_cutoff": 50}, getMatchingParams({"band_df_cutoff": "101"}, self._config()))
-        self.assertEqual({"shortlist_size": 0, "band_df_cutoff": 100}, getMatchingParams({"band_df_cutoff": "100"}, self._config()))
+    def test_the_server_refuses_it(self):
+        with self.assertRaisesRegex(MatchingParameterError, "STORAGE_BAND_BUCKET_SIZE"):
+            getMatchingParams({"band_df_cutoff": "101"}, self._config())
+        self.assertEqual(100, getMatchingParams({"band_df_cutoff": "100"}, self._config())["band_df_cutoff"])
+
+    def test_every_matching_route_answers_it_with_a_400(self):
+        index = MagicMock()
+        index.config = self._config()
+        index.isSampleId.return_value = True
+        app = falcon.App()
+        match_resource, query_resource = MatchResource(index), QueryResource(index)
+        app.add_route("/matches/sample/{sample_id:int}", match_resource, suffix="sample")
+        app.add_route("/matches/sample/{sample_id:int}/{sample_id_b:int}", match_resource, suffix="sample_vs")
+        app.add_route("/matches/sample/cross/{sample_ids}", match_resource, suffix="sample_cross")
+        app.add_route("/query", query_resource, suffix="query_smda")
+        app.add_route("/query/function", query_resource, suffix="query_smda_function")
+        app.add_route("/query/binary", query_resource, suffix="query_binary")
+        app.add_route("/query/binary/mapped/{base_address}", query_resource, suffix="query_binary_mapped")
+        client = falcon.testing.TestClient(app)
+        requests = {
+            "getMatchesForSample": lambda query: client.simulate_get("/matches/sample/1", query_string=query),
+            "getMatchesForSampleVs": lambda query: client.simulate_get("/matches/sample/1/2", query_string=query),
+            "getMatchesCross": lambda query: client.simulate_get("/matches/sample/cross/1,2", query_string=query),
+            "getMatchesForSmdaReport": lambda query: client.simulate_post("/query", query_string=query, json={}),
+            "getMatchesForSmdaFunction": lambda query: client.simulate_post("/query/function", query_string=query, json={}),
+            "getMatchesForUnmappedBinary": lambda query: client.simulate_post("/query/binary", query_string=query, body=b"MZ"),
+            "getMatchesForMappedBinary": lambda query: client.simulate_post("/query/binary/mapped/0x1000", query_string=query, body=b"MZ"),
+        }
+        for method, request in requests.items():
+            with self.subTest(method):
+                response = request("band_df_cutoff=101")
+                self.assertEqual(400, response.status_code)
+                self.assertIn("STORAGE_BAND_BUCKET_SIZE", response.json["data"]["message"])
+                getattr(index, method).assert_not_called()
+                response = request("band_df_cutoff=100")
+                if "Binary" in method:
+                    # the test client's WSGI validator rejects the handler's size-less stream.read(),
+                    # which real servers accept; what matters here is that the value was not refused
+                    self.assertNotEqual(400, response.status_code)
+                else:
+                    self.assertEqual(100, getattr(index, method).call_args.kwargs["band_df_cutoff"])
 
 
 if __name__ == "__main__":

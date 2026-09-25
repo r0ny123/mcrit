@@ -107,14 +107,19 @@ the parameters `shortlist_size` and `band_df_cutoff` of the matching and query e
 same keyword arguments of `McritClient`'s matching methods); the configured value is the default for
 a request that names neither. Both change which matches a report holds - hunting for tail samples
 wants the shortlist off, identifying a sample wants it on - so each job records the values it was
-run with, and a result is only reused for a request with the same values. Upgrading to a version
-with this (#217) therefore computes each matching request once more, since earlier results were
-stored without them. Matching one sample against another, or within a group (`sample_group_only`),
-takes no shortlist: it is restricted to the samples it names already. With band bucketing on, a
-request's `band_df_cutoff` above `STORAGE_BAND_BUCKET_SIZE` is ignored, for the reason such a
-configured cutoff is refused at startup. A requested shortlist is not applied while the function
-range index is incomplete - the job matches against the whole corpus and logs a warning, as with the
-configured value - so the result kept for that request is the complete one.
+run with, and a result is only reused for a request with the same values. The same holds for the
+older per-request options (`minhash_score`, `pichash_size`, `band_matches_required`): the server
+fills in the configured value of every option a request leaves out, so changing any of these
+defaults takes effect for the next request instead of being masked by results cached under the old
+one. Upgrading to a version with this (#217) therefore computes each matching request once more,
+since earlier results were stored without these values. Matching one sample against another, or
+within a group (`sample_group_only`), takes no shortlist: it is restricted to the samples it names
+already. A request's `band_df_cutoff` above `STORAGE_BAND_BUCKET_SIZE` (with band bucketing on) is
+refused with a 400, for the reason such a configured cutoff is refused at startup. A requested
+shortlist is not applied while the function range index is incomplete (during
+`rebuildFunctionRangeIndex`): the job matches against the whole corpus, its report says so under
+`info.matching.fallbacks`, and the result is kept apart from the shortlisted one, so the same request
+gets the shortlisted result once the index is complete again.
 `MINHASH_PICHASH_MAX_MATCHES` changes reported matches as well but remains a deployment setting.
 
 ### Suggested starting point

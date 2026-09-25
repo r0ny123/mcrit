@@ -22,21 +22,44 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   parameters of the `/matches/sample/...` and `/query/...` endpoints, and as keyword arguments of
   `McritClient.requestMatchesForSample`, `requestMatchesCross`, `getMatchesForSmdaFunction` and the
   three `requestMatchesFor...` query methods. Both change which matches are reported, so they are a
-  choice per request rather than per deployment. A value below 0 counts as 0 (off), like the
-  configuration knobs; one MongoDB cannot store (2^63 or more) is ignored like any unreadable value.
-  Matching one sample against another, or within a group (`sample_group_only`), takes only
-  `band_df_cutoff`. With band bucketing on, a `band_df_cutoff` above `STORAGE_BAND_BUCKET_SIZE` is
-  ignored by the server and refused by the storage, as such a configured cutoff is at startup.
+  choice per request rather than per deployment. `0` switches either off. A value that is not an
+  integer from 0 to 2^63 - 1 (the largest MongoDB stores) is refused with a 400, as is, with band
+  bucketing on, a `band_df_cutoff` above `STORAGE_BAND_BUCKET_SIZE` - the check the storage makes
+  for a configured cutoff at startup (#196). Refused rather than replaced by the configured value,
+  unlike the older options, because a replaced value answers a question the caller did not ask
+  and nothing in the response would say so. Matching one sample against another, or within a group
+  (`sample_group_only`), takes only `band_df_cutoff`.
+- Every match report records its knobs under `info.matching` (#217): `requested` (what the job was
+  given, `null` for what it left to the configuration), `applied` (what it ran with) and
+  `fallbacks` (knob to reason, for any that could not be applied). The one fallback so far is a
+  shortlist while the function range index is incomplete or unsupported
+  (`function_range_index_incomplete` / `function_range_index_unsupported`): the job matches against
+  the whole corpus, as before, and now says so instead of only logging it. `MatchingResult` keeps the
+  block as `matching_info` through `fromDict`/`toDict`.
 
 ### Fixed
 
-- A matching job's cached result could be served for different two-stage settings (#217). A job is
-  reused for any later request with the same arguments, and the shortlist size and df cutoff were
-  not among them, so after changing either knob a repeated request got the result computed under
-  the old one. The server now records the values each job runs with, the configured ones where the
-  request names none. Jobs from before the upgrade carried no such values, so the first repeat of
-  each request after it computes a fresh result instead of reusing the old one. `MemoryStorage`
-  now applies the df cutoff, which it ignored.
+- A matching job's cached result could be served for different settings (#217). A job is reused
+  for any later request with the same arguments, and a request that left an option out was keyed
+  on its absence, not on the value the worker then filled in from its configuration. So after a
+  change to `MINHASH_MATCHING_THRESHOLD`, `PICHASH_SIZE`, `BAND_MATCHES_REQUIRED`,
+  `MINHASH_MATCHING_SHORTLIST_SIZE` or `STORAGE_BAND_DF_CUTOFF`, every request relying on the default
+  was served the result computed under the old value. The server now puts the value of all five
+  into each job's arguments, the configured one where the request names none. Jobs from before the
+  upgrade were keyed without them, so the first repeat of each matching request after the upgrade
+  computes a fresh result instead of reusing the old one - a one-off recompute, not a correctness
+  change. A job submitted while the shortlist cannot be applied is marked so in its arguments, so
+  its whole-corpus result is not served for the same request once the index is complete again.
+  (A rebuild of the function range index that starts between a job's submission and its run can
+  still leave such a result under the shortlisted key; its report names the fallback.)
+- A matching request's `minhash_score` had no effect on the result (#217). The matchers filtered
+  candidate pairs on the configured `MINHASH_MATCHING_THRESHOLD` alone; the requested threshold was
+  handed to the scoring call only together with `ignore_threshold=True`. It now decides which
+  MinHash matches are reported, on both the vectorized and the pairwise path. Requests that do not
+  set it, or set the configured value, get the same result as before; the others get what they
+  asked for. `/query/function` also passed the requested `minhash_score` and `pichash_size` on as
+  `None`, and failed on `force_recalculation`; it applies the first two now and accepts the third.
+- `MemoryStorage` now applies the df cutoff, which it ignored.
 - Matching one sample against another (`/matches/sample/{a}/{b}`) or within a group
   (`sample_group_only`) with `MINHASH_MATCHING_SHORTLIST_SIZE` set could leave out the very samples
   it was asked about: the shortlist is ranked over the whole corpus, and a named sample outside its

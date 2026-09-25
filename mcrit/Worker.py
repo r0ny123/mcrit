@@ -502,7 +502,15 @@ class Worker(QueueRemoteCallee):
     # Reports PROGRESS
     @Remote(progress=True, json_locations=[0])
     def getMatchesForSmdaReport(
-        self, report_json, minhash_threshold=None, pichash_size=None, band_matches_required=None, shortlist_size=None, band_df_cutoff=None, progress_reporter=NoProgressReporter()
+        self,
+        report_json,
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        shortlist_size=None,
+        band_df_cutoff=None,
+        shortlist_unavailable=None,
+        progress_reporter=NoProgressReporter(),
     ):
         matcher = MatcherQuery(
             self,
@@ -512,6 +520,7 @@ class Worker(QueueRemoteCallee):
             progress_reporter=progress_reporter,
             shortlist_size=shortlist_size,
             band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
         )
         smda_report = SmdaReport.fromDict(report_json)
         match_report = matcher.getMatchesForSmdaReport(smda_report)
@@ -528,6 +537,7 @@ class Worker(QueueRemoteCallee):
         band_matches_required=None,
         shortlist_size=None,
         band_df_cutoff=None,
+        shortlist_unavailable=None,
         progress_reporter=NoProgressReporter(),
     ):
         config = SmdaConfig()
@@ -542,6 +552,7 @@ class Worker(QueueRemoteCallee):
             progress_reporter=progress_reporter,
             shortlist_size=shortlist_size,
             band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
         )
         match_report = matcher.getMatchesForSmdaReport(SMDA_REPORT)
         return match_report
@@ -549,7 +560,15 @@ class Worker(QueueRemoteCallee):
     # Reports PROGRESS
     @Remote(progress=True, file_locations=[0])
     def getMatchesForUnmappedBinary(
-        self, binary, minhash_threshold=None, pichash_size=None, band_matches_required=None, shortlist_size=None, band_df_cutoff=None, progress_reporter=NoProgressReporter()
+        self,
+        binary,
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        shortlist_size=None,
+        band_df_cutoff=None,
+        shortlist_unavailable=None,
+        progress_reporter=NoProgressReporter(),
     ):
         config = SmdaConfig()
         SMDA_REPORT = None
@@ -563,6 +582,7 @@ class Worker(QueueRemoteCallee):
             progress_reporter=progress_reporter,
             shortlist_size=shortlist_size,
             band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
         )
         match_report = matcher.getMatchesForSmdaReport(SMDA_REPORT)
         return match_report
@@ -570,7 +590,15 @@ class Worker(QueueRemoteCallee):
     # Reports PROGRESS
     @Remote(progress=True)
     def getMatchesForSample(
-        self, sample_id, minhash_threshold=None, pichash_size=None, band_matches_required=None, shortlist_size=None, band_df_cutoff=None, progress_reporter=NoProgressReporter()
+        self,
+        sample_id,
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        shortlist_size=None,
+        band_df_cutoff=None,
+        shortlist_unavailable=None,
+        progress_reporter=NoProgressReporter(),
     ):
         matcher = MatcherSample(
             self,
@@ -580,6 +608,7 @@ class Worker(QueueRemoteCallee):
             progress_reporter=progress_reporter,
             shortlist_size=shortlist_size,
             band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
         )
         match_report = matcher.getMatchesForSample(sample_id)
         return match_report

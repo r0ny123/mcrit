@@ -400,6 +400,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         if sample_group_only:
             # vs-group jobs match against the group only, a shortlist does not apply to them
             params.pop("shortlist_size", None)
+            params.pop("shortlist_unavailable", None)
         for id in sample_ids:
             if sample_group_only:
                 job_id = self.getMatchesForSampleVsGroup(id, [sid for sid in sample_ids if sid != id], force_recalculation=force_recalculation, username=username, **params)
@@ -417,7 +418,11 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         exclude_self_matches=False,
         shortlist_size=None,
         band_df_cutoff=None,
+        shortlist_unavailable=None,
+        force_recalculation=False,
     ):
+        # force_recalculation is accepted for the query parameter's sake and has nothing to do:
+        # a function query runs in the request and is never cached
         # convert function to FunctionEntry
         smda_report = SmdaReport.fromDict(smda_report_with_function)
         assert smda_report is not None and smda_report.xcfg is not None and smda_report.sha256 is not None
@@ -427,12 +432,13 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         function_offset = int([k for k in smda_report.xcfg.keys()][0])
         matcher = MatcherQueryFunction(
             self,
-            minhash_threshold=None,
-            pichash_size=None,
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
             band_matches_required=band_matches_required,
             exclude_self_matches=False,
             shortlist_size=shortlist_size,
             band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
         )
         # run Matcher for a single function
         match_report = matcher.getMatchesForSmdaFunction(smda_report)

@@ -3,7 +3,7 @@ import re
 import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
-from mcrit.server.utils import db_log_msg, get_username, getMatchingParams, jsonify, timing
+from mcrit.server.utils import db_log_msg, get_username, jsonify, readMatchingParams, timing
 
 
 class QueryResource:
@@ -13,7 +13,9 @@ class QueryResource:
 
     @timing
     def on_post_query_smda(self, req, resp):
-        parameters = getMatchingParams(req.params, self.index.config)
+        parameters = readMatchingParams(self.index, req, resp, "QueryResource.on_post_query_smda")
+        if parameters is None:
+            return
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -31,7 +33,9 @@ class QueryResource:
 
     @timing
     def on_post_query_binary(self, req, resp):
-        parameters = getMatchingParams(req.params, self.index.config)
+        parameters = readMatchingParams(self.index, req, resp, "QueryResource.on_post_query_binary")
+        if parameters is None:
+            return
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -49,7 +53,9 @@ class QueryResource:
 
     @timing
     def on_post_query_binary_mapped(self, req, resp, base_address=None):
-        parameters = getMatchingParams(req.params, self.index.config)
+        parameters = readMatchingParams(self.index, req, resp, "QueryResource.on_post_query_binary_mapped")
+        if parameters is None:
+            return
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -69,7 +75,9 @@ class QueryResource:
 
     @timing
     def on_post_query_smda_function(self, req, resp):
-        parameters = getMatchingParams(req.params, self.index.config)
+        parameters = readMatchingParams(self.index, req, resp, "QueryResource.on_post_query_smda_function")
+        if parameters is None:
+            return
         if not req.content_length:
             resp.data = jsonify(
                 {
