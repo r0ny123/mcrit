@@ -1,4 +1,6 @@
+import inspect
 import json
+import re
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -107,6 +109,26 @@ class ClientModesTest(unittest.TestCase):
             with self.assertRaises(McritBadRequest):
                 client.deleteFamily(1)
 
+    def test_the_maintenance_jobs_raise_through_the_client_mode(self):
+        """rebuildPicBlockHashIndex, repairMinHashes and recomputeFamilyStats landed while the
+        modes were being written and kept calling handle_response directly, so they answered
+        None however the client was built."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True, raise_server_errors=True)
+        for method, verb in (("rebuildPicBlockHashIndex", "get"), ("repairMinHashes", "post"), ("recomputeFamilyStats", "post")):
+            with self.subTest(method=method):
+                with patch(f"mcrit.client.McritClient.requests.{verb}", return_value=answer(500, FAILED)):
+                    with self.assertRaises(McritServerError):
+                        getattr(client, method)()
+                with patch(f"mcrit.client.McritClient.requests.{verb}", return_value=answer(401, FAILED)):
+                    with self.assertRaises(McritUnauthorized):
+                        getattr(client, method)()
+
+    def test_no_method_parses_outside_the_client_mode(self):
+        """The ratchet behind the case above: a method that hands its response to
+        handle_response itself, rather than to self._handle, ignores the mode it was built in -
+        and nothing fails until someone relies on the mode."""
+        self.assertEqual([], re.findall(r"(?<![\w.])handle_response\(response\)", inspect.getsource(McritClient)))
+
     def test_modify_function_raises_through_the_client_mode_too(self):
         """modifyFunction was written before these modes existed, on a branch that merged them
         in later - a method that calls handle_response directly answers None whatever mode the
@@ -140,6 +162,20 @@ class ClientModesTest(unittest.TestCase):
             with self.assertRaises(McritRequestError):
                 handle_response(answer(status, FAILED), raise_client_errors=True, raise_server_errors=True)
             self.assertIsNone(handle_response(answer(status, FAILED), raise_server_errors=True))
+
+    def test_the_rebuild_endpoints_raise_through_the_client_mode(self):
+        """rebuildFunctionRangeIndex and rebuildBandDfIndex were written before the modes and
+        handed their response to handle_response directly, so they answered None however the
+        client was built."""
+        client = McritClient("http://mcrit.test", raise_client_errors=True, raise_server_errors=True)
+        for method in ("rebuildFunctionRangeIndex", "rebuildBandDfIndex"):
+            with self.subTest(method=method):
+                with patch("mcrit.client.McritClient.requests.get", return_value=answer(500, FAILED)):
+                    with self.assertRaises(McritServerError):
+                        getattr(client, method)()
+                with patch("mcrit.client.McritClient.requests.get", return_value=answer(401, FAILED)):
+                    with self.assertRaises(McritUnauthorized):
+                        getattr(client, method)()
 
 
 if __name__ == "__main__":
