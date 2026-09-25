@@ -174,24 +174,34 @@ class Worker(QueueRemoteCallee):
         else:
             return None
 
+    QUERY_JOB_METHODS = ("getMatchesForUnmappedBinary", "getMatchesForMappedBinary", "getMatchesForSmdaReport")
+
+    def _querySampleOfJob(self, job: Job) -> Optional["SampleEntry"]:
+        """The query sample a query job produced, or None when the job left no result (it
+        failed before matching, or was terminated) - such a job must not take the cleanup down."""
+        result = self.getResultForJob(job.job_id)
+        if not result or "info" not in result or not result["info"].get("sample"):
+            return None
+        return SampleEntry.fromDict(result["info"]["sample"])
+
     # Reports PROGRESS
     @Remote(progress=True)
-    def doDbCleanup(self, progress_reporter=NoProgressReporter()):
+    def doDbCleanup(self, progress_reporter=NoProgressReporter()) -> Dict[str, Any]:
+        """Delete query samples and query jobs older than STORAGE_MONGODB_CLEANUP_TTL, then the
+        query functions and disassembly no query sample refers to any more, and optionally
+        compact the collections they lived in (#68)."""
         now = datetime.now()
         delta = timedelta(seconds=self._storage_config.STORAGE_MONGODB_CLEANUP_TTL)
         time_cutoff = now - delta
         LOGGER.info("Fetching data from the queues.")
-        unmapped_finished = self.getQueueData(0, 0, method="getMatchesForUnmappedBinary", state="finished")
-        mapped_finished = self.getQueueData(0, 0, method="getMatchesForMappedBinary", state="finished")
-        unmapped_failed = self.getQueueData(0, 0, method="getMatchesForUnmappedBinary", state="failed")
-        mapped_failed = self.getQueueData(0, 0, method="getMatchesForMappedBinary", state="failed")
-        smda_finished = self.getQueueData(0, 0, method="getMatchesForSmdaReport", state="finished")
+        query_jobs = []
+        for method in self.QUERY_JOB_METHODS:
+            for state in ("finished", "failed"):
+                query_jobs.extend((state, Job(job_dict, None)) for job_dict in self.getQueueData(0, 0, method=method, state=state))
         protected_sample_ids = set([])
         samples_to_be_deleted = {}
         jobs_to_be_deleted = []
-        LOGGER.info(
-            f"Collected all data from the queues, now iterating {len(unmapped_finished) + len(mapped_finished) + len(unmapped_failed) + len(mapped_failed) + len(smda_finished)} items."
-        )
+        LOGGER.info(f"Collected all data from the queues, now iterating {len(query_jobs)} items.")
         # first iterate and collect all potentially stale sample_entries by their submission/processing timestamp
         for sample_entry in self._storage.getSamples(start_index=0, limit=0, is_query=True):
             if sample_entry.timestamp is None:
@@ -201,39 +211,18 @@ class Worker(QueueRemoteCallee):
                 samples_to_be_deleted[sample_entry.sha256] = []
             if sample_entry.timestamp < time_cutoff:
                 samples_to_be_deleted[sample_entry.sha256].append(sample_entry)
-
-        for job_collection in [unmapped_finished, mapped_finished]:
-            for job_dict in job_collection:
-                job = Job(job_dict, None)
-                result = self.getResultForJob(job.job_id)
-                reference_sample_entry = SampleEntry.fromDict(result["info"]["sample"])
-                # we keep those query samples that have been submitted since the cutoff
-                if job.finished_at > time_cutoff:
-                    protected_sample_ids.add(reference_sample_entry.sample_id)
-                else:
+        for state, job in query_jobs:
+            # a finished job is dated by when it finished, a failed one by when it last ran
+            job_timestamp = job.finished_at if state == "finished" else job.started_at
+            is_recent = job_timestamp is not None and job_timestamp > time_cutoff
+            reference_sample_entry = self._querySampleOfJob(job)
+            if reference_sample_entry is None:
+                # nothing to protect or to collect; an old job without a result just goes
+                if not is_recent:
                     jobs_to_be_deleted.append(job)
-                    if reference_sample_entry.sha256 not in samples_to_be_deleted:
-                        samples_to_be_deleted[reference_sample_entry.sha256] = []
-                    samples_to_be_deleted[reference_sample_entry.sha256].append(reference_sample_entry)
-        for failed_job_collection in [unmapped_failed, mapped_failed]:
-            for failed_job_dict in failed_job_collection:
-                job = Job(failed_job_dict, None)
-                result = self.getResultForJob(job.job_id)
-                reference_sample_entry = SampleEntry.fromDict(result["info"]["sample"])
-                if job.started_at > time_cutoff:
-                    protected_sample_ids.add(reference_sample_entry.sample_id)
-                else:
-                    jobs_to_be_deleted.append(job)
-                    if reference_sample_entry.sha256 not in samples_to_be_deleted:
-                        samples_to_be_deleted[reference_sample_entry.sha256] = []
-                    samples_to_be_deleted[reference_sample_entry.sha256].append(reference_sample_entry)
-        LOGGER.info("Decoding SMDA reports for SHA256 hashes.")
-        for job_dict in smda_finished:
-            job = Job(job_dict, None)
-            result = self.getResultForJob(job.job_id)
-            reference_sample_entry = SampleEntry.fromDict(result["info"]["sample"])
+                continue
             # we keep those query samples that have been submitted since the cutoff
-            if job.finished_at > time_cutoff:
+            if is_recent:
                 protected_sample_ids.add(reference_sample_entry.sample_id)
             else:
                 jobs_to_be_deleted.append(job)
@@ -242,16 +231,25 @@ class Worker(QueueRemoteCallee):
                 samples_to_be_deleted[reference_sample_entry.sha256].append(reference_sample_entry)
         LOGGER.info(f"Found {len(samples_to_be_deleted)} query samples that can be deleted")
         progress_reporter.set_total(len(samples_to_be_deleted))
+        num_samples_deleted = 0
         for sample_sha256, sample_entries in samples_to_be_deleted.items():
-            LOGGER.info(f"Deleting {sample_entry.sample_id}.")
             for sample_id in set([sample_entry.sample_id for sample_entry in sample_entries]):
                 if sample_id not in protected_sample_ids:
-                    self._storage.deleteSample(sample_id)
+                    LOGGER.info(f"Deleting query sample {sample_id} ({sample_sha256}).")
+                    if self._storage.deleteSample(sample_id):
+                        num_samples_deleted += 1
             progress_reporter.step()
         # now remove the respective data also from the queue, which also deletes the results from GridFS
         LOGGER.info(f"Found {len(jobs_to_be_deleted)} query jobs that can be deleted.")
         for job in jobs_to_be_deleted:
             self.queue.delete_job(job.job_id)
+        # whatever a deleted or half-deleted query sample left behind (#68)
+        orphans = self._storage.deleteOrphanedQueryData()
+        LOGGER.info(f"Deleted orphaned query data: {orphans}")
+        report: Dict[str, Any] = {"num_query_samples_deleted": num_samples_deleted, "num_query_jobs_deleted": len(jobs_to_be_deleted), "orphans": orphans}
+        if self._storage_config.STORAGE_MONGODB_COMPACT_AFTER_CLEANUP:
+            report["compacted"] = self._storage.compactQueryCollections()
+        return report
 
     # Reports PROGRESS
     @Remote(progress=True)
@@ -266,6 +264,16 @@ class Worker(QueueRemoteCallee):
     @Remote(progress=True)
     def rebuildPicBlockHashIndex(self, progress_reporter=NoProgressReporter()):
         return self._storage.rebuildPicBlockHashIndex(progress_reporter=progress_reporter)
+
+    # Reports PROGRESS
+    @Remote(progress=True)
+    def rebuildFunctionRangeIndex(self, progress_reporter=NoProgressReporter()):
+        return self._storage.rebuildFunctionRangeIndex(progress_reporter=progress_reporter)
+
+    # Reports PROGRESS
+    @Remote(progress=True)
+    def rebuildBandDfIndex(self, progress_reporter=NoProgressReporter()):
+        return self._storage.rebuildBandDfIndex(progress_reporter=progress_reporter)
 
     # Reports PROGRESS
     @Remote(progress=True)
@@ -332,6 +340,14 @@ class Worker(QueueRemoteCallee):
     @Remote(progress=True)
     def updateMinHashes(self, function_ids, progress_reporter=NoProgressReporter()):
         """Find unhashed functions in storage and calculate their MinHashes, optionally filter by function_ids or get function_entries passed directly"""
+        # Counts every MinHash written, across every batch. It has to be initialised before the
+        # loops: when there is nothing left to hash the loop body never runs, and returning
+        # len(minhashes) then raised UnboundLocalError - so finishing with no work to do failed
+        # exactly like a crash. Accumulating also fixes what the return value means. It used to
+        # be the size of the *last* batch, which silently under-reports any run longer than one
+        # workpack, while every caller reads it as a total ("num_updated", and 0 for a sample
+        # with no functions).
+        num_updated = 0
         if function_ids is None:
             # calculate all missing MinHashes in batches.
             unhashed_function_ids = self._storage.getUnhashedFunctions(None, only_function_ids=True)
@@ -347,6 +363,7 @@ class Worker(QueueRemoteCallee):
                 minhashes = self.calculateMinHashes(unhashed_functions, progress_reporter=progress_reporter)
                 if minhashes:
                     self._storage.addMinHashes(minhashes)
+                    num_updated += len(minhashes)
                     LOGGER.info("Updated minhashes for %d function entries.", len(minhashes))
                 progress_reporter.step()
         else:
@@ -362,10 +379,11 @@ class Worker(QueueRemoteCallee):
                 minhashes = self.calculateMinHashes(unhashed_functions, progress_reporter=progress_reporter)
                 if minhashes:
                     self._storage.addMinHashes(minhashes)
+                    num_updated += len(minhashes)
                     LOGGER.info("Updated minhashes for %d function entries.", len(minhashes))
                 progress_reporter.step()
         # TODO if we do deferred calculation for a batch of minhashes, we might have to clear them here or address this where else updateMinHashes is used
-        return len(minhashes)
+        return num_updated
 
     # Reports PROGRESS
     @Remote(progress=True)

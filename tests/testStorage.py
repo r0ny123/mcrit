@@ -13,8 +13,11 @@ from mcrit.config.QueueConfig import QueueConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.index.SearchCursor import FullSearchCursor
+from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.minhash.MinHash import MinHash
 from mcrit.storage.FunctionEntry import FunctionEntry
+from mcrit.storage.MongoDbStorage import MongoDbStorage
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
 
@@ -72,6 +75,48 @@ class MemoryStorageTest(TestCase):
         self.assertEqual(1, stats_without_pichash["num_samples"])
         self.assertEqual(10, stats_without_pichash["num_functions"])
         self.assertIsNone(stats_without_pichash["num_pichashes"])
+
+    def testModifyFunction(self):
+        # fkie-cad/mcritweb#72: a function's name can be set; the name is recorded as a label
+        # by the user who set it, once per (user, name); query functions and unknown ids are refused
+        self.storage.clearStorage()
+        smda_report = SmdaReport.fromFile(self.example_file_path)
+        assert smda_report is not None
+        sample_entry = self.storage.addSmdaReport(smda_report)
+        assert sample_entry is not None
+        function_entry = (self.storage.getFunctionsBySampleId(sample_entry.sample_id) or [])[0]
+        function_id = function_entry.function_id
+        labels_before = len(function_entry.function_labels)
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "decrypt_config"}, username="alice"))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual("decrypt_config", modified.function_name)
+        self.assertEqual(labels_before + 1, len(modified.function_labels))
+        self.assertEqual(("decrypt_config", "alice"), (modified.function_labels[-1].function_label, modified.function_labels[-1].username))
+        # the same label by the same user is not recorded twice, by another user it is
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "decrypt_config"}, username="alice"))
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "decrypt_config"}, username="bob"))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual(labels_before + 2, len(modified.function_labels))
+        self.assertEqual("bob", modified.function_labels[-1].username)
+        # without a user the label is anonymous; an empty name clears the name and records nothing
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": "sub_1234"}))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual("anonymous", modified.function_labels[-1].username)
+        self.assertTrue(self.storage.modifyFunction(function_id, {"function_name": ""}, username="alice"))
+        modified = self.storage.getFunctionById(function_id)
+        assert modified is not None
+        self.assertEqual("", modified.function_name)
+        self.assertEqual(labels_before + 3, len(modified.function_labels))
+        # the other functions of the sample are untouched, the entry round-trips through toDict
+        untouched = (self.storage.getFunctionsBySampleId(sample_entry.sample_id) or [])[1]
+        self.assertEqual(labels_before, len(untouched.function_labels))
+        self.assertEqual(modified.toDict()["function_labels"], [label.toDict() for label in modified.function_labels])
+        self.assertFalse(self.storage.modifyFunction(function_id + 100000, {"function_name": "x"}, username="alice"))
+        self.assertFalse(self.storage.modifyFunction(-1, {"function_name": "x"}, username="alice"))
+        self.assertTrue(self.storage.modifyFunction(function_id, {}, username="alice"))
 
     def testStatusAnswersInlineXcfgOnMemoryStorage(self):
         # the interface default is None ("not applicable"), so /status must keep working on
@@ -161,6 +206,71 @@ class MemoryStorageTest(TestCase):
             self.storage.recomputeFamilyStats(),
         )
 
+    def testRenamingAFamilyToItsOwnNameChangesNothing(self):
+        # the name resolves to the family itself: merging it into itself deleted the family (mongo),
+        # raised KeyError (memory), and doubled the counters of family 0, whose name is ""
+        self.storage.clearStorage()
+        report_a, report_b = self._twoReports()
+        report_b.family = ""
+        sample_a = self.storage.addSmdaReport(report_a)
+        sample_b = self.storage.addSmdaReport(report_b)
+        assert sample_a is not None and sample_b is not None
+        family_1 = sample_a.family_id
+        self.assertEqual(0, sample_b.family_id)
+        counts_before = {family_id: self._storedFamilyCounts(family_id) for family_id in (0, family_1)}
+        self.assertTrue(self.storage.modifyFamily(family_1, {"family_name": "family_1"}))
+        self.assertIsNotNone(self.storage.getFamily(family_1))
+        self.assertTrue(self.storage.modifyFamily(0, {"family_name": ""}))
+        for family_id, counts in counts_before.items():
+            self.assertEqual(counts, self._storedFamilyCounts(family_id))
+            self.assertEqual(self._actualFamilyCounts(family_id), self._storedFamilyCounts(family_id))
+        self.assertEqual("family_1", self.storage.getFamily(family_1).family_name)
+        self.assertEqual(family_1, self.storage.getSampleById(sample_a.sample_id).family_id)
+        self.assertEqual(0, self.storage.getSampleById(sample_b.sample_id).family_id)
+        # the rest of the update still applies
+        self.assertTrue(self.storage.modifyFamily(family_1, {"family_name": "family_1", "is_library": True}))
+        self.assertTrue(self.storage.getSampleById(sample_a.sample_id).is_library)
+        self.assertEqual(1, self._storedFamilyCounts(family_1)["num_library_samples"])
+
+    def testRenamingAFamilyToItsOwnNameLeavesAnotherOfTheSameNameAlone(self):
+        # names are not unique: resolving the name found the other family, and merged this one into it
+        self.storage.clearStorage()
+        report_a, report_b = self._twoReports()
+        report_b.family = "family_2"
+        sample_a = self.storage.addSmdaReport(report_a)
+        sample_b = self.storage.addSmdaReport(report_b)
+        assert sample_a is not None and sample_b is not None
+        family_1, family_2 = sample_a.family_id, sample_b.family_id
+        self._nameFamilyInStorage(family_2, "family_1")
+        self.assertEqual(family_1, self.storage.getFamilyId("family_1"))
+        counts_before = {family_id: self._storedFamilyCounts(family_id) for family_id in (family_1, family_2)}
+        self.assertTrue(self.storage.modifyFamily(family_2, {"family_name": "family_1"}))
+        for family_id, counts in counts_before.items():
+            self.assertEqual(counts, self._storedFamilyCounts(family_id))
+        self.assertEqual(family_2, self.storage.getSampleById(sample_b.sample_id).family_id)
+
+    def testRenamingAFamilyReindexesEachFunctionUnderItsOwnSample(self):
+        # MemoryStorage re-keyed the moved functions with whichever sample its loop over all samples
+        # had ended on, so renaming a family whose samples were not the last ones stored raised KeyError
+        self.storage.clearStorage()
+        report_a, report_b = self._twoReports()
+        report_b.family = "family_2"
+        sample_a = self.storage.addSmdaReport(report_a)
+        sample_b = self.storage.addSmdaReport(report_b)
+        assert sample_a is not None and sample_b is not None
+        family_1, family_2 = sample_a.family_id, sample_b.family_id
+        self.assertTrue(self.storage.modifyFamily(family_1, {"family_name": "family_1a"}))
+        family_1a = self.storage.getFamilyId("family_1a")
+        self.assertEqual(family_1a, self.storage.getSampleById(sample_a.sample_id).family_id)
+        self.assertEqual(self._actualFamilyCounts(family_1a), self._storedFamilyCounts(family_1a))
+        # both reports hold the same functions, so each pichash names one function of each sample
+        for function_entry in self.storage.getFunctionsBySampleId(sample_a.sample_id) or []:
+            self.assertEqual(family_1a, function_entry.family_id)
+            pichash_matches = self.storage.getMatchesForPicHash(function_entry.pichash)
+            self.assertIn((family_1a, sample_a.sample_id, function_entry.function_id), pichash_matches)
+            self.assertNotIn((family_1, sample_a.sample_id, function_entry.function_id), pichash_matches)
+            self.assertEqual({family_1a, family_2}, {family_id for family_id, _, _ in pichash_matches})
+
     def testRecomputeFamilyStatsCorrectsDriftedCounters(self):
         self.storage.clearStorage()
         report_a, _ = self._twoReports()
@@ -179,6 +289,11 @@ class MemoryStorageTest(TestCase):
         stats = self.storage.getStats(with_pichash=False)
         self.assertEqual(1, stats["num_samples"])
         self.assertEqual(10, stats["num_functions"])
+
+    def _nameFamilyInStorage(self, family_id, family_name):
+        # bypasses modifyFamily, the way recomputeFamilyStats re-creates a missing family document
+        # under the name its samples carry, whatever other family has it
+        self.storage._families[family_id].family_name = family_name
 
     def _driftFamilyCounters(self, family_id, num_samples, num_functions):
         family = self.storage._families[family_id]
@@ -591,6 +706,49 @@ class MemoryStorageTest(TestCase):
                 function_entries = self.storage.getFunctionsBySampleId(sample_entry.sample_id)
                 self.assertTrue(function_entries)
 
+    def testGetSampleEntriesByIds(self):
+        # #111's batch read: one $in per collection instead of one find_one per sample_id
+        self.storage.clearStorage()
+        report_a, report_b = self._twoReports()
+        sample_a = self.storage.addSmdaReport(report_a)
+        sample_b = self.storage.addSmdaReport(report_b)
+        assert sample_a is not None and sample_b is not None
+        query_sample = self.storage.addSmdaReport(report_a, isQuery=True)
+        assert query_sample is not None
+        self.assertLess(query_sample.sample_id, 0)
+        unknown_id = max(sample_a.sample_id, sample_b.sample_id) + 1000
+        requested_ids = [sample_a.sample_id, sample_b.sample_id, query_sample.sample_id, unknown_id, sample_a.sample_id]
+        entries = self.storage.getSampleEntriesByIds(requested_ids)
+        # the unknown id is left out, the duplicate is answered once
+        self.assertEqual({sample_a.sample_id, sample_b.sample_id, query_sample.sample_id}, set(entries.keys()))
+        self.assertEqual(sample_a.toDict(), entries[sample_a.sample_id].toDict())
+        self.assertEqual(sample_b.toDict(), entries[sample_b.sample_id].toDict())
+        self.assertEqual(query_sample.toDict(), entries[query_sample.sample_id].toDict())
+        self.assertEqual({}, self.storage.getSampleEntriesByIds([]))
+        self.assertEqual({}, self.storage.getSampleEntriesByIds([unknown_id]))
+
+    def testGetFamilyEntriesByIds(self):
+        self.storage.clearStorage()
+        id_a = self.storage.addFamily("family_a")
+        id_b = self.storage.addFamily("family_b")
+        unknown_id = max(id_a, id_b) + 1000
+        entries = self.storage.getFamilyEntriesByIds([id_a, id_b, unknown_id, id_a])
+        # the unknown id is left out, the duplicate is answered once
+        self.assertEqual({id_a, id_b}, set(entries.keys()))
+        self.assertEqual("family_a", entries[id_a].family_name)
+        self.assertEqual("family_b", entries[id_b].family_name)
+        # batch entries carry no sample list, same as getFamily
+        self.assertIsNone(entries[id_a].samples)
+        self.assertIsNone(entries[id_b].samples)
+        self.assertEqual({}, self.storage.getFamilyEntriesByIds([]))
+        self.assertEqual({}, self.storage.getFamilyEntriesByIds([unknown_id]))
+        # nor after GET /families/<id> has attached one to what getFamily handed out
+        family = self.storage.getFamily(id_a)
+        assert family is not None
+        family.samples = {}
+        self.assertIsNone(self.storage.getFamilyEntriesByIds([id_a])[id_a].samples)
+        self.assertNotIn("samples", self.storage.getFamilyEntriesByIds([id_a])[id_a].toDict())
+
 
 @pytest.mark.mongo
 class MongoDbStorageTest(MemoryStorageTest):
@@ -610,8 +768,193 @@ class MongoDbStorageTest(MemoryStorageTest):
         PROJECT_ROOT = str(os.path.abspath(os.sep.join([THIS_FILE_PATH, "..", ".."])))
         self.example_file_path = os.sep.join([PROJECT_ROOT, "tests", "example_report.smda"])
 
+    def testOrphanedQueryDataIsDeletedAndReferencedDataKept(self):
+        # #68: query functions whose sample is gone, and query disassembly whose function is gone
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        report = SmdaReport.fromFile(self.example_file_path)
+        query_entry = self.storage.addSmdaReport(report, isQuery=True)
+        assert query_entry is not None
+        num_functions = db.query_functions.count_documents({})
+        db.query_functions.insert_many([{"function_id": -1000, "sample_id": -999}, {"function_id": -1001, "sample_id": -999}])
+        db.query_xcfg.insert_many([{"_id": -1000, "_xcfg": "{}"}, {"_id": -500, "_xcfg": "{}"}])
+        self.assertEqual({"query_functions": 2, "query_xcfg": 2}, self.storage.deleteOrphanedQueryData())
+        self.assertEqual(num_functions, db.query_functions.count_documents({}))
+        self.assertEqual(num_functions, db.query_xcfg.count_documents({}))
+        self.assertEqual({"query_functions": 0, "query_xcfg": 0}, self.storage.deleteOrphanedQueryData())
+        # many ids: batches, not one command
+        db.query_functions.insert_many([{"function_id": -20000 - i, "sample_id": -777} for i in range(12000)])
+        db.query_samples.insert_one({"sample_id": -777, "sha256": 64 * "f"})
+        db.query_samples.delete_one({"sample_id": -777})
+        self.assertEqual(12000, self.storage.deleteOrphanedQueryData()["query_functions"])
+
+    def testOrphanedDisassemblyIsCollectedOnceNoQueryFunctionRemains(self):
+        """#68 follow-up: the boundary is taken from the newest query function, so an empty
+        query_functions used to return early and leave the disassembly behind forever.
+
+        addSmdaReport writes the disassembly before the functions, so an insert interrupted
+        between the two leaves exactly this, and deleting the queries around it empties the
+        collection the boundary came from."""
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        db.query_xcfg.insert_many([{"_id": -1, "_xcfg": "{}"}, {"_id": -2, "_xcfg": "{}"}])
+        self.assertEqual({"query_functions": 0, "query_xcfg": 2}, self.storage.deleteOrphanedQueryData())
+        self.assertEqual(0, db.query_xcfg.count_documents({}))
+
+    def testOrphanedDisassemblyIsKeptWhileAQuerySampleExists(self):
+        """The other half of the same case: a query sample is written before its disassembly,
+        so one that exists without all of its functions is the evidence that an insert may be in
+        flight and the blobs about to be deleted may be its. A sample written before samples
+        recorded their function count is taken as possibly in flight."""
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        db.query_samples.insert_one({"sample_id": -1, "sha256": 64 * "a"})
+        db.query_xcfg.insert_one({"_id": -1, "_xcfg": "{}"})
+        self.assertEqual({"query_functions": 0, "query_xcfg": 0}, self.storage.deleteOrphanedQueryData())
+        self.assertEqual(1, db.query_xcfg.count_documents({}))
+
+    def testOrphanedQueryFunctionsAreJudgedInBatchesOfSamples(self):
+        """More distinct sample ids than one batch holds. The sample ids used to come from two
+        unbounded distinct() calls, each of which answers with a single document and fails past
+        MongoDB's 16 MiB limit; they come from an aggregation cursor now, so this walks several
+        batches rather than one command."""
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        batch_size = self.storage._ORPHAN_BATCH_SIZE
+        num_orphans = 2 * batch_size + 17
+        db.query_functions.insert_many([{"function_id": -1 - i, "sample_id": -1 - i} for i in range(num_orphans)])
+        # one sample that does exist: its function must survive every batch it lands in
+        kept_sample_id = -1 - (batch_size + 3)
+        db.query_samples.insert_one({"sample_id": kept_sample_id, "sha256": 64 * "b"})
+        self.assertEqual(num_orphans - 1, self.storage.deleteOrphanedQueryData()["query_functions"])
+        self.assertEqual([kept_sample_id], [document["sample_id"] for document in db.query_functions.find({}, {"sample_id": 1, "_id": 0})])
+
+    def _queryInFlight(self, sample_id, function_ids, inserted):
+        """A query insert as addSmdaReport performs it - sample, then every function's disassembly,
+        then the functions - stopped after `inserted` functions."""
+        db = self.storage._getDb()
+        db.query_samples.insert_one({"sample_id": sample_id, "sha256": 64 * "c", "num_query_functions": len(function_ids)})
+        db.query_xcfg.insert_many([{"_id": function_id, "_xcfg": "{}"} for function_id in function_ids])
+        if inserted:
+            db.query_functions.insert_many([{"function_id": function_id, "sample_id": sample_id} for function_id in function_ids[:inserted]])
+
+    def testTheDisassemblyOfAQueryStillBeingInsertedIsKept(self):
+        """Two queries inserted concurrently finish out of order: the second one's functions are
+        in, while the first, holding the older ids, has written its disassembly and not yet its
+        functions. Judging against the newest function would take the first one's disassembly
+        for an orphan and delete it under the insert still writing it."""
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        self._queryInFlight(-1, [-1, -2, -3], inserted=1)
+        self._queryInFlight(-2, [-4, -5], inserted=2)
+        self.assertEqual({"query_functions": 0, "query_xcfg": 0}, self.storage.deleteOrphanedQueryData())
+        self.assertEqual([-5, -4, -3, -2, -1], sorted(document["_id"] for document in db.query_xcfg.find({}, {"_id": 1})))
+        # once the first insert has finished, there is nothing to collect either
+        db.query_functions.insert_many([{"function_id": function_id, "sample_id": -1} for function_id in (-2, -3)])
+        self.assertEqual({"query_functions": 0, "query_xcfg": 0}, self.storage.deleteOrphanedQueryData())
+        self.assertEqual(5, db.query_xcfg.count_documents({}))
+
+    def testTheDisassemblyAnInterruptedQueryInsertLeftIsCollectedWithItsSample(self):
+        """An insert that died between the disassembly and the functions leaves a sample that
+        never completes. Its disassembly waits while the sample exists, and goes in the run that
+        deletes the sample, which only reaches the disassembly of functions that exist."""
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        report = SmdaReport.fromFile(self.example_file_path)
+        assert report is not None
+        query_entry = self.storage.addSmdaReport(report, isQuery=True)
+        assert query_entry is not None
+        self.assertEqual(report.num_functions, db.query_samples.find_one({"sample_id": query_entry.sample_id})["num_query_functions"])
+        function_ids = sorted(document["function_id"] for document in db.query_functions.find({}, {"function_id": 1}))
+        self.assertGreater(len(function_ids), 2)
+        # the functions written last never were
+        never_written = function_ids[: len(function_ids) // 2]
+        db.query_functions.delete_many({"function_id": {"$in": never_written}})
+        self.assertEqual({"query_functions": 0, "query_xcfg": 0}, self.storage.deleteOrphanedQueryData())
+        self.assertEqual(len(function_ids), db.query_xcfg.count_documents({}))
+        self.storage.deleteSample(query_entry.sample_id)
+        self.assertEqual(len(never_written), db.query_xcfg.count_documents({}))
+        self.assertEqual({"query_functions": 0, "query_xcfg": len(never_written)}, self.storage.deleteOrphanedQueryData())
+        self.assertEqual(0, db.query_xcfg.count_documents({}))
+
+    def testCompactingTheQueryCollectionsAnswersPerCollection(self):
+        self.storage.clearStorage()
+        outcome = self.storage.compactQueryCollections()
+        self.assertEqual({"query_samples", "query_functions", "query_xcfg"}, set(outcome))
+        for collection, result in outcome.items():
+            self.assertIn("ok", result, collection)
+
+    def testCompactingReachesTheQueueGridFsOnlyWhereItSharesTheDatabase(self):
+        """The cleanup deletes query jobs and so their results in the queue's GridFS: those are
+        compacted when the queue keeps its data in this database, and left alone when not."""
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        shared = QueueConfig()
+        shared.QUEUE_SERVER, shared.QUEUE_PORT = self._storage_config.STORAGE_SERVER, self._storage_config.STORAGE_PORT
+        shared.QUEUE_MONGODB_DBNAME = self._storage_config.STORAGE_MONGODB_DBNAME
+        separate = QueueConfig()
+        separate.QUEUE_SERVER, separate.QUEUE_PORT = shared.QUEUE_SERVER, shared.QUEUE_PORT
+        separate.QUEUE_MONGODB_DBNAME = shared.QUEUE_MONGODB_DBNAME + "_queue"
+        for queue_config, expected in (
+            (shared, ["query_samples", "query_functions", "query_xcfg", "fs.files", "fs.chunks"]),
+            (separate, ["query_samples", "query_functions", "query_xcfg"]),
+        ):
+            with self.subTest(queue_db=queue_config.QUEUE_MONGODB_DBNAME):
+                self.storage._config.QUEUE_CONFIG = queue_config
+                with patch.object(type(db), "command", autospec=True, return_value={"ok": 1.0, "bytesFreed": 0}) as command:
+                    self.storage.compactQueryCollections()
+                self.assertEqual(expected, [call.args[2] for call in command.call_args_list if call.args[1] == "compact"])
+
+    def testAnOversizedDisassemblyBlobIsDroppedAndTheFunctionKept(self):
+        # #42: MongoDB refuses a document over 16 MiB; the whole batch used to fail as
+        # "Database insert failed." with nothing saying which document, and the sample was lost
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        huge = "x" * (16 * 1024 * 1024 + 1)
+        with patch("mcrit.storage.MongoDbStorage.LOGGER") as logger:
+            self.storage._insertXcfgDocuments([{"function_id": 5, "_xcfg": huge}, {"function_id": 6, "_xcfg": "{}"}])
+        self.assertIn("Dropping the disassembly of %d function(s)", logger.warning.call_args.args[0])
+        self.assertEqual(1, logger.warning.call_args.args[1])
+        self.assertEqual([6], [document["_id"] for document in db.xcfg.find({}, {"_id": 1})])
+        error = db.error.find_one({}, sort=[("ts", -1)])
+        assert error is not None
+        self.assertIn("exceed the 16 MiB limit", error["error_msg"])
+        self.assertEqual(5, error["error_details"]["oversized"][0]["document"]["_id"])
+        self.assertGreater(error["error_details"]["oversized"][0]["bytes"], 16 * 1024 * 1024)
+        self.assertTrue(error["error_details"]["dropped"])
+
+    def testAnOversizedFunctionDocumentFailsNamingItself(self):
+        self.storage.clearStorage()
+        huge = "x" * (16 * 1024 * 1024 + 1)
+        with self.assertRaises(ValueError) as raised:
+            self.storage._dbInsertMany("functions", [{"function_id": 8, "sample_id": 1}, {"function_id": 9, "sample_id": 1, "blob": huge}, {"function_id": 10, "sample_id": 1}])
+        self.assertIn("16 MiB", str(raised.exception))
+        self.assertIn("'function_id': 9", str(raised.exception))
+        self.assertNotIn("'function_id': 10", str(raised.exception))
+        # the ordered insert stopped at the oversized document
+        self.assertEqual([8], [d["function_id"] for d in self.storage._getDb().functions.find({}, {"function_id": 1})])
+
+    def testAnOversizedBlobInTheMiddleKeepsTheOthers(self):
+        self.storage.clearStorage()
+        huge = "x" * (16 * 1024 * 1024 + 1)
+        with patch("mcrit.storage.MongoDbStorage.LOGGER"):
+            inserted = self.storage._insertXcfgDocuments(
+                [
+                    {"function_id": 1, "_xcfg": "{}"},
+                    {"function_id": 2, "_xcfg": huge},
+                    {"function_id": 3, "_xcfg": "{}"},
+                    {"function_id": 4, "_xcfg": huge},
+                    {"function_id": 5, "_xcfg": "{}"},
+                ]
+            )
+        self.assertIsNone(inserted)
+        self.assertEqual([1, 3, 5], sorted(document["_id"] for document in self.storage._getDb().xcfg.find({}, {"_id": 1})))
+
     def _driftFamilyCounters(self, family_id, num_samples, num_functions):
         self.storage._getDb().families.update_one({"family_id": family_id}, {"$set": {"num_samples": num_samples, "num_functions": num_functions}})
+
+    def _nameFamilyInStorage(self, family_id, family_name):
+        self.storage._getDb().families.update_one({"family_id": family_id}, {"$set": {"family_name": family_name}})
 
     def testRecomputeCreatesTheFamilyDocumentSamplesReferenceWithoutOne(self):
         # the family_id 1908 case of #151: samples carry an id that no family document describes
@@ -681,6 +1024,99 @@ class MongoDbStorageTest(MemoryStorageTest):
         mcrit_config.SHINGLER_CONFIG = ShinglerConfig()
         mcrit_config.QUEUE_CONFIG = QueueConfig()
         return StorageFactory.getStorage(mcrit_config)
+
+    # --- substring search on function_name over the distinct names (fkie-cad/mcritweb#76) ----
+
+    def _storageWithNamedFunctions(self):
+        self.storage.clearStorage()
+        with open(self.example_file_path) as fjson:
+            smda_report = SmdaReport.fromDict(json.load(fjson))
+        self.storage.addSmdaReport(smda_report)
+        function_ids = sorted(entry.function_id for entry in self.storage.getFunctionsBySampleId(0))
+        names = ["qz_alpha", "QZ_Alphabet", "kryptos_config", "KryptosConfig", "sub_401000"]
+        for function_id, name in zip(function_ids, names):
+            self.storage._getDb().functions.update_one({"function_id": function_id}, {"$set": {"function_name": name}})
+        return dict(zip(names, function_ids))
+
+    def _searchFunctionNames(self, term, sort_by="function_id", is_ascending=True):
+        parsed = SearchQueryParser().parse(term)
+        cursor = FullSearchCursor(None, [(sort_by, is_ascending), ("function_id", True)] if sort_by != "function_id" else [("function_id", is_ascending)])
+        return [entry.function_name for entry in self.storage.findFunctionByString(parsed, cursor=cursor, max_num_results=100).values()]
+
+    def testSubstringSearchOnFunctionNamesUsesTheDistinctNames(self):
+        by_name = self._storageWithNamedFunctions()
+        self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+        self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+        self.assertEqual(["QZ_Alphabet", "qz_alpha"], self._searchFunctionNames("qz_alph", is_ascending=False))
+        self.assertEqual([], self._searchFunctionNames("zzzzq"))
+        # the query MongoDB gets is an $in of the matching names, not a regex
+        query = self.storage._get_search_query(["function_name"], SearchQueryParser().parse("qz_alph"), None, distinct_fields={"function_name": "functions"})
+        self.assertEqual({"function_name": {"$in": ["QZ_Alphabet", "qz_alpha"]}}, {k: {op: sorted(v) for op, v in c.items()} for k, c in query.items()})
+        self.assertEqual([entry.function_id for entry in self.storage.findFunctionByString(SearchQueryParser().parse("zzzzq")).values()], [])
+        self.assertEqual(sorted(by_name.values())[:2], sorted(entry.function_id for entry in self.storage.findFunctionByString(SearchQueryParser().parse("qz_alph")).values()))
+
+    def testSubstringSearchFallsBackToTheRegexAboveTheCap(self):
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_CAP
+        try:
+            MongoDbStorage._DISTINCT_VALUES_CAP = 2
+            self.assertIsNone(self.storage._getDistinctValues("functions", "function_name"))
+            query = self.storage._get_search_query(["function_name"], SearchQueryParser().parse("qz_alph"), None, distinct_fields={"function_name": "functions"})
+            self.assertTrue(hasattr(query["function_name"], "search"))
+            # same answers either way
+            self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+            self.assertEqual([], self._searchFunctionNames("zzzzq"))
+            self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_CAP = original_cap
+
+    def testSubstringSearchFallsBackToTheRegexAboveTheByteCap(self):
+        # thousands of long mangled symbols stay under the count cap but would not fit one $in
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_MAX_BYTES
+        try:
+            MongoDbStorage._DISTINCT_VALUES_MAX_BYTES = 16
+            self.assertIsNone(self.storage._getDistinctValues("functions", "function_name"))
+            query = self.storage._get_search_query(["function_name"], SearchQueryParser().parse("qz_alph"), None, distinct_fields={"function_name": "functions"})
+            self.assertTrue(hasattr(query["function_name"], "search"))
+            self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_MAX_BYTES = original_cap
+
+    def testSubstringSearchCombinesWithOtherConditionsAndNegation(self):
+        self._storageWithNamedFunctions()
+        self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("sample_id:0 qz_alph"))
+        self.assertEqual([], self._searchFunctionNames("sample_id:1 qz_alph"))
+        excluded = self._searchFunctionNames("function_name:!?qz_alph")
+        self.assertNotIn("qz_alpha", excluded)
+        self.assertNotIn("QZ_Alphabet", excluded)
+        self.assertIn("kryptos_config", excluded)
+        self.assertEqual(len(self.storage.getFunctionsBySampleId(0)) - 2, len(excluded))
+
+    def testTheOverCapVerdictIsCachedAcrossSearches(self):
+        # on a corpus past the cap the capped scan costs ~0.9 s and always gives the same answer,
+        # so it runs once, not on every search
+        self._storageWithNamedFunctions()
+        original_cap = MongoDbStorage._DISTINCT_VALUES_CAP
+        try:
+            MongoDbStorage._DISTINCT_VALUES_CAP = 2
+            functions = self.storage._getDb().functions
+            with patch.object(type(functions), "aggregate", autospec=True, side_effect=type(functions).aggregate) as scan:
+                self.assertEqual(["qz_alpha", "QZ_Alphabet"], self._searchFunctionNames("qz_alph"))
+                self.assertEqual(["kryptos_config", "KryptosConfig"], self._searchFunctionNames("KRYPTOS"))
+                self.assertEqual(1, scan.call_count)
+        finally:
+            MongoDbStorage._DISTINCT_VALUES_CAP = original_cap
+
+    def testDistinctValuesAreListedOnlyForSubstringSearches(self):
+        self._storageWithNamedFunctions()
+        with patch.object(self.storage, "_getDistinctValues", wraps=self.storage._getDistinctValues) as listing:
+            self.storage.findFunctionByString(SearchQueryParser().parse("sample_id:0"))
+            self.assertEqual(0, listing.call_count)
+            self.storage.findFunctionByString(SearchQueryParser().parse("function_name:qz_alpha"))
+            self.assertEqual(0, listing.call_count)
+            self.storage.findFunctionByString(SearchQueryParser().parse("qz_alph"))
+            self.assertEqual(1, listing.call_count)
 
     def testCounterInitIsIdempotent(self):
         # constructing storage repeatedly against the same database must not add counter documents (#105)

@@ -15,6 +15,7 @@
 
 import json
 import logging
+import re
 import threading
 import time
 import traceback
@@ -23,7 +24,9 @@ from typing import Any, Dict, List, Optional
 
 import gridfs
 import pymongo
+from bson.errors import InvalidId
 from bson.objectid import ObjectId
+from bson.regex import Regex
 from pymongo import MongoClient, ReturnDocument, UpdateOne
 
 LOGGER = logging.getLogger(__name__)
@@ -457,34 +460,92 @@ class MongoQueue:
 
         return dict(zip(["available", "locked", "errors", "total"], counts))
 
-    def get_jobs(self, start_index: int, limit: int, method=None, state=None, ascending=False) -> Optional[List["Job"]]:
-        jobs = []
-        query_filter = {} if method is None else {"payload.method": method}
-        if state is None:
-            if ascending:
-                for job_document in self._getCollection().find(query_filter).skip(start_index).limit(limit):
-                    jobs.append(self._wrap_one(job_document))
-            else:
-                for job_document in self._getCollection().find(query_filter, sort=[("_id", -1)]).skip(start_index).limit(limit):
-                    jobs.append(self._wrap_one(job_document))
-        else:
-            # we go with an inefficient implementation for now to see if this is a desired feature and revise the query in case we deem this useful.
-            # TODO improve performance of these queries, we probably want to find a query_filter for the different possible states to allow use of skip/limit
-            all_jobs = []
-            if ascending:
-                for job_document in self._getCollection().find(query_filter):
-                    if self._identifyJobState(job_document) == state:
-                        all_jobs.append(self._wrap_one(job_document))
-            else:
-                for job_document in self._getCollection().find(query_filter, sort=[("_id", -1)]):
-                    if self._identifyJobState(job_document) == state:
-                        all_jobs.append(self._wrap_one(job_document))
-            # apply skip/limit as slice on the result
-            if limit:
-                jobs = all_jobs[start_index : start_index + limit]
-            else:
-                jobs = all_jobs[start_index:]
-        return jobs
+    # The states of _identifyJobState as queries, in the same order of precedence: each query
+    # excludes what an earlier branch would have claimed, so a document lands in exactly one.
+    _STATE_QUERIES = {
+        "in_progress": {"started_at": {"$ne": None}, "locked_by": {"$ne": None}, "finished_at": None, "terminated": False},
+        "failed": {"attempts_left": 0, "finished_at": None, "terminated": False, "$or": [{"started_at": None}, {"locked_by": None}]},
+        "queued": {"attempts_left": {"$ne": 0}, "finished_at": None, "locked_by": None, "terminated": False},
+        "finished": {"finished_at": {"$ne": None}, "terminated": False},
+        "terminated": {"terminated": True},
+    }
+
+    @classmethod
+    def _job_query(cls, method=None, state=None, filter=None, username=None, sample_ids: Optional[List[int]] = None, job_ids: Optional[List[str]] = None) -> dict:
+        """The query behind get_jobs and get_job_count, so that paging, filtering and counting
+        all see the same set of documents (fkie-cad/mcritweb#57): a text filter used to be applied to a page
+        after it had been cut, which answered "the matches among jobs 0-24" instead of "the
+        first 25 matches", and a state used to be decided in Python per document."""
+        conditions: List[dict] = []
+        if sample_ids is not None:
+            conditions.append(cls._sample_ids_condition(method, sample_ids))
+        elif method is not None:
+            conditions.append({"payload.method": method})
+        if job_ids is not None:
+            valid_ids = []
+            for job_id in job_ids:
+                try:
+                    valid_ids.append(ObjectId(job_id))
+                except (InvalidId, TypeError):
+                    continue
+            # an empty $in matches nothing, which is exactly "present but no valid id"
+            conditions.append({"_id": {"$in": valid_ids}})
+        if state is not None:
+            # an unknown state names no job, as it never did
+            conditions.append(dict(cls._STATE_QUERIES.get(state, {"_id": {"$exists": False}})))
+        if filter:
+            # what the job's parameters rendering is made of: the method name and the
+            # serialized parameters
+            pattern = re.compile(re.escape(filter), re.IGNORECASE)
+            conditions.append({"$or": [{"payload.method": pattern}, {"payload.params": pattern}]})
+        if username is not None:
+            conditions.append({"username": username})
+        if not conditions:
+            return {}
+        return {"$and": conditions}
+
+    @staticmethod
+    def _sample_ids_condition(method, sample_ids: List[int]) -> dict:
+        """Selects the jobs of <method> whose first positional argument is one of <sample_ids>.
+
+        It matches payload.descriptor: rearrange_params stores positional arguments under "0",
+        "1", ... and keyword names sort after digits, so get_descriptor's json.dumps(sort_keys=True)
+        always puts "0" right after the method name. Each id becomes two anchored regexes that are
+        literal to their end, one for an argument followed by another and one for the last, so each
+        bounds its own range of the payload.descriptor index; a single regex with an alternation
+        gets no bounds and is tested against every key. The literal prefix pins the method, so
+        payload.method is not queried as well.
+        """
+        selected_ids: Dict[int, None] = {}
+        for sample_id in sample_ids:
+            try:
+                selected_ids[int(sample_id)] = None
+            except (TypeError, ValueError):
+                continue
+        if method is None or not selected_ids:
+            # no method to anchor the regexes on, or no id that parses: select nothing
+            return {"_id": {"$exists": False}}
+        prefix = '^\\["%s", \\{"0": ' % re.escape(method)
+        return {"payload.descriptor": {"$in": [Regex("%s%d%s" % (prefix, sample_id, end)) for sample_id in selected_ids for end in (",", "\\}")]}}
+
+    def get_jobs(
+        self,
+        start_index: int,
+        limit: int,
+        method=None,
+        state=None,
+        ascending=False,
+        filter=None,
+        username=None,
+        sample_ids: Optional[List[int]] = None,
+        job_ids: Optional[List[str]] = None,
+    ) -> List["Job"]:
+        query = self._job_query(method=method, state=state, filter=filter, username=username, sample_ids=sample_ids, job_ids=job_ids)
+        cursor = self._getCollection().find(query, sort=[("_id", 1 if ascending else -1)]).skip(start_index).limit(limit)
+        return [self._wrap_one(job_document) for job_document in cursor]
+
+    def get_job_count(self, method=None, state=None, filter=None, username=None, sample_ids: Optional[List[int]] = None, job_ids: Optional[List[str]] = None) -> int:
+        return self._getCollection().count_documents(self._job_query(method=method, state=state, filter=filter, username=username, sample_ids=sample_ids, job_ids=job_ids))
 
     def get_job(self, job_id):
         job_id = ObjectId(job_id)
@@ -587,8 +648,16 @@ class MongoQueue:
         return entry.metadata
 
     def get_cached_job_id(self, payload):
-        # a job is only worth handing out again when it is finished, waiting, or actually
-        # in flight on a live worker - not when a dead worker still holds its lock (#150)
+        """The job whose result a repeated request with the same descriptor should reuse.
+
+        Two things decide that. What is eligible: a job is only worth handing out again when
+        it is finished, waiting, or actually in flight on a live worker - not when a dead
+        worker still holds its lock (#150), and never when it failed (no attempts left) or
+        was terminated. Which of the eligible ones wins: a finished job is preferred over one
+        still queued or running, and among several of the same kind the newest. Sorting by
+        finished_at descending puts the finished jobs first, because a descending sort places
+        null (unfinished) after every date (fkie-cad/mcritweb#47).
+        """
         job = self._wrap_one(
             self._getCollection().find_one(
                 {
@@ -601,7 +670,7 @@ class MongoQueue:
                         {"locked_by": {"$in": sorted(self._live_worker_ids())}},
                     ],
                 },
-                sort=[("created_at", pymongo.DESCENDING)],
+                sort=[("finished_at", pymongo.DESCENDING), ("created_at", pymongo.DESCENDING)],
             )
         )
         return job and job.job_id or None

@@ -3,7 +3,7 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from smda.common.SmdaReport import SmdaReport
 from smda.SmdaConfig import SmdaConfig
@@ -390,6 +390,11 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         report = SmdaReport.fromDict(report_json)
         return self.addReport(report, calculate_hashes=calculate_hashes, calculate_matches=calculate_matches)
 
+    def modifyFunction(self, function_id: int, update_information: dict, username: Optional[str] = None) -> bool:
+        # unlike modifySample/modifyFamily this touches one document and no statistics, so it
+        # is answered synchronously instead of as a job (fkie-cad/mcritweb#72)
+        return self.getStorage().modifyFunction(function_id, update_information, username=username)
+
     def getMatchesCross(self, sample_ids: List[int], sample_group_only=False, force_recalculation=False, username=None, **params):
         sample_to_job_id = {}
         for id in sample_ids:
@@ -448,6 +453,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
     def getFamily(self, family_id):
         return self.getStorage().getFamily(family_id)
 
+    def getFamiliesByIds(self, family_ids: List[int]) -> Dict[int, FamilyEntry]:
+        return self.getStorage().getFamilyEntriesByIds(family_ids)
+
     def getFunctionsBySampleId(self, sample_id):
         return self.getStorage().getFunctionsBySampleId(sample_id)
 
@@ -468,6 +476,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
 
     def getSampleById(self, sample_id):
         return self.getStorage().getSampleById(sample_id)
+
+    def getSamplesByIds(self, sample_ids: List[int]) -> Dict[int, SampleEntry]:
+        return self.getStorage().getSampleEntriesByIds(sample_ids)
 
     def getSamples(self, start_index, limit):
         return self.getStorage().getSamples(start_index, limit)
@@ -583,7 +594,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             last_element_key = None
 
         forward_cursor_str = None
-        if last_element_key:
+        # `is not None`, not truthiness: the key is an id, and a page whose last entry is
+        # id 0 (function 0, sample 0, the unknown family 0) used to end the listing there
+        if last_element_key is not None:
             last_result = search_results_objects[last_element_key]
             forward_cursor = MinimalSearchCursor()
             forward_cursor.is_forward_search = True ^ is_backward_search  # switch for backward search, because of swap
@@ -619,9 +632,12 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 (standard_sort, is_ascending),
             ]
         else:
+            # the tie-break follows the direction of the sort field: the order stays total and
+            # deterministic, and a single compound index on (field, id) then serves the
+            # descending order as well, walked backwards (fkie-cad/mcritweb#59)
             sort_by_list = [
                 (sort_by, is_ascending),
-                (standard_sort, True),
+                (standard_sort, is_ascending),
             ]
         return sort_by_list
 
