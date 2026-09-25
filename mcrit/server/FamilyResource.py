@@ -12,6 +12,7 @@ class FamilyResource:
 
     @timing
     def on_get(self, req, resp, family_id=None):
+        """One family by id, with its samples unless ``with_samples=false``. Unknown ids answer 404."""
         # parse optional request parameters
         with_samples = True
         if "with_samples" in req.params:
@@ -38,7 +39,34 @@ class FamilyResource:
         db_log_msg(self.index, req, f"FamilyResource.on_get - success - family_id {family_id}")
 
     @timing
+    def on_post_by_ids(self, req, resp):
+        """The families with the comma-separated ids in the body, keyed by family id, without their sample lists; ids that are not found are left out."""
+        if not req.content_length:
+            resp.data = jsonify(
+                {
+                    "status": "failed",
+                    "data": {"message": "POST request without body can't be processed."},
+                }
+            )
+            resp.status = falcon.HTTP_400
+            db_log_msg(self.index, req, "FamilyResource.on_post_by_ids - failed - no POST body.")
+            return
+        # assume the POST body consists of comma separated family_ids
+        post_body = req.stream.read()
+        if re.match(rb"^\d+(?:[\s]*,[\s]*\d+)*$", post_body):
+            target_family_ids = [int(family_id) for family_id in post_body.split(b",")]
+            family_entries = self.index.getFamiliesByIds(target_family_ids)
+            data = {family_id: family_entry.toDict() for family_id, family_entry in family_entries.items()}
+            resp.data = jsonify({"status": "successful", "data": data})
+            resp.status = falcon.HTTP_200
+            db_log_msg(self.index, req, "FamilyResource.on_post_by_ids - success.")
+            return
+        resp.status = falcon.HTTP_400
+        db_log_msg(self.index, req, "FamilyResource.on_post_by_ids - failed - invalid body format.")
+
+    @timing
     def on_put(self, req, resp, family_id=None):
+        """Modify a family; JSON body with ``family_name`` (alphanumeric, dots, dashes, underscores) and/or ``is_library``. Answers 202 on success, 400 for a malformed body."""
         resp.status = falcon.HTTP_400
         if not req.content_length or not isinstance(req.media, dict):
             resp.data = jsonify({"status": "failed", "data": {"message": "PUT request without body can't be processed."}})
@@ -46,7 +74,7 @@ class FamilyResource:
             return
         # sanitize sample information
         information_update = req.media
-        if "family_name" in information_update and not re.match(r"^(?=[a-zA-Z0-9._\-]{0,64}$)(?!.*[\-_.]{2})[^\-_.].*[^\-_.]$", information_update["family_name"]):
+        if "family_name" in information_update and not re.match(r"^(?![\-_.])(?!.*[\-_.]{2})(?!.*[\-_.]\Z)[a-zA-Z0-9._\-]{0,64}\Z", information_update["family_name"]):
             resp.data = jsonify({"status": "failed", "data": {"message": "family_name may be 0-64 alphanumeric chars with single dots, dashes, underscores inbetween."}})
             return
         if "is_library" in information_update:
@@ -69,6 +97,7 @@ class FamilyResource:
 
     @timing
     def on_delete(self, req, resp, family_id=None):
+        """Delete a family and its samples; with ``keep_samples=true`` the samples move to the unknown family instead. Unknown ids answer 404."""
         if family_id is None or self.index.getFamily(family_id) is None:
             resp.data = jsonify(
                 {
@@ -96,6 +125,7 @@ class FamilyResource:
 
     @timing
     def on_get_collection(self, req, resp):
+        """All families keyed by id; optional ``start`` (first family id) and ``limit``."""
         db_log_msg(self.index, req, "FamilyResource.on_get_collection")
         # parse optional request parameters
         start_index = 0

@@ -110,6 +110,8 @@ def get_app():
     # An instance upgrading into this feature has no index and keeps using the old full scan until
     # this runs, so it is the one operator action the feature needs.
     _app.add_route("/rebuild_picblockhash_index", status_resource, suffix="rebuild_picblockhash_index")  # get
+    _app.add_route("/rebuild_function_range_index", status_resource, suffix="rebuild_function_range_index")  # get
+    _app.add_route("/rebuild_band_df_index", status_resource, suffix="rebuild_band_df_index")  # get
     _app.add_route("/recalculate_pichashes", status_resource, suffix="recalculate_pichashes")  # get
     # schedule a job that rehashes only the samples whose minhashes an older smda escaper produced (#142)
     _app.add_route("/repair_minhashes", status_resource, suffix="repair_minhashes")  # post
@@ -122,6 +124,8 @@ def get_app():
     _app.add_route("/search/functions", status_resource, suffix="search_functions")
 
     _app.add_route("/families", family_resource, suffix="collection")
+    # post only: batch lookup, body is a comma separated list of family_ids
+    _app.add_route("/families/ids", family_resource, suffix="by_ids")
     # supports GET, PUT (for modification of family_name, is_library), DELETE (for all samples)
     _app.add_route("/families/{family_id:int}", family_resource)
 
@@ -129,6 +133,8 @@ def get_app():
     _app.add_route("/samples", sample_resource, suffix="collection")
     # post only
     _app.add_route("/samples/binary", sample_resource, suffix="submit_binary")
+    # post only: batch lookup, body is a comma separated list of sample_ids
+    _app.add_route("/samples/ids", sample_resource, suffix="by_ids")
     # supports GET, PUT (for modification of family_name, version, component, is_library), DELETE (for one sample)
     _app.add_route("/samples/{sample_id:int}", sample_resource)
     #
@@ -167,6 +173,7 @@ def get_app():
 
     _app.add_route("/jobs", job_resource, suffix="collection")
     _app.add_route("/jobs/stats", job_resource, suffix="stats")
+    _app.add_route("/jobs/count", job_resource, suffix="count")
     _app.add_route("/jobs/{job_id}", job_resource)
     _app.add_route("/jobs/{job_id}/result", job_resource, suffix="job_result")
     _app.add_route("/results/{result_id}", job_resource, suffix="results")

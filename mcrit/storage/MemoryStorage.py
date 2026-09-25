@@ -5,7 +5,7 @@ import operator
 import re
 import uuid
 from collections import defaultdict
-from copy import deepcopy
+from copy import copy, deepcopy
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
@@ -273,6 +273,20 @@ class MemoryStorage(StorageInterface):
             self._samples[sample_id].component = update_information["component"]
         return True
 
+    def modifyFunction(self, function_id: int, update_information: dict, username: Optional[str] = None) -> bool:
+        if function_id < 0 or not self.isFunctionId(function_id):
+            return False
+        function_entry = self._functions[function_id]
+        if "function_name" in update_information:
+            function_name = update_information["function_name"]
+            function_entry.function_name = function_name
+            if function_name:
+                label_username = username or "anonymous"
+                is_known_label = any(label.username == label_username and label.function_label == function_name for label in function_entry.function_labels)
+                if not is_known_label:
+                    function_entry.function_labels.append(FunctionLabelEntry(function_name, label_username))
+        return True
+
     def modifyFamily(self, family_id: int, update_information: dict) -> bool:
         if not self.isFamilyId(family_id):
             return False
@@ -283,7 +297,10 @@ class MemoryStorage(StorageInterface):
                 if family_id == sample_entry.family_id:
                     self._samples[sample_id].is_library = update_information["is_library"]
             self._families[family_id].num_library_samples = self._families[family_id].num_samples
-        if "family_name" in update_information:
+        # the family's own name is not a rename: merging a family into itself dropped it and then failed
+        # on the lookup, or for family 0 doubled its counters. Compared with the stored name rather than
+        # looked up, because another family may carry the same name
+        if "family_name" in update_information and update_information["family_name"] != old_family_info.family_name:
             old_family_info = self.getFamily(family_id)
             family_name = update_information["family_name"]
             new_family_id = self.addFamily(family_name)
@@ -310,8 +327,8 @@ class MemoryStorage(StorageInterface):
             for function_id, function_entry in self._functions.items():
                 if family_id == function_entry.family_id:
                     self._functions[function_id].family_id = new_family_id
-                    self._pichashes[function_entry.pichash].remove((family_id, sample_id, function_id))
-                    self._pichashes[function_entry.pichash].add((new_family_id, sample_id, function_id))
+                    self._pichashes[function_entry.pichash].remove((family_id, function_entry.sample_id, function_id))
+                    self._pichashes[function_entry.pichash].add((new_family_id, function_entry.sample_id, function_id))
         self._updateDbState()
         return True
 
@@ -574,11 +591,16 @@ class MemoryStorage(StorageInterface):
         sample_ids = {}
         sample_to_func_ids = {}
         minhashes = {}
+        # one signature object per distinct signature, shared by every function carrying it -
+        # the same deduplication MongoDbStorage._fetchCacheSlice does while decoding, so both
+        # backends hand the matcher a cache of the same shape
+        interned_signatures: Dict[bytes, bytes] = {}
         for function_id in set(function_ids):
             function_entry = self._query_functions[function_id] if function_id < 0 else self._functions[function_id]
             function_id = function_entry.function_id
             sample_id = function_entry.sample_id
-            minhashes[function_id] = function_entry.minhash
+            minhash = function_entry.minhash
+            minhashes[function_id] = interned_signatures.setdefault(minhash, minhash)
             sample_ids[function_id] = sample_id
             if sample_id not in sample_to_func_ids:
                 sample_to_func_ids[sample_id] = set()
@@ -634,6 +656,17 @@ class MemoryStorage(StorageInterface):
         if family_id in self._families:
             return self._families[family_id]
         return None
+
+    def getFamilyEntriesByIds(self, family_ids: List[int]) -> Dict[int, "FamilyEntry"]:
+        entries = {}
+        for family_id in family_ids:
+            entry = self.getFamily(family_id)
+            if entry is not None:
+                # getFamily hands out the stored entry itself, and GET /families/<id> attaches
+                # its sample list to that; a batch entry carries none, as on MongoDbStorage
+                entries[family_id] = copy(entry)
+                entries[family_id].samples = None
+        return entries
 
     def getFamilyId(self, family_name: str) -> Optional[int]:
         for fam_id, fam_entry in self._families.items():
@@ -969,6 +1002,48 @@ class MemoryStorage(StorageInterface):
         # an in-memory pass with nothing to index. Implemented rather than left to raise, so the
         # backends stay interchangeable for callers that offer the rebuild unconditionally.
         return 0
+
+    def rebuildFunctionRangeIndex(self, progress_reporter=None) -> int:
+        # MemoryStorage already holds every FunctionEntry, so a function's sample is one dict
+        # lookup away and there is nothing to index. Reported complete so the two-stage path is
+        # available here too, rather than silently falling back to whole-corpus matching.
+        self._function_range_index_complete = True
+        return len({function_entry.sample_id for function_entry in self._functions.values()})
+
+    def isFunctionRangeIndexComplete(self) -> bool:
+        return getattr(self, "_function_range_index_complete", True)
+
+    def getSampleIdsForFunctionIdArray(self, function_ids):
+        import numpy as np
+
+        return np.fromiter(
+            (self._functions[function_id].sample_id if function_id in self._functions else -1 for function_id in function_ids.tolist()),
+            dtype=np.int64,
+            count=len(function_ids),
+        )
+
+    def getSampleFunctionCounts(self, sample_ids=None):
+        """sample_id -> function count, optionally restricted to `sample_ids`.
+
+        The restriction exists for the MongoDB backend, where building the whole-corpus map per
+        matching job was the last per-query cost that grew with corpus size. Kept in step here so
+        both backends answer the same call; this one still walks its own functions either way.
+        """
+        wanted = None if sample_ids is None else {int(sample_id) for sample_id in sample_ids}
+        counts: Dict[int, int] = {}
+        for function_entry in self._functions.values():
+            if wanted is not None and function_entry.sample_id not in wanted:
+                continue
+            counts[function_entry.sample_id] = counts.get(function_entry.sample_id, 0) + 1
+        return counts
+
+    def rebuildBandDfIndex(self, progress_reporter=None) -> int:
+        # band posting lists are plain in-memory lists whose length is free to read, so the
+        # cutoff needs no stored df here
+        return 0
+
+    def isBandDfIndexComplete(self) -> bool:
+        return True
 
     def rebuildMinhashBandIndex(self, progress_reporter=None):
         # TODO while minhashes are considerably small, there is a still chance that the

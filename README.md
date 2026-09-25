@@ -18,7 +18,7 @@ First and foremost, this will ensure that you have fully compatible versions acr
 Installing MCRIT on its own will require some more steps.
 For the following, we assume Ubuntu as host operating system.
 
-MCRIT requires **Python 3.11 or newer**. Its dependencies are declared in `pyproject.toml` and are installed together with the package:
+MCRIT requires **Python 3.12 or newer**. Its dependencies are declared in `pyproject.toml` and are installed together with the package:
 
 ```bash
 # install python and MCRIT along with its dependencies
@@ -81,7 +81,7 @@ Regardless of your choice for installation, once running you can interact with t
 
 ### MCRIT Client
 
-We have created a Python client module that is capable of working with all available endpoints of the server.
+We have created a Python client module that is capable of working with all available endpoints of the server. The endpoints themselves are listed in the generated [API reference](docs/api_reference.md), together with the client method for each.
 Documentation for this client module is currently in development.
 
 ### MCRIT CLI
