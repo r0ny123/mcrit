@@ -32,7 +32,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
   Family entries carry no sample lists ([#207]).
 
-- **What `STORAGE_BAND_DF_CUTOFF` skips is measurable** (#201), as a job:
+- **What `STORAGE_BAND_DF_CUTOFF` skips is measurable** ([#201]), as a job:
   `GET /band_df_cutoff_coverage` (optionally `?band_df_cutoff=N`, refused with a 400 unless an
   integer from 0 to 2^63 - 1, the largest a BSON integer holds) answers a job id, and
   `McritClient.requestBandDfCutoffCoverage()` does the same. Its result gives per band and in total
@@ -79,7 +79,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - **`rebuild_band_df_index` recreates a missing bucket 0** under `STORAGE_BAND_BUCKET_SIZE`. It
   only updated an existing bucket 0, so a hash whose bucket 0 was gone while higher buckets
   survived kept no df anywhere: the cutoff never served its postings and the coverage report
-  (#201) could not count them, with no error either way. The rebuild now upserts bucket 0 while
+  ([#201]) could not count them, with no error either way. The rebuild now upserts bucket 0 while
   postings survive, as the recompute after a deletion already did. Both now create it with an
   empty posting list: the recompute's upsert left `function_ids` out, so the next candidate lookup
   that returned the recreated document raised `KeyError: 'function_ids'` and failed the job.
@@ -621,3 +621,4 @@ date, the version, and what changed.
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#207]: https://github.com/danielplohmann/mcrit/issues/207
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
+[#201]: https://github.com/danielplohmann/mcrit/issues/201
