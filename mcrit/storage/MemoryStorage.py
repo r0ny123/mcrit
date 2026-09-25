@@ -5,7 +5,7 @@ import operator
 import re
 import uuid
 from collections import defaultdict
-from copy import deepcopy
+from copy import copy, deepcopy
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
@@ -591,11 +591,16 @@ class MemoryStorage(StorageInterface):
         sample_ids = {}
         sample_to_func_ids = {}
         minhashes = {}
+        # one signature object per distinct signature, shared by every function carrying it -
+        # the same deduplication MongoDbStorage._fetchCacheSlice does while decoding, so both
+        # backends hand the matcher a cache of the same shape
+        interned_signatures: Dict[bytes, bytes] = {}
         for function_id in set(function_ids):
             function_entry = self._query_functions[function_id] if function_id < 0 else self._functions[function_id]
             function_id = function_entry.function_id
             sample_id = function_entry.sample_id
-            minhashes[function_id] = function_entry.minhash
+            minhash = function_entry.minhash
+            minhashes[function_id] = interned_signatures.setdefault(minhash, minhash)
             sample_ids[function_id] = sample_id
             if sample_id not in sample_to_func_ids:
                 sample_to_func_ids[sample_id] = set()
@@ -651,6 +656,17 @@ class MemoryStorage(StorageInterface):
         if family_id in self._families:
             return self._families[family_id]
         return None
+
+    def getFamilyEntriesByIds(self, family_ids: List[int]) -> Dict[int, "FamilyEntry"]:
+        entries = {}
+        for family_id in family_ids:
+            entry = self.getFamily(family_id)
+            if entry is not None:
+                # getFamily hands out the stored entry itself, and GET /families/<id> attaches
+                # its sample list to that; a batch entry carries none, as on MongoDbStorage
+                entries[family_id] = copy(entry)
+                entries[family_id].samples = None
+        return entries
 
     def getFamilyId(self, family_name: str) -> Optional[int]:
         for fam_id, fam_entry in self._families.items():
