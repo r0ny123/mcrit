@@ -24,7 +24,9 @@ from typing import Any, Dict, List, Optional
 
 import gridfs
 import pymongo
+from bson.errors import InvalidId
 from bson.objectid import ObjectId
+from bson.regex import Regex
 from pymongo import MongoClient, ReturnDocument, UpdateOne
 
 LOGGER = logging.getLogger(__name__)
@@ -479,14 +481,25 @@ class MongoQueue:
     }
 
     @classmethod
-    def _job_query(cls, method=None, state=None, filter=None, username=None) -> dict:
+    def _job_query(cls, method=None, state=None, filter=None, username=None, sample_ids: Optional[List[int]] = None, job_ids: Optional[List[str]] = None) -> dict:
         """The query behind get_jobs and get_job_count, so that paging, filtering and counting
         all see the same set of documents (fkie-cad/mcritweb#57): a text filter used to be applied to a page
         after it had been cut, which answered "the matches among jobs 0-24" instead of "the
         first 25 matches", and a state used to be decided in Python per document."""
         conditions: List[dict] = []
-        if method is not None:
+        if sample_ids is not None:
+            conditions.append(cls._sample_ids_condition(method, sample_ids))
+        elif method is not None:
             conditions.append({"payload.method": method})
+        if job_ids is not None:
+            valid_ids = []
+            for job_id in job_ids:
+                try:
+                    valid_ids.append(ObjectId(job_id))
+                except (InvalidId, TypeError):
+                    continue
+            # an empty $in matches nothing, which is exactly "present but no valid id"
+            conditions.append({"_id": {"$in": valid_ids}})
         if state is not None:
             # an unknown state names no job, as it never did
             conditions.append(dict(cls._STATE_QUERIES.get(state, {"_id": {"$exists": False}})))
@@ -501,13 +514,48 @@ class MongoQueue:
             return {}
         return {"$and": conditions}
 
-    def get_jobs(self, start_index: int, limit: int, method=None, state=None, ascending=False, filter=None, username=None) -> List["Job"]:
-        query = self._job_query(method=method, state=state, filter=filter, username=username)
+    @staticmethod
+    def _sample_ids_condition(method, sample_ids: List[int]) -> dict:
+        """Selects the jobs of <method> whose first positional argument is one of <sample_ids>.
+
+        It matches payload.descriptor: rearrange_params stores positional arguments under "0",
+        "1", ... and keyword names sort after digits, so get_descriptor's json.dumps(sort_keys=True)
+        always puts "0" right after the method name. Each id becomes two anchored regexes that are
+        literal to their end, one for an argument followed by another and one for the last, so each
+        bounds its own range of the payload.descriptor index; a single regex with an alternation
+        gets no bounds and is tested against every key. The literal prefix pins the method, so
+        payload.method is not queried as well.
+        """
+        selected_ids: Dict[int, None] = {}
+        for sample_id in sample_ids:
+            try:
+                selected_ids[int(sample_id)] = None
+            except (TypeError, ValueError):
+                continue
+        if method is None or not selected_ids:
+            # no method to anchor the regexes on, or no id that parses: select nothing
+            return {"_id": {"$exists": False}}
+        prefix = '^\\["%s", \\{"0": ' % re.escape(method)
+        return {"payload.descriptor": {"$in": [Regex("%s%d%s" % (prefix, sample_id, end)) for sample_id in selected_ids for end in (",", "\\}")]}}
+
+    def get_jobs(
+        self,
+        start_index: int,
+        limit: int,
+        method=None,
+        state=None,
+        ascending=False,
+        filter=None,
+        username=None,
+        sample_ids: Optional[List[int]] = None,
+        job_ids: Optional[List[str]] = None,
+    ) -> List["Job"]:
+        query = self._job_query(method=method, state=state, filter=filter, username=username, sample_ids=sample_ids, job_ids=job_ids)
         cursor = self._getCollection().find(query, sort=[("_id", 1 if ascending else -1)]).skip(start_index).limit(limit)
         return [self._wrap_one(job_document) for job_document in cursor]
 
-    def get_job_count(self, method=None, state=None, filter=None, username=None) -> int:
-        return self._getCollection().count_documents(self._job_query(method=method, state=state, filter=filter, username=username))
+    def get_job_count(self, method=None, state=None, filter=None, username=None, sample_ids: Optional[List[int]] = None, job_ids: Optional[List[str]] = None) -> int:
+        return self._getCollection().count_documents(self._job_query(method=method, state=state, filter=filter, username=username, sample_ids=sample_ids, job_ids=job_ids))
 
     def get_job(self, job_id):
         job_id = ObjectId(job_id)
