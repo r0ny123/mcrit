@@ -14,7 +14,7 @@ from picblocks.blockhasher import BlockHasher
 
 from mcrit.index.SearchCursor import FullSearchCursor
 from mcrit.index.SearchQueryTree import AndNode, BaseVisitor, FilterSingleElementLists, NodeType, OrNode, PropagateNot, SearchConditionNode, SearchFieldResolver
-from mcrit.libs.tags import checkTagEntity, normalizeTags
+from mcrit.libs.tags import MAX_TAGS_PER_ENTITY, TagLimitError, checkTagEntity, mergeTags, normalizeTags, tagLimitMessage
 from mcrit.minhash.MinHash import MinHash
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
@@ -327,8 +327,9 @@ class MemoryStorage(StorageInterface):
             # both actor lists (a review of #57 caught the rename dropping them)
             merged_actors = FamilyEntry.normalizeActors(list(new_family_info.actors or []) + list(old_family_info.actors or []))
             self._families[new_family_id].actors = merged_actors
-            # and so do its tags (#53), as a union with those the target carries already
-            self._families[new_family_id].tags = list(new_family_info.tags) + [tag for tag in old_family_info.tags if tag not in new_family_info.tags]
+            # and so do its tags (#53), as a union with those the target carries already, which is
+            # not capped at MAX_TAGS_PER_ENTITY (see mcrit.libs.tags)
+            self._families[new_family_id].tags = mergeTags(new_family_info.tags, old_family_info.tags)
             # update family_entry
             if family_id == 0:
                 self._families[0].num_samples = 0
@@ -367,7 +368,11 @@ class MemoryStorage(StorageInterface):
         entry = self._getTaggableEntry(entity, entity_id)
         if entry is None:
             return None
-        entry.tags = list(entry.tags) + [tag for tag in tags if tag not in entry.tags]
+        merged = mergeTags(entry.tags, tags)
+        # a union past the cap is refused as a whole, as MongoDbStorage refuses it
+        if len(merged) > MAX_TAGS_PER_ENTITY:
+            raise TagLimitError(tagLimitMessage(entity, entity_id, len(entry.tags)))
+        entry.tags = merged
         return list(entry.tags)
 
     def removeTags(self, entity: str, entity_id: int, tags: List[str]) -> Optional[List[str]]:
@@ -375,7 +380,8 @@ class MemoryStorage(StorageInterface):
         entry = self._getTaggableEntry(entity, entity_id)
         if entry is None:
             return None
-        entry.tags = [tag for tag in entry.tags if tag not in tags]
+        removed = set(tags)
+        entry.tags = [tag for tag in entry.tags if tag not in removed]
         return list(entry.tags)
 
     def getTagCounts(self, entity: str) -> Dict[str, int]:

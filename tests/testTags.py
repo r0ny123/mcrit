@@ -3,12 +3,14 @@
 import json
 import logging
 import os
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 import falcon.testing
 import pymongo
 import pytest
+from pymongo.collection import Collection
 from smda.common.SmdaReport import SmdaReport
 
 from mcrit.client.McritClient import McritBadRequest, McritClient, McritNotFound
@@ -17,7 +19,7 @@ from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.index.SearchCursor import FullSearchCursor
 from mcrit.index.SearchQueryParser import SearchQueryParser
-from mcrit.libs.tags import isValidTag, normalizeTags
+from mcrit.libs.tags import MAX_TAGS_PER_ENTITY, MAX_TAGS_PER_REQUEST, TagLimitError, isValidTag, normalizeTags
 from mcrit.server import application_routes
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
@@ -77,6 +79,24 @@ class TagNormalisation(unittest.TestCase):
         # an import drops what it cannot take instead of failing
         self.assertEqual(["ok"], normalizeTags(["ok", "$gt", "", 3], drop_invalid=True))
         self.assertEqual([], normalizeTags("packed", drop_invalid=True))
+
+    def test_a_long_list_is_deduplicated_in_linear_time(self):
+        """a membership test on the growing result made this quadratic: 60,000 tags took ~15 s"""
+        tags = [f"tag{number}" for number in range(40000)]
+        started = time.monotonic()
+        normalized = normalizeTags(tags + tags)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(tags, normalized)
+
+    def test_a_limit_counts_the_list_before_looking_at_it(self):
+        self.assertEqual(["a"], normalizeTags(["a"] * MAX_TAGS_PER_REQUEST, limit=MAX_TAGS_PER_REQUEST))
+        # counted as sent, duplicates included, and before the first (invalid) tag is looked at
+        for too_many in (["a"] * (MAX_TAGS_PER_REQUEST + 1), ["$bad"] * (MAX_TAGS_PER_REQUEST + 1)):
+            with self.assertRaises(TagLimitError) as raised:
+                normalizeTags(too_many, limit=MAX_TAGS_PER_REQUEST)
+            self.assertIn(f"at most {MAX_TAGS_PER_REQUEST} tags per request", str(raised.exception))
+        # a TagLimitError is a ValueError, so a caller handling invalid tags handles it too
+        self.assertTrue(issubclass(TagLimitError, ValueError))
 
 
 class EntryTags(unittest.TestCase):
@@ -188,6 +208,41 @@ class MemoryStorageTags(unittest.TestCase):
         # the samples' and functions' own tags do not move
         self.assertEqual([], self.storage.getSampleById(self.sample.sample_id).tags)
 
+    def test_an_entity_carries_at_most_the_cap(self):
+        many_tags = [f"t{number}" for number in range(MAX_TAGS_PER_ENTITY)]
+        for entity, entity_id in (("family", self.sample.family_id), ("sample", self.sample.sample_id), ("function", self.function_ids[0])):
+            # more than the cap at once is refused, and writes nothing (a function keeps no tags field)
+            with self.assertRaises(TagLimitError, msg=entity) as raised:
+                self.storage.addTags(entity, entity_id, many_tags + ["one-more"])
+            self.assertIn(f"at most {MAX_TAGS_PER_ENTITY} tags", str(raised.exception))
+            self.assertEqual([], self._tags_of(entity, entity_id), entity)
+            # up to the cap is fine, also where the union of stored and new tags stays within it
+            self.storage.addTags(entity, entity_id, many_tags[:250])
+            self.assertEqual(many_tags, self.storage.addTags(entity, entity_id, many_tags[240:]), entity)
+            # at the cap, re-adding tags it carries is no change and not refused, a new one is
+            self.assertEqual(many_tags, self.storage.addTags(entity, entity_id, ["t0", "t255"]), entity)
+            with self.assertRaises(TagLimitError, msg=entity):
+                self.storage.addTags(entity, entity_id, ["t0", "one-more"])
+            self.assertEqual(many_tags, self._tags_of(entity, entity_id), entity)
+            # an unknown id is still None, not a TagLimitError
+            self.assertIsNone(self.storage.addTags(entity, 4242, many_tags + ["one-more"]), entity)
+            # removing makes room again
+            self.storage.removeTags(entity, entity_id, ["t0"])
+            self.assertEqual(many_tags[1:] + ["one-more"], self.storage.addTags(entity, entity_id, ["one-more"]), entity)
+
+    def test_a_merge_is_not_capped(self):
+        """a rename is no tagging request to refuse, and dropping tags would lose them"""
+        family_a, family_b = self.sample.family_id, self.other_sample.family_id
+        tags_a = [f"a{number}" for number in range(200)]
+        tags_b = [f"b{number}" for number in range(100)]
+        self.storage.addTags("family", family_a, tags_a)
+        self.storage.addTags("family", family_b, tags_b)
+        self.assertTrue(self.storage.modifyFamily(family_a, {"family_name": "family_b"}))
+        self.assertEqual(tags_b + tags_a, self.storage.getFamily(family_b).tags)
+        # but the merged family takes no further tag until it is below the cap again
+        with self.assertRaises(TagLimitError):
+            self.storage.addTags("family", family_b, ["new"])
+
     def _search(self, kind, term):
         parsed = SearchQueryParser().parse(term)
         id_field = f"{kind}_id"
@@ -255,6 +310,29 @@ class MongoDbStorageTags(MemoryStorageTags):
         plan = db.functions.find({"tags": "a"}).explain()["queryPlanner"]["winningPlan"]
         self.assertIn("tags_1", json.dumps(plan))
 
+    def test_a_concurrent_add_cannot_pass_the_cap(self):
+        """the cap is checked in the same write that adds the tags, not read before it: another
+        add landing between a read and the write must not take the entity past the cap"""
+        entity_id = self.function_ids[0]
+        self.storage.addTags("function", entity_id, [f"t{number}" for number in range(MAX_TAGS_PER_ENTITY - 1)])
+        original_update = Collection.find_one_and_update
+        raced = []
+
+        def racing_update(collection, *args, **kwargs):
+            # the other writer takes the last free place just before this write reaches the server
+            if not raced:
+                raced.append(True)
+                collection.update_one({"function_id": entity_id}, {"$push": {"tags": "interloper"}})
+            return original_update(collection, *args, **kwargs)
+
+        with patch.object(Collection, "find_one_and_update", racing_update):
+            with self.assertRaises(TagLimitError):
+                self.storage.addTags("function", entity_id, ["late"])
+        self.assertEqual([True], raced)
+        tags = self._tags_of("function", entity_id)
+        self.assertEqual(MAX_TAGS_PER_ENTITY, len(tags))
+        self.assertNotIn("late", tags)
+
 
 class ExportImportTags(unittest.TestCase):
     source_db = None
@@ -284,6 +362,33 @@ class ExportImportTags(unittest.TestCase):
         imported_functions = {entry.offset: entry for entry in target.getStorage().getFunctionsBySampleId(imported.sample_id)}
         self.assertEqual(["crypto"], imported_functions[function_offset].tags)
         self.assertEqual(1, sum(1 for entry in imported_functions.values() if entry.tags))
+        for index in (source, target):
+            index.getStorage().clearStorage()
+
+    def test_an_import_does_not_take_an_entity_past_the_cap(self):
+        """an export is data from elsewhere: tags past the cap are dropped, not the import"""
+        source = MinHashIndex(storage_config(self.source_db))
+        source.getStorage().clearStorage()
+        sample = source.getStorage().addSmdaReport(load_report(EXAMPLE_REPORT, family="crowded_family"))
+        assert sample is not None
+        export_data = json.loads(json.dumps(source.getExportData()))
+        too_many = [f"t{number}" for number in range(MAX_TAGS_PER_ENTITY + 20)]
+        export_data["family_tags"] = {str(sample.family_id): too_many}
+        export_data["sample_entries"][sample.sha256]["tags"] = too_many
+        first_function = next(iter(export_data["function_entries"][sample.sha256].values()))
+        first_function["tags"] = too_many
+        target = MinHashIndex(storage_config(self.target_db))
+        target.getStorage().clearStorage()
+        target_family_id = target.getStorage().addFamily("crowded_family")
+        local_tags = [f"local{number}" for number in range(10)] + ["t0"]
+        target.getStorage().addTags("family", target_family_id, local_tags)
+        self.assertEqual(1, target.addImportData(export_data)["num_samples_imported"])
+        # the family keeps its own and takes the first imported ones that fit
+        self.assertEqual(local_tags + too_many[1 : MAX_TAGS_PER_ENTITY - 10], target.getStorage().getFamily(target_family_id).tags)
+        imported = target.getStorage().getSampleBySha256(sample.sha256)
+        self.assertEqual(too_many[:MAX_TAGS_PER_ENTITY], imported.tags)
+        tagged_functions = [entry for entry in target.getStorage().getFunctionsBySampleId(imported.sample_id) if entry.tags]
+        self.assertEqual([too_many[:MAX_TAGS_PER_ENTITY]], [entry.tags for entry in tagged_functions])
         for index in (source, target):
             index.getStorage().clearStorage()
 
@@ -370,6 +475,45 @@ class TagRoutes(unittest.TestCase):
                 self.assertIn(fragment, result.json["data"]["message"], body)
         self.assertEqual(falcon.HTTP_400, self.client.simulate_post(path).status)
         self.assertEqual([], self.index.getStorage().getSampleById(self.sample.sample_id).tags)
+
+    def test_a_request_names_at_most_the_cap(self):
+        path = f"/samples/{self.sample.sample_id}/tags"
+        self.assertEqual(falcon.HTTP_200, self.client.simulate_post(path, json={"tags": [f"t{number}" for number in range(MAX_TAGS_PER_REQUEST)]}).status)
+        # counted as sent, before any tag is normalised: 60,000 of them took ~30 s to refuse or store
+        for tags in ([f"t{number}" for number in range(60000)], ["x"] * (MAX_TAGS_PER_REQUEST + 1), ["$bad"] * (MAX_TAGS_PER_REQUEST + 1)):
+            for method in (self.client.simulate_post, self.client.simulate_delete):
+                started = time.monotonic()
+                result = method(path, json={"tags": tags})
+                self.assertLess(time.monotonic() - started, 2.0)
+                self.assertEqual(falcon.HTTP_400, result.status)
+                self.assertIn(f"at most {MAX_TAGS_PER_REQUEST} tags per request", result.json["data"]["message"])
+        self.assertEqual(MAX_TAGS_PER_REQUEST, len(self.index.getStorage().getSampleById(self.sample.sample_id).tags))
+
+    def test_an_add_past_the_entity_cap_answers_400(self):
+        path = f"/functions/{self.function_id}/tags"
+        many_tags = [f"t{number}" for number in range(MAX_TAGS_PER_ENTITY)]
+        for start in range(0, MAX_TAGS_PER_ENTITY, MAX_TAGS_PER_REQUEST):
+            self.assertEqual(falcon.HTTP_200, self.client.simulate_post(path, json={"tags": many_tags[start : start + MAX_TAGS_PER_REQUEST]}).status)
+        result = self.client.simulate_post(path, json={"tags": ["one-more"]})
+        self.assertEqual(falcon.HTTP_400, result.status)
+        self.assertEqual("failed", result.json["status"])
+        self.assertIn(f"at most {MAX_TAGS_PER_ENTITY} tags", result.json["data"]["message"])
+        self.assertEqual(many_tags, self.index.getStorage().getFunctionById(self.function_id).tags)
+        # re-adding a tag it carries is no change, removing one is always possible, an unknown id is 404
+        self.assertEqual(falcon.HTTP_200, self.client.simulate_post(path, json={"tags": ["t0"]}).status)
+        self.assertEqual(falcon.HTTP_200, self.client.simulate_delete(path, json={"tags": ["t0"]}).status)
+        self.assertEqual(falcon.HTTP_404, self.client.simulate_post("/functions/4242/tags", json={"tags": ["one-more"]}).status)
+
+    def test_the_log_names_the_number_of_tags_not_the_tags(self):
+        """the success message lands in the logs collection, for every request"""
+        with patch("mcrit.server.TagResource.db_log_msg") as log:
+            self.client.simulate_post(f"/samples/{self.sample.sample_id}/tags", json={"tags": ["packed", "secret-operation"]})
+            self.client.simulate_delete(f"/samples/{self.sample.sample_id}/tags", json={"tags": ["packed"]})
+        messages = [call.args[2] for call in log.call_args_list]
+        self.assertEqual(2, len(messages))
+        self.assertIn("+2 tags", messages[0])
+        self.assertIn("-1 tags", messages[1])
+        self.assertFalse(any("packed" in message or "secret-operation" in message for message in messages), messages)
 
     def test_unknown_ids_answer_404(self):
         for route, entity in (("families", "family"), ("samples", "sample"), ("functions", "function")):

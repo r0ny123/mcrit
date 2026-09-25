@@ -33,7 +33,7 @@ from mcrit.index.SearchQueryTree import (
     SearchConditionNode,
     SearchFieldResolver,
 )
-from mcrit.libs.tags import checkTagEntity, normalizeTags
+from mcrit.libs.tags import MAX_TAGS_PER_ENTITY, TagLimitError, checkTagEntity, normalizeTags, tagLimitMessage
 from mcrit.libs.utility import decode_two_complement, encode_two_complement
 from mcrit.minhash.MinHash import MinHash
 from mcrit.storage.FamilyEntry import FamilyEntry
@@ -1000,7 +1000,8 @@ class MongoDbStorage(StorageInterface):
                 "$set": {"num_samples": new_num_samples, "num_functions": new_num_functions, "num_library_samples": new_num_lib_samples, "actors": merged_actors}
             }
             # and so do its tags (#53), added to the target's rather than replacing them, so that
-            # a tag added to the target meanwhile is not lost
+            # a tag added to the target meanwhile is not lost. Not capped at MAX_TAGS_PER_ENTITY
+            # (see mcrit.libs.tags)
             if old_family_info.tags:
                 family_update["$addToSet"] = {"tags": {"$each": list(old_family_info.tags)}}
             self._getDb().families.update_one({"family_id": new_family_id}, family_update)
@@ -1013,14 +1014,22 @@ class MongoDbStorage(StorageInterface):
     # the collection and id field that hold each kind of taggable entity (#53)
     _TAG_COLLECTIONS = {"family": ("families", "family_id"), "sample": ("samples", "sample_id"), "function": ("functions", "function_id")}
 
-    def _updateTags(self, entity: str, entity_id: int, update: Dict[str, Any]) -> Optional[List[str]]:
+    def _updateTags(self, entity: str, entity_id: int, update: Dict[str, Any], condition: Optional[Dict[str, Any]] = None) -> Optional[List[str]]:
         collection, id_field = self._TAG_COLLECTIONS[checkTagEntity(entity)]
         # query samples and functions (negative ids) live in collections of their own and carry no tags
         if entity != "family" and entity_id < 0:
             return None
-        document = self._getDb()[collection].find_one_and_update({id_field: entity_id}, update, projection={"_id": 0, "tags": 1}, return_document=ReturnDocument.AFTER)
+        document = self._getDb()[collection].find_one_and_update(
+            {id_field: entity_id, **(condition or {})}, update, projection={"_id": 0, "tags": 1}, return_document=ReturnDocument.AFTER
+        )
         if document is None:
-            return None
+            if condition is None:
+                return None
+            # no such entity, or one the condition refused
+            existing = self._getDb()[collection].find_one({id_field: entity_id}, projection={"_id": 0, "tags": 1})
+            if existing is None:
+                return None
+            raise TagLimitError(tagLimitMessage(entity, entity_id, len(existing.get("tags") or [])))
         tags = list(document.get("tags") or [])
         if entity == "function" and "tags" in document and not tags:
             # the last tag is gone: drop the field again, to keep the function out of the sparse index.
@@ -1030,7 +1039,13 @@ class MongoDbStorage(StorageInterface):
 
     def addTags(self, entity: str, entity_id: int, tags: List[str]) -> Optional[List[str]]:
         tags = normalizeTags(tags)
-        return self._updateTags(entity, entity_id, {"$addToSet": {"tags": {"$each": tags}}})
+        # The cap is part of the filter, so that checking it and adding the tags are one atomic
+        # write: a concurrent addTags cannot slip in between and take the entity past it. The
+        # filter counts the union of the stored and the new tags, exactly what $addToSet leaves,
+        # so re-adding tags an entity at the cap carries already is not refused. $literal keeps a
+        # tag from being read as an expression; the tag rule already refuses a leading "$".
+        within_cap = {"$expr": {"$lte": [{"$size": {"$setUnion": [{"$ifNull": ["$tags", []]}, {"$literal": tags}]}}, MAX_TAGS_PER_ENTITY]}}
+        return self._updateTags(entity, entity_id, {"$addToSet": {"tags": {"$each": tags}}}, condition=within_cap)
 
     def removeTags(self, entity: str, entity_id: int, tags: List[str]) -> Optional[List[str]]:
         tags = normalizeTags(tags)
@@ -1046,7 +1061,9 @@ class MongoDbStorage(StorageInterface):
             {"$group": {"_id": "$tags", "count": {"$sum": 1}}},
             {"$sort": {"_id": 1}},
         ]
-        return {document["_id"]: document["count"] for document in self._getDb()[collection].aggregate(pipeline)}
+        # the $group holds one entry per distinct tag; allowDiskUse lets a large vocabulary spill past
+        # MongoDB's 100 MB stage limit, which before 6.0 is an error by default
+        return {document["_id"]: document["count"] for document in self._getDb()[collection].aggregate(pipeline, allowDiskUse=True)}
 
     def recomputeFamilyStats(self, progress_reporter=None) -> Dict[str, Any]:
         """Set every family's counters from the samples and functions that exist (#151).

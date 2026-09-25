@@ -15,7 +15,7 @@ from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor
 from mcrit.index.SearchQueryParser import SearchQueryParser
-from mcrit.libs.tags import normalizeTags
+from mcrit.libs.tags import MAX_TAGS_PER_ENTITY, TagLimitError, normalizeTags
 from mcrit.libs.utility import compress_encode, decompress_decode
 from mcrit.matchers.MatcherQueryFunction import MatcherQueryFunction
 from mcrit.minhash.EscaperFingerprint import FINGERPRINT_UNAVAILABLE, getEscaperFingerprint, getEscaperFingerprints
@@ -303,12 +303,24 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 if merged != local_family.actors:
                     storage.modifyFamily(remapped_family_id, {"actors": merged})
         # tags of imported families likewise (#53). An export is data from elsewhere, so a tag
-        # this instance would not accept is dropped rather than failing the whole import
+        # this instance would not accept is dropped rather than failing the whole import, and so
+        # are those that would take a family past MAX_TAGS_PER_ENTITY: the first that fit are added
         for exported_family_id, tags in (export_data.get("family_tags") or {}).items():
             remapped_family_id = family_id_remapping.get(int(exported_family_id))
+            local_family = storage.getFamily(remapped_family_id) if remapped_family_id is not None else None
             tags = normalizeTags(tags, drop_invalid=True)
-            if remapped_family_id is not None and tags:
-                storage.addTags("family", remapped_family_id, tags)
+            if local_family is None or not tags:
+                continue
+            known_tags = set(local_family.tags)
+            new_tags = [tag for tag in tags if tag not in known_tags]
+            fitting_tags = new_tags[: max(0, MAX_TAGS_PER_ENTITY - len(local_family.tags))]
+            if len(fitting_tags) < len(new_tags):
+                LOGGER.warning("Family %d would carry more than %d tags, dropping %d imported tags.", remapped_family_id, MAX_TAGS_PER_ENTITY, len(new_tags) - len(fitting_tags))
+            if fitting_tags:
+                try:
+                    storage.addTags("family", remapped_family_id, fitting_tags)
+                except TagLimitError:
+                    LOGGER.warning("Family %d was tagged meanwhile and reached %d tags, dropping its imported tags.", remapped_family_id, MAX_TAGS_PER_ENTITY)
         LOGGER.info("Family remapping created: %d families, %d samples.", len(family_id_remapping), len(export_data["sample_entries"]))
         # iterate samples
         index = 0
@@ -323,7 +335,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 continue
             import_report["num_samples_imported"] += 1
             sample_entry = SampleEntry.fromDict(sample_entry_dict)
-            sample_entry.tags = normalizeTags(sample_entry.tags, drop_invalid=True)
+            sample_entry.tags = normalizeTags(sample_entry.tags, drop_invalid=True)[:MAX_TAGS_PER_ENTITY]
             # adjust family_id in sample_entry using our remapping
             sample_entry.family_id = family_id_remapping[sample_entry.family_id]
             # add sample_entry to storage and receive new sample_id
@@ -336,7 +348,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 # iterate functions and add them, adjusting family_id and sample_id
                 for old_function_id, function_entry_dict in function_entries.items():
                     function_entry = FunctionEntry.fromDict(function_entry_dict)
-                    function_entry.tags = normalizeTags(function_entry.tags, drop_invalid=True)
+                    function_entry.tags = normalizeTags(function_entry.tags, drop_invalid=True)[:MAX_TAGS_PER_ENTITY]
                     function_entry.sample_id = remapped_sample_entry.sample_id
                     function_entry.family_id = remapped_sample_entry.family_id
                     function_entries_to_import.append(function_entry)

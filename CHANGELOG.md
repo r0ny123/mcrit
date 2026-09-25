@@ -38,18 +38,34 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   - A tag is stripped and lower-cased, then has to be 1-64 letters, digits, spaces, dots, colons,
     underscores or dashes starting with a letter or digit - so `$where` or an empty tag is
     refused rather than stored.
+  - One request names at most 100 tags, counted as sent and before any is looked at, and an
+    entity carries at most 256; both answer 400 naming the cap, and an add past the entity cap
+    adds none of its tags. MongoDB checks the entity cap in the write that adds the tags (a
+    `$expr` on the size of the union of stored and new tags in the update's filter), so two
+    concurrent adds cannot pass it together, and re-adding tags an entity at the cap carries is
+    not refused. The caps are `MAX_TAGS_PER_REQUEST` and `MAX_TAGS_PER_ENTITY` in
+    `mcrit.libs.tags`. Without them one POST of 60,000 tags took ~30 s, since the list was
+    deduplicated in quadratic time, and grew the document towards MongoDB's 16 MB limit; the
+    deduplication is linear now, and the request log names the number of tags, not the tags.
+  - `GET /tags` is not paginated: the answer holds one entry per distinct tag, so it grows with
+    the tag vocabulary (at most 64 characters a tag), not with the number of tagged entities,
+    and every page would have to count all tagged entities again. The entities carrying one tag
+    are found by the paginated search `tags:<tag>`.
   - The search takes `tags:packed` (or `tag:packed`) for "some tag is packed", `tags:!=packed`
     (or `NOT tag:packed`) for "no tag is packed" and `tags:?pack` for a substring, MongoDB's own
     semantics for an array field, which the in-memory storage now follows for list fields too.
     The value is normalised like a tag, so `tag:Packed` finds `packed`. A plain search term does
     not look at tags, so existing searches find what they found before.
-  - A rename that merges a family into another unions their tags, as it does their actors. Moving
-    a sample to another family moves none: family tags stay on the family, and go with it when its
-    last sample leaves and it is deleted, as its actors do.
+  - A rename that merges a family into another unions their tags, as it does their actors. A
+    merge is not capped at 256, since a rename is no tagging request to refuse and dropping tags
+    would lose them; a family merged past the cap takes no new tag until some are removed.
+    Moving a sample to another family moves none: family tags stay on the family, and go with it
+    when its last sample leaves and it is deleted, as its actors do.
   - Exports carry sample and function tags in their entries and family tags as `family_tags`,
     which an import merges into what the target knows; an older importer ignores the key. Tags
     of a sample the target already holds are not merged, because the import skips that sample
-    as a whole. An imported tag this instance would not accept is dropped, not the import.
+    as a whole. An imported tag this instance would not accept is dropped, not the import, and
+    so are those past the entity cap: an entity keeps the first that fit, in the exported order.
   - **Stored data**: entities stored before read as untagged, so there is no migration. MongoDB
     gets a `tags` index on `families`, `samples` and `functions`, built by the first start after
     the upgrade, which waits for it. The one on `functions` is sparse and function documents leave

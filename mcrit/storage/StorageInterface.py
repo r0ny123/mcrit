@@ -261,6 +261,8 @@ class StorageInterface:
 
         Raises:
             ValueError: for an unknown entity or a list that holds an invalid tag, before anything is written
+            TagLimitError: (a ValueError) when the entity would carry more than mcrit.libs.tags.MAX_TAGS_PER_ENTITY
+                tags afterwards; nothing is added, and the check and the write are one atomic step
         """
         raise NotImplementedError
 
