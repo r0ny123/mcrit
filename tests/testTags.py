@@ -256,6 +256,73 @@ class MongoDbStorageTags(MemoryStorageTags):
         self.assertIn("tags_1", json.dumps(plan))
 
 
+class ExportImportTags(unittest.TestCase):
+    source_db = None
+    target_db = None
+
+    def test_round_trip_keeps_tags_and_merges_family_tags(self):
+        source = MinHashIndex(storage_config(self.source_db))
+        source.getStorage().clearStorage()
+        sample = source.getStorage().addSmdaReport(load_report(EXAMPLE_REPORT, family="tagged_family"))
+        assert sample is not None
+        function_ids = sorted(source.getStorage().getFunctionIdsBySampleId(sample.sample_id))
+        function_offset = source.getStorage().getFunctionById(function_ids[0]).offset
+        source.getStorage().addTags("family", sample.family_id, ["apt", "source:vt"])
+        source.getStorage().addTags("sample", sample.sample_id, ["reviewed"])
+        source.getStorage().addTags("function", function_ids[0], ["crypto"])
+        export_data = json.loads(json.dumps(source.getExportData()))
+        self.assertEqual({str(sample.family_id): ["apt", "source:vt"]}, export_data["family_tags"])
+        target = MinHashIndex(storage_config(self.target_db))
+        target.getStorage().clearStorage()
+        target_family_id = target.getStorage().addFamily("tagged_family")
+        target.getStorage().addTags("family", target_family_id, ["local", "apt"])
+        report = target.addImportData(export_data)
+        self.assertEqual(1, report["num_samples_imported"])
+        self.assertEqual(["local", "apt", "source:vt"], target.getStorage().getFamily(target_family_id).tags)
+        imported = target.getStorage().getSampleBySha256(sample.sha256)
+        self.assertEqual(["reviewed"], imported.tags)
+        imported_functions = {entry.offset: entry for entry in target.getStorage().getFunctionsBySampleId(imported.sample_id)}
+        self.assertEqual(["crypto"], imported_functions[function_offset].tags)
+        self.assertEqual(1, sum(1 for entry in imported_functions.values() if entry.tags))
+        for index in (source, target):
+            index.getStorage().clearStorage()
+
+    def test_an_export_without_tags_imports_as_before(self):
+        """an export written before #53, or tampered with: no family_tags, no tags in the
+        entries, or tags this instance would not accept"""
+        source = MinHashIndex(storage_config(self.source_db))
+        source.getStorage().clearStorage()
+        sample = source.getStorage().addSmdaReport(load_report(EXAMPLE_REPORT, family="old_family"))
+        assert sample is not None
+        export_data = json.loads(json.dumps(source.getExportData()))
+        del export_data["family_tags"]
+        export_data["sample_entries"][sample.sha256]["tags"] = ["fine", "$bad"]
+        for function_dict in export_data["function_entries"][sample.sha256].values():
+            del function_dict["tags"]
+        target = MinHashIndex(storage_config(self.target_db))
+        target.getStorage().clearStorage()
+        self.assertEqual(1, target.addImportData(export_data)["num_samples_imported"])
+        imported = target.getStorage().getSampleBySha256(sample.sha256)
+        self.assertEqual(["fine"], imported.tags)
+        self.assertTrue(all(entry.tags == [] for entry in target.getStorage().getFunctionsBySampleId(imported.sample_id)))
+        self.assertEqual([], target.getStorage().getFamily(imported.family_id).tags)
+        for index in (source, target):
+            index.getStorage().clearStorage()
+
+
+@pytest.mark.mongo
+class MongoExportImportTags(ExportImportTags):
+    source_db = "test_tags_export_source_mcrit"
+    target_db = "test_tags_export_target_mcrit"
+
+    @classmethod
+    def tearDownClass(cls):
+        server, port = getTestMongoServerAndPort()
+        client = pymongo.MongoClient(server, int(port))
+        for name in (cls.source_db, cls.target_db):
+            client.drop_database(name)
+
+
 class TagRoutes(unittest.TestCase):
     """The routes as get_app registers them, over a memory storage."""
 

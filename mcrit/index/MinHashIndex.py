@@ -15,6 +15,7 @@ from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor
 from mcrit.index.SearchQueryParser import SearchQueryParser
+from mcrit.libs.tags import normalizeTags
 from mcrit.libs.utility import compress_encode, decompress_decode
 from mcrit.matchers.MatcherQueryFunction import MatcherQueryFunction
 from mcrit.minhash.EscaperFingerprint import FINGERPRINT_UNAVAILABLE, getEscaperFingerprint, getEscaperFingerprints
@@ -193,10 +194,14 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         exported_data["family_mapping"] = family_mapping
         # the family attributes beyond the name (#57); an importer without this key ignores it
         exported_data["family_actors"] = {}
+        # and so are their tags (#53); a sample's and a function's travel in its own entry
+        exported_data["family_tags"] = {}
         for family_id in family_mapping:
             family_entry = storage.getFamily(family_id)
             if family_entry is not None and family_entry.actors:
                 exported_data["family_actors"][family_id] = list(family_entry.actors)
+            if family_entry is not None and family_entry.tags:
+                exported_data["family_tags"][family_id] = list(family_entry.tags)
         exported_data["sample_entries"] = exported_sample_entries
         exported_data["function_entries"] = exported_function_entries
         return exported_data
@@ -297,6 +302,13 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 merged = list(local_family.actors) + [actor for actor in actors if actor not in local_family.actors]
                 if merged != local_family.actors:
                     storage.modifyFamily(remapped_family_id, {"actors": merged})
+        # tags of imported families likewise (#53). An export is data from elsewhere, so a tag
+        # this instance would not accept is dropped rather than failing the whole import
+        for exported_family_id, tags in (export_data.get("family_tags") or {}).items():
+            remapped_family_id = family_id_remapping.get(int(exported_family_id))
+            tags = normalizeTags(tags, drop_invalid=True)
+            if remapped_family_id is not None and tags:
+                storage.addTags("family", remapped_family_id, tags)
         LOGGER.info("Family remapping created: %d families, %d samples.", len(family_id_remapping), len(export_data["sample_entries"]))
         # iterate samples
         index = 0
@@ -311,6 +323,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 continue
             import_report["num_samples_imported"] += 1
             sample_entry = SampleEntry.fromDict(sample_entry_dict)
+            sample_entry.tags = normalizeTags(sample_entry.tags, drop_invalid=True)
             # adjust family_id in sample_entry using our remapping
             sample_entry.family_id = family_id_remapping[sample_entry.family_id]
             # add sample_entry to storage and receive new sample_id
@@ -323,6 +336,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 # iterate functions and add them, adjusting family_id and sample_id
                 for old_function_id, function_entry_dict in function_entries.items():
                     function_entry = FunctionEntry.fromDict(function_entry_dict)
+                    function_entry.tags = normalizeTags(function_entry.tags, drop_invalid=True)
                     function_entry.sample_id = remapped_sample_entry.sample_id
                     function_entry.family_id = remapped_sample_entry.family_id
                     function_entries_to_import.append(function_entry)
