@@ -540,10 +540,7 @@ class McritClient:
             return FunctionEntry.fromDict(data)
 
     def modifyFunction(self, function_id: int, function_name: str) -> Optional[Dict[str, Any]]:
-        """PUT /functions/{function_id}: rename a function; the name is also recorded as a label by this client's username. Answers the confirmation message, None when rejected.
-
-        Supported by mcritweb API pass-through.
-        """
+        """PUT /functions/{function_id}: rename a function; the name is also recorded as a label by this client's username. Answers the confirmation message, None when rejected."""
         response = requests.put(f"{self.mcrit_server}/functions/{function_id}", {"function_name": function_name}, headers=self.headers)
         if self.raw:
             return self._passthrough(response)
