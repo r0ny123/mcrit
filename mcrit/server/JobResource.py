@@ -18,6 +18,25 @@ def _normalizeObjectId(value: Optional[str]) -> Optional[str]:
     return value.lower()
 
 
+def _parse_int_csv(value):
+    """Comma-separated ints; entries that do not parse are ignored, like start/limit."""
+    ids = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            ids.append(int(item))
+        except ValueError:
+            pass
+    return ids
+
+
+def _parse_str_csv(value):
+    """Comma-separated ids; blank entries are ignored."""
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 class JobResource:
     def __init__(self, index: MinHashIndex):
         self.index = index
@@ -30,12 +49,25 @@ class JobResource:
             "state": req.params.get("state", None),
             "filter": req.params.get("filter", None),
             "username": req.params.get("username", None),
+            "sample_ids": _parse_int_csv(req.params["sample_ids"]) if "sample_ids" in req.params else None,
+            "job_ids": _parse_str_csv(req.params["job_ids"]) if "job_ids" in req.params else None,
         }
+
+    def _reject_sample_ids_without_method(self, req, resp, selection) -> bool:
+        if selection["sample_ids"] is None or selection["method"] is not None:
+            return False
+        resp.status = falcon.HTTP_400
+        resp.data = jsonify({"status": "failed", "data": {"message": "sample_ids requires method to be set as well."}})
+        db_log_msg(self.index, req, "JobResource - failed - sample_ids without method.")
+        return True
 
     @timing
     def on_get_count(self, req, resp):
-        """How many jobs match the same ``method``, ``state``, ``filter`` and ``username`` selection ``GET /jobs`` takes, without paging through them. Answers ``count``."""
-        count = self.index.getQueueCount(**self._selection(req))
+        """How many jobs match the same selection ``GET /jobs`` takes, without paging through them. Answers ``count``."""
+        selection = self._selection(req)
+        if self._reject_sample_ids_without_method(req, resp, selection):
+            return
+        count = self.index.getQueueCount(**selection)
         resp.data = jsonify({"status": "successful", "data": {"count": count}})
         db_log_msg(self.index, req, "JobResource.on_get_count - success.")
 
@@ -46,6 +78,8 @@ class JobResource:
         if "ascending" in req.params:
             ascending = req.params["ascending"].lower().strip() == "true"
         selection = self._selection(req)
+        if self._reject_sample_ids_without_method(req, resp, selection):
+            return
         start_job_id = 0
         if "start" in req.params:
             try:
