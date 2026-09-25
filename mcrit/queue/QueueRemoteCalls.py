@@ -36,14 +36,17 @@ class BaseRemoteCallerClass:
         LOGGER.debug("called getQueueStats()")
         return self.queue.getQueueStatistics(refresh=refresh)
 
-    def getQueueData(self, start_index: int, limit: int, method=None, state=None, filter=None, ascending=False, username=None) -> List[dict]:
-        LOGGER.debug(f"called getQueueData(start_index={start_index}, limit={limit}, method={method}, state={state}, filter={filter}, ascending={ascending}, username={username}):")
+    def getQueueData(self, start_index: int, limit: int, method=None, state=None, filter=None, ascending=False, username=None, sample_ids=None, job_ids=None) -> List[dict]:
+        LOGGER.debug(
+            f"called getQueueData(start_index={start_index}, limit={limit}, method={method}, state={state}, filter={filter}, ascending={ascending}, username={username}, sample_ids={sample_ids}, job_ids={job_ids}):"
+        )
         # the filter is part of the query, so a page is a page of the matches (fkie-cad/mcritweb#57)
-        return [job._data for job in self.queue.get_jobs(start_index, limit, method=method, state=state, ascending=ascending, filter=filter, username=username)]
+        jobs = self.queue.get_jobs(start_index, limit, method=method, state=state, ascending=ascending, filter=filter, username=username, sample_ids=sample_ids, job_ids=job_ids)
+        return [job._data for job in jobs]
 
-    def getQueueCount(self, method=None, state=None, filter=None, username=None) -> int:
-        LOGGER.debug(f"called getQueueCount(method={method}, state={state}, filter={filter}, username={username}):")
-        return self.queue.get_job_count(method=method, state=state, filter=filter, username=username)
+    def getQueueCount(self, method=None, state=None, filter=None, username=None, sample_ids=None, job_ids=None) -> int:
+        LOGGER.debug(f"called getQueueCount(method={method}, state={state}, filter={filter}, username={username}, sample_ids={sample_ids}, job_ids={job_ids}):")
+        return self.queue.get_job_count(method=method, state=state, filter=filter, username=username, sample_ids=sample_ids, job_ids=job_ids)
 
     def deleteQueueData(self, method=None, created_before=None, finished_before=None):
         LOGGER.debug(f"called getQueueData(filter={method}, filter={filter}, created_before={created_before}, finished_before={finished_before}):")
