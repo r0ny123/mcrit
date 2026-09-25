@@ -50,8 +50,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - `SHINGLER_LOGBUCKETS` and `SHINGLER_LOGBUCKET_RANGE` take effect. The logbucket table was cached as
   `mcrit/cache/logbuckets.json` whatever its parameters and loaded whenever that file existed, and
   the package ships it, so every installed package hashed with the 100,000/1 default table
-  regardless of what it configured - `LogBucket(1024, 1)` answered with 100,000 entries (#202,
-  #215); a source checkout whose copy of the file had been deleted hashed with whichever table it
+  regardless of what it configured - `LogBucket(1024, 1)` answered with 100,000 entries ([#202],
+  [#215]); a source checkout whose copy of the file had been deleted hashed with whichever table it
   built next, and needs a re-index as well unless that table was built for the values it is
   configured with. The shipped file is now `logbuckets_100000_1.json`, byte for byte the same table, so **a
   deployment on the defaults hashes exactly as before and needs nothing**. One that set either
@@ -607,3 +607,5 @@ date, the version, and what changed.
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#207]: https://github.com/danielplohmann/mcrit/issues/207
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
+[#202]: https://github.com/danielplohmann/mcrit/issues/202
+[#215]: https://github.com/danielplohmann/mcrit/issues/215
