@@ -1045,7 +1045,11 @@ class MongoDbStorage(StorageInterface):
         left - so a submission of the same bytes arriving in between cannot link to it: it finds no
         file under that hash and stores a fresh one instead of losing its binary to this deletion."""
         self._getBinaryFiles().update_one({"_id": file_id}, {"$pull": {"metadata.sample_ids": sample_id}})
-        if self._getBinaryFiles().find_one_and_update({"_id": file_id, "metadata.sample_ids": []}, {"$set": {"metadata.sha256": None}}) is None:
+        # only a file still carrying its hash is retired, so of two releasers exactly one deletes it
+        retired = self._getBinaryFiles().find_one_and_update(
+            {"_id": file_id, "metadata.sample_ids": [], "metadata.sha256": {"$type": "string"}}, {"$set": {"metadata.sha256": None}}
+        )
+        if retired is None:
             return False
         # through GridFS, which takes the chunks along with the file document
         self._getBinaries().delete(file_id)

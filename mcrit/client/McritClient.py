@@ -413,6 +413,7 @@ class McritClient:
     def getSampleBinary(self, sample_id):
         """
         The raw binary the sample was submitted as, when the server keeps them (STORAGE_KEEP_SUBMITTED_BINARIES) and serves them (STORAGE_SERVE_SUBMITTED_BINARIES); None otherwise
+        None does not tell those cases apart: a server not serving binaries answers 403, which is also what a missing or invalid token gets; raw mode hands back the response to look at
         """
         response = requests.get(f"{self.mcrit_server}/samples/{sample_id}/binary", headers=self.headers)
         if self.raw:

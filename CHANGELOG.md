@@ -31,6 +31,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   shares by sha256, could later refer to the same file without a data migration. Deleting a sample
   takes it off its binary and deletes the binary once no sample is left on it; a submission of the
   same bytes racing that deletion stores a fresh copy rather than linking to the one being deleted.
+  A process dying between those steps can leave a file no sample refers to; nothing collects such
+  files yet ([#95]).
 - `StorageInterface.hasSampleBinary()` and `.openSampleBinary()`, so neither asking whether a
   binary is stored nor serving one has to read the file. `openSampleBinary()` answers with a
   stream (a GridFS `GridOut`, or a `BytesIO` from `MemoryStorage`) rather than bytes, and the
@@ -559,6 +561,7 @@ date, the version, and what changed.
 [Unreleased]: https://github.com/danielplohmann/mcrit/compare/v1.9.0...HEAD
 [1.9.0]: https://github.com/danielplohmann/mcrit/compare/v1.8.1...v1.9.0
 [#44]: https://github.com/danielplohmann/mcrit/issues/44
+[#95]: https://github.com/danielplohmann/mcrit/issues/95
 [#142]: https://github.com/danielplohmann/mcrit/issues/142
 [#147]: https://github.com/danielplohmann/mcrit/pull/147
 [#149]: https://github.com/danielplohmann/mcrit/issues/149
