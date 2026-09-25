@@ -1,9 +1,7 @@
-from typing import Any, Dict, Generic, Iterator, List, Optional, Type, TypeVar
-
-EntryT = TypeVar("EntryT")
+from typing import Any, Dict, Iterator, List, Optional, Type
 
 
-class SearchResult(Generic[EntryT]):
+class SearchResult[EntryT]:
     """What a search endpoint answers, with its entries deserialized (fkie-cad/mcritweb#64).
 
     The wire format of /search/{families,samples,functions} is a dict of dicts; the other
