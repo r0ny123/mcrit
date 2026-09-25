@@ -56,6 +56,31 @@ class SampleResource:
         db_log_msg(self.index, req, "SampleResource.on_get_by_sha256 - success.")
 
     @timing
+    def on_post_by_ids(self, req, resp):
+        if not req.content_length:
+            resp.data = jsonify(
+                {
+                    "status": "failed",
+                    "data": {"message": "POST request without body can't be processed."},
+                }
+            )
+            resp.status = falcon.HTTP_400
+            db_log_msg(self.index, req, "SampleResource.on_post_by_ids - failed - no POST body.")
+            return
+        # assume the POST body consists of comma separated sample_ids (negative ids are query samples)
+        post_body = req.stream.read()
+        if re.match(rb"^-?\d+(?:[\s]*,[\s]*-?\d+)*$", post_body):
+            target_sample_ids = [int(sample_id) for sample_id in post_body.split(b",")]
+            sample_entries = self.index.getSamplesByIds(target_sample_ids)
+            data = {sample_id: sample_entry.toDict() for sample_id, sample_entry in sample_entries.items()}
+            resp.data = jsonify({"status": "successful", "data": data})
+            resp.status = falcon.HTTP_200
+            db_log_msg(self.index, req, "SampleResource.on_post_by_ids - success.")
+            return
+        resp.status = falcon.HTTP_400
+        db_log_msg(self.index, req, "SampleResource.on_post_by_ids - failed - invalid body format.")
+
+    @timing
     def on_delete(self, req, resp, sample_id=None):
         successful = self.index.deleteSample(sample_id, force_recalculation=True, username=get_username(req))
         if successful:
@@ -77,15 +102,15 @@ class SampleResource:
             return
         # sanitize sample information
         information_update = req.media
-        if "family_name" in information_update and not re.match(r"^(?=[a-zA-Z0-9._\-]{0,64}$)(?!.*[\-_.]{2})[^\-_.].*[^\-_.]$", information_update["family_name"]):
+        if "family_name" in information_update and not re.match(r"^(?![\-_.])(?!.*[\-_.]{2})(?!.*[\-_.]\Z)[a-zA-Z0-9._\-]{0,64}\Z", information_update["family_name"]):
             resp.data = jsonify({"status": "failed", "data": {"message": "family_name may be 0-64 alphanumeric chars with single dots, dashes, underscores inbetween."}})
             db_log_msg(self.index, req, "SampleResource.on_put - failed - invalid family name.")
             return
-        if "version" in information_update and not re.match("^[ -~]{1,64}$", information_update["version"]):
+        if "version" in information_update and not re.match(r"^[ -~]{0,64}\Z", information_update["version"]):
             resp.data = jsonify({"status": "failed", "data": {"message": "version may be 0-64 printable characters."}})
             db_log_msg(self.index, req, "SampleResource.on_put - failed - invalid version name.")
             return
-        if "component" in information_update and not re.match("^[ -~]{1,64}$", information_update["component"]):
+        if "component" in information_update and not re.match(r"^[ -~]{0,64}\Z", information_update["component"]):
             resp.data = jsonify({"status": "failed", "data": {"message": "component may be 0-64 printable characters."}})
             db_log_msg(self.index, req, "SampleResource.on_put - failed - invalid component name.")
             return
@@ -210,6 +235,40 @@ class SampleResource:
             return
         resp.data = jsonify({"status": "successful", "data": data})
         db_log_msg(self.index, req, "SampleResource.on_get_function - success.")
+
+    @timing
+    def on_get_binary(self, req, resp, sample_id=None):
+        """The raw binary the sample was submitted as, when STORAGE_KEEP_SUBMITTED_BINARIES kept it
+        and STORAGE_SERVE_SUBMITTED_BINARIES allows handing it out (#95)."""
+        # checked first, and answered the same for every sample: with serving off, the route does
+        # not even tell which samples exist or have a binary kept
+        if not self.index.isServingSampleBinaries():
+            resp.data = jsonify({"status": "failed", "data": {"message": "Serving stored binaries is disabled on this instance (STORAGE_SERVE_SUBMITTED_BINARIES)."}})
+            resp.status = falcon.HTTP_403
+            db_log_msg(self.index, req, "SampleResource.on_get_binary - failed - serving binaries is disabled.")
+            return
+        if not self.index.isSampleId(sample_id):
+            resp.data = jsonify({"status": "failed", "data": {"message": "We don't have a sample with that id."}})
+            resp.status = falcon.HTTP_404
+            db_log_msg(self.index, req, f"SampleResource.on_get_binary - failed - unknown sample_id {sample_id}.")
+            return
+        binary = self.index.openSampleBinary(sample_id)
+        if binary is None:
+            resp.data = jsonify({"status": "failed", "data": {"message": "No binary is stored for that sample."}})
+            resp.status = falcon.HTTP_404
+            db_log_msg(self.index, req, f"SampleResource.on_get_binary - failed - no binary for sample_id {sample_id}.")
+            return
+        resp.content_type = "application/octet-stream"
+        # streamed rather than read into resp.data: peak allocation while serving is then
+        # bounded by the driver's cursor batch instead of the sample size - measured flat at
+        # ~34 MiB for 32, 128 and 256 MiB samples, where getSampleBinary() costs twice the
+        # file (64, 256 and 512 MiB, since GridOut.read() joins the chunks it has collected).
+        # falcon closes the stream once the response is done.
+        resp.stream = binary
+        length = getattr(binary, "length", None)
+        if isinstance(length, int):
+            resp.content_length = length
+        db_log_msg(self.index, req, "SampleResource.on_get_binary - success.")
 
     @timing
     def on_get_functions(self, req, resp, sample_id=None):

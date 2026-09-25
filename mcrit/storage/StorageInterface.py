@@ -1,7 +1,7 @@
 import datetime
 import logging
 import random
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Set, Tuple, Union
 
 from packaging import version
 
@@ -34,6 +34,17 @@ BandId = int
 BandHash = int
 PicHash = int
 Sha256 = str
+
+
+class BinaryStream(Protocol):
+    """What openSampleBinary hands back: enough of a file to stream it out and close it.
+
+    Not typing.IO - a GridFS GridOut is not one, and widening the annotation to Any to make it
+    fit would hide the only two methods the callers actually use."""
+
+    def read(self, size: int = -1, /) -> bytes: ...
+
+    def close(self) -> None: ...
 
 
 class StorageInterface:
@@ -231,6 +242,19 @@ class StorageInterface:
 
         Returns:
             True if sample_id was contained in the storage and updated successfully, False otherwise
+        """
+        raise NotImplementedError
+
+    def modifyFunction(self, function_id: int, update_information: dict, username: Optional[str] = None) -> bool:
+        """Update a function in the storage (fkie-cad/mcritweb#72)
+
+        Args:
+            function_id: the id of the function to modify; query functions (negative ids) cannot be modified
+            update_information: a dictionary with update information for fields (function_name)
+            username: who submits the change; a new function_name is also recorded as a FunctionLabelEntry by this user
+
+        Returns:
+            True if function_id was contained in the storage and updated successfully, False otherwise
         """
         raise NotImplementedError
 
@@ -502,6 +526,36 @@ class StorageInterface:
         """
         raise NotImplementedError
 
+    def storeSampleBinary(self, sample_id: int, binary: bytes) -> bool:
+        """Keep the raw binary a sample was submitted as; replaces an earlier one (#95).
+
+        Binaries are stored once per content (sha256), listing the samples they belong to, so
+        storing bytes that are already kept only adds the sample to them."""
+        raise NotImplementedError
+
+    def getSampleBinary(self, sample_id: int) -> Optional[bytes]:
+        """The raw binary kept for the sample, or None when none was kept (#95).
+
+        Reads the whole binary into memory. Prefer hasSampleBinary() to ask whether one is
+        there and openSampleBinary() to serve it."""
+        raise NotImplementedError
+
+    def hasSampleBinary(self, sample_id: int) -> bool:
+        """Whether a raw binary is kept for the sample, without reading it (#95)."""
+        raise NotImplementedError
+
+    def openSampleBinary(self, sample_id: int) -> Optional[BinaryStream]:
+        """The raw binary kept for the sample as a readable stream, or None when none was kept.
+
+        The caller closes it. Serving a sample through this instead of getSampleBinary() keeps
+        the file out of the server's memory (#95)."""
+        raise NotImplementedError
+
+    def deleteSampleBinary(self, sample_id: int) -> bool:
+        """Take the sample off the raw binary kept for it, deleting the binary once no sample is
+        left on it; True when the sample had one (#95)."""
+        raise NotImplementedError
+
     def recomputeFamilyStats(self, progress_reporter=None) -> Dict[str, Any]:
         """Set every family's sample/function counters from the samples and functions that exist,
         and report how many families were corrected (#151)."""
@@ -547,6 +601,18 @@ class StorageInterface:
         Returns:
             the name of the family or None
 
+        """
+        raise NotImplementedError
+
+    def getFamilyEntriesByIds(self, family_ids: List[int]) -> Dict[int, "FamilyEntry"]:
+        """Batch form of getFamily: one lookup for many ids.
+
+        Args:
+            family_ids: family ids to resolve
+
+        Returns:
+            family_id -> FamilyEntry for every id that exists; missing ids are absent.
+            Entries carry no sample lists, same as getFamily.
         """
         raise NotImplementedError
 
@@ -739,6 +805,39 @@ class StorageInterface:
         Returns:
             the number of distinct block hashes indexed
         """
+        raise NotImplementedError
+
+    def rebuildFunctionRangeIndex(self, progress_reporter=None) -> int:
+        """Rebuild the index mapping function ids back to the sample that holds them.
+
+        Required before two-stage matching (MINHASH_MATCHING_SHORTLIST_SIZE) can run: the
+        shortlist has to turn candidate function ids into samples without reading one function
+        per candidate.
+        Args:
+            progress_reporter: optional callable invoked with progress updates
+        Returns:
+            the number of samples covered
+        """
+        raise NotImplementedError
+
+    def isFunctionRangeIndexComplete(self) -> bool:
+        """Whether the function range index may be trusted; readers fall back when it is not."""
+        raise NotImplementedError
+
+    def rebuildBandDfIndex(self, progress_reporter=None) -> int:
+        """Set the posting-list length on every band document and index it.
+
+        Makes STORAGE_BAND_DF_CUTOFF skip an over-long posting list from the index entry rather
+        than reading the document to measure it.
+        Args:
+            progress_reporter: optional callable invoked with progress updates
+        Returns:
+            the number of band documents updated
+        """
+        raise NotImplementedError
+
+    def isBandDfIndexComplete(self) -> bool:
+        """Whether band documents carry a trustworthy df; the cutoff falls back when they do not."""
         raise NotImplementedError
 
     def rebuildMinhashBandIndex(self, progress_reporter=None) -> int:
