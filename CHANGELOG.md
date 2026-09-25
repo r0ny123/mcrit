@@ -44,6 +44,97 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   samples of old SMDA versions, so their unique blocks compare correctly only with samples indexed
   before; submitting such samples again gives them the new hashes.
 
+## [1.11.0] - 2026-09-25
+
+### Added
+
+- **Band posting lists can be split across documents**, behind `STORAGE_BAND_BUCKET_SIZE`, which
+  defaults to `0` (off) and keeps the single-document shape byte for byte.
+
+  A posting list is a `function_ids` array inside one document and MongoDB caps a document at
+  16 MB. Measured directly by pushing ids into one document until the write is refused: it holds
+  about **1.35 million ids** while they fit in 32 bits (12.2 bytes each) and about **1.05
+  million** once they need BSON int64 (15.9 bytes each), after which `$push` raises `BSONObj
+  size ... is invalid`. On a 7,244-sample real corpus the longest posting list across all 20
+  bands held **36,183 ids** (in `band_14`), so extrapolating it linearly puts the wall near
+  **270,000 samples**. The write **fails** rather than slowing down, so indexing stops for any sample holding a function
+  whose band hash is already at the cap. **Sharding does not move this**: a document cannot span
+  shards.
+
+  Bucket 0 carries the bookkeeping for the whole hash - `df` as the total across every bucket,
+  plus `tail`/`tail_n` for placement - and higher buckets carry only postings. That is what keeps
+  the cutoff filter and its `(band_hash, df)` index unchanged: a hash under the cutoff is far
+  below one bucket's worth so it never spills, and a hash that spilled has a `df` that rejects it.
+  Buckets fill in order rather than by hashing the function id, so a short posting list stays in
+  one document instead of being scattered across many.
+
+  **Migration**: enabling the knob on an existing database requires running
+  `rebuild_band_df_index` before the next write. Documents written earlier have no `bucket` field,
+  so the upsert filter `{band_hash, bucket: 0}` would not match them and would insert a *second*
+  document for the hash, splitting the posting list invisibly. The rebuild stamps `bucket: 0` and
+  is what makes them addressable. Matching results are unchanged either way - the tests assert
+  identical matches with bucketing on and off, against a corpus where the split is forced.
+
+  Deleting a sample reaches every bucket of a hash, and keeps bucket 0 (the only holder of
+  `df`/`tail`/`tail_n`) for as long as any other bucket of that hash still holds postings.
+  `STORAGE_BAND_DF_CUTOFF` above `STORAGE_BAND_BUCKET_SIZE` is refused at startup, since only
+  bucket 0 carries `df` and such a cutoff would serve a spilled hash as bucket 0 alone.
+
+- **`STORAGE_REBUILD_PARTITION_SIZE`**, defaulting to `0` (off), which rebuilds the PicHash count
+  index from a partitioned scan of the `_pichash` index instead of one server-side `$group`
+  followed by an upsert per distinct hash. `500000` is the measured recommendation. The rebuild
+  is offline and never touches query latency, but it was the last operation whose cost followed
+  corpus size rather than request size.
+  - The old rebuild held two structures shaped like the corpus: a `$group` accumulator with one
+    entry per *distinct* hash, which crosses MongoDB's 100 MB limit and spills (4 spills, 36.7 MB
+    at 7,244 samples), and an upsert per hash arriving in group order rather than key order, so
+    each landed at a random position in a growing index. A covered index scan already arrives
+    sorted, which the old code discarded; counting runs of equal keys makes the intermediate
+    state two local variables, and makes the writes ascending inserts.
+  - Measured on corpora projected from a 7,244-sample real corpus, three repeats, medians:
+    **51.9 s -> 10.8 s** at 1,000 samples and **301.6 s -> 73.1 s** at 7,244 (4.81x to 4.12x).
+    At the largest size the old rebuild spends 32.6 s reading and 269.0 s writing - 8,690
+    upserts/s against 38,765 inserts/s.
+  - **Result-preserving**, and verified rather than assumed: the rebuild checks the holders it
+    counted against an independent count of the functions carrying a pichash and falls back to
+    the old implementation if they disagree. This matters because keyset paging brackets by BSON
+    type, so a pichash that was not a string would silently truncate the index - and a missing
+    count document is *excluded* by the cutoff filter, i.e. exact matches would quietly stop
+    being found. The tests compare the full `_pichash -> df` map from both implementations.
+  - **Caveat on the scaling claim**: the measured corpora are reduced to the one field the
+    rebuild reads, so they stay inside the WiredTiger cache and both implementations measured
+    *linear* there - the superlinear exponent (k ~ +2.2) seen earlier on full-fidelity corpora
+    did not reproduce. What is demonstrated is a 4.1x constant factor and a memory shape
+    independent of the corpus, not a repaired exponent. `rebuildPicBlockHashIndex` and the band
+    bookkeeping rebuild share the `$group` shape and are unchanged and unmeasured.
+
+- `docs/scaling/` - the architecture before and after, the comparison of indexing approaches
+  considered and why most of the field is eliminated before latency is even discussed (MCRIT
+  compares MinHash signatures field-for-field and estimates Jaccard; a cosine/L2 ANN index
+  answers a different question), the full research log, and the measured results.
+- `benchmarks/` - the harness behind every number above: Malpedia fetch, SMDA report cache,
+  per-stage 1-vs-N timing, corpus-structure analysis, Heaps' law fit, synthetic corpus growth
+  fitted to a real corpus, quality comparison, and a scaling sweep.
+
+### Changed
+
+- The **matching-cache fetch decodes one MinHash per distinct signature**, not one per candidate
+  function, and every function carrying a signature shares that one decoded object. Exact, not
+  approximate: the decode is a pure function of the stored hex string. Candidate sets repeat
+  signatures far more than the corpus does, because they are assembled by band collision -
+  measured **3.99x to 29.59x** on the candidate sets of three query samples against a 7,244-sample
+  real corpus, where the corpus-wide figure is 2.46x. The fetch logs its own factor. In isolation
+  this is 7%-50% off the fetch and 0%-24% off its allocation, growing with the candidate set;
+  **end to end it is not measurable** at this corpus size (fetch stage 10.193 s -> 10.487 s with
+  the two-stage knobs off, 0.269 s -> 0.270 s with them on, summed over three queries, three
+  repeats - a run-to-run spread several times larger than the effect), because the stage is
+  dominated by per-function cache-object construction that this does not touch. It is worth having
+  as a reduction in work proportional to the candidate set, which is what grows with the corpus,
+  and not as a speed-up anybody will notice today. The fetch still *reads* one document per
+  candidate function: each carries per-function attribution (`sample_id`), and reading fewer would
+  need a signature-keyed index, i.e. a schema change. Match reports are unchanged, asserted by a
+  test that replays a query with the deduplication defeated and compares the whole report.
+
 ## [1.10.0] - 2026-09-25
 
 ### Added
@@ -116,14 +207,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   Filtering the cutoff on `$size` instead was measured to save nothing worth having - mongod
   reads the document to measure it - at 12,500 samples, 1.172 s at cutoff 1000 against 0.374 s
   once df is indexed at cutoff 200.
-- `docs/scaling/` - the architecture before and after, the comparison of indexing approaches
-  considered and why most of the field is eliminated before latency is even discussed (MCRIT
-  compares MinHash signatures field-for-field and estimates Jaccard; a cosine/L2 ANN index
-  answers a different question), the full research log, and the measured results.
-- `benchmarks/` - the harness behind every number above: Malpedia fetch, SMDA report cache,
-  per-stage 1-vs-N timing, corpus-structure analysis, Heaps' law fit, synthetic corpus growth
-  fitted to a real corpus, quality comparison, and a scaling sweep.
-
 ### Fixed
 
 - **`McritClient`'s error modes reach the three maintenance jobs.** `rebuildPicBlockHashIndex`,
