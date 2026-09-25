@@ -1689,7 +1689,10 @@ class MongoDbStorage(StorageInterface):
         # full (one bucket's worth, far above any sane cutoff), so testing it alone is correct,
         # and a hash that never spilled has all of its postings there anyway.
         return [
-            {"$match": {"band_hash": {"$in": band_hashes}, "bucket": {"$in": [0, None]}}},
+            # a hash that has spilled (its bucket 0 names a tail above 0) holds more than bucket 0,
+            # which is full or, after pulls, not the whole list: never served from bucket 0 alone,
+            # even when the cutoff equals the bucket size and that one document would pass $size
+            {"$match": {"band_hash": {"$in": band_hashes}, "bucket": {"$in": [0, None]}, "tail": {"$not": {"$gt": 0}}}},
             {"$match": {"$expr": {"$lte": [{"$size": {"$ifNull": ["$function_ids", []]}}, cutoff]}}},
         ]
 

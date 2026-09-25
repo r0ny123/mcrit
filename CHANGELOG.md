@@ -42,6 +42,11 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   it was asked about: the shortlist is ranked over the whole corpus, and a named sample outside its
   top entries was not matched. Those matches are restricted to the samples they name already and no
   longer take a shortlist.
+- With band bucketing on and the df index not yet trusted (before `rebuild_band_df_index` has run),
+  a band hash that had spilled into further buckets was served as bucket 0 alone when the cutoff
+  equalled `STORAGE_BAND_BUCKET_SIZE`: the fallback measures bucket 0's list, and a full bucket 0
+  is exactly that long. Such a hash is no longer served by the fallback; after pulls have shrunk
+  one below the cutoff it is left out rather than served truncated, until the df index is rebuilt.
 
 ## [1.11.0] - 2026-09-25
 
