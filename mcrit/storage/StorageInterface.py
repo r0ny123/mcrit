@@ -351,13 +351,13 @@ class StorageInterface:
         if sample_entry is None:
             return None
         xcfg = {}
-        for function_entry in self.getFunctionsBySampleId(sample_id, with_xcfg=True) or []:
+        for function_entry in self.getFunctionsBySampleId(sample_id) or []:
             if function_entry.xcfg:
                 xcfg[function_entry.offset] = function_entry.xcfg
         return SmdaReport.fromDict(sample_entry.toSmdaReportDict(xcfg))
 
-    def getFunctionsBySampleId(self, sample_id: int, with_xcfg: bool = False) -> Optional[List["FunctionEntry"]]:
-        """For a given sample_id, get all corresponding FunctionEntries, with their disassembly when with_xcfg is set.
+    def getFunctionsBySampleId(self, sample_id: int) -> Optional[List["FunctionEntry"]]:
+        """For a given sample_id, get all corresponding FunctionEntries.
 
         Args:
             sample_id: a sample_id
