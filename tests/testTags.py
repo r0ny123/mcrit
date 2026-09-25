@@ -577,8 +577,12 @@ class TagClient(unittest.TestCase):
             self.assertEqual({"c": 3}, client.getTags("function"))
         self.assertEqual("http://mcrit.test/tags", get.call_args.args[0])
         self.assertEqual({"entity": "function"}, get.call_args.kwargs["params"])
-        with self.assertRaises(ValueError):
-            client.addTags("report", 1, ["x"])
+        # every method refuses an entity that carries no tags, without a request
+        with patch("mcrit.client.McritClient.requests") as requests:
+            for call in (lambda: client.addTags("report", 1, ["x"]), lambda: client.removeTags("families", 1, ["x"]), lambda: client.getTags("report")):
+                with self.assertRaises(ValueError):
+                    call()
+        self.assertEqual([], requests.method_calls)
 
     def test_error_modes(self):
         # default: a failure answers None
@@ -593,7 +597,7 @@ class TagClient(unittest.TestCase):
                 raising.removeTags("sample", 4, ["$a"])
         with patch("mcrit.client.McritClient.requests.get", return_value=self._answer(None, 400)):
             with self.assertRaises(McritBadRequest):
-                raising.getTags("report")
+                raising.getTags("sample")
         raw = McritClient("http://mcrit.test", raw_responses=True)
         answer = self._answer({"tags": {}})
         with patch("mcrit.client.McritClient.requests.get", return_value=answer):

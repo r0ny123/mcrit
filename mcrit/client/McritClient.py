@@ -9,6 +9,7 @@ import requests
 from smda.common.SmdaReport import SmdaReport
 from smda.Disassembler import Disassembler
 
+from mcrit.libs.tags import checkTagEntity
 from mcrit.queue.LocalQueue import Job
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
@@ -524,8 +525,7 @@ class McritClient:
 
     def _tagsRequest(self, entity: str, entity_id: int, tags: Union[str, Iterable[str]]) -> Tuple[str, Dict[str, List[str]]]:
         """The URL and JSON body of a tag change; a single string is one tag, not its characters."""
-        if entity not in self._TAG_ROUTES:
-            raise ValueError(f"entity must be one of {', '.join(self._TAG_ROUTES)}, not {entity!r}.")
+        checkTagEntity(entity)
         tags = [tags] if isinstance(tags, str) else list(tags)
         return f"{self.mcrit_server}/{self._TAG_ROUTES[entity]}/{int(entity_id)}/tags", {"tags": tags}
 
@@ -559,6 +559,7 @@ class McritClient:
         """
         The distinct tags on families, samples or functions (<entity>), each with the number of entities carrying it (#53)
         """
+        checkTagEntity(entity)
         response = requests.get(f"{self.mcrit_server}/tags", params={"entity": entity}, headers=self.headers)
         if self.raw:
             return response

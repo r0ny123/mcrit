@@ -34,7 +34,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   replace-all, so two analysts tagging the same entity at once cannot erase each other's tags,
   and no per-tag author. `GET /tags?entity=family|sample|function` answers the distinct tags with
   how many entities carry each. `McritClient.addTags(entity, entity_id, tags)`,
-  `removeTags(...)` and `getTags(entity)` wrap them.
+  `removeTags(...)` and `getTags(entity)` wrap them, and refuse an unknown entity before sending.
   - A tag is stripped and lower-cased, then has to be 1-64 letters, digits, spaces, dots, colons,
     underscores or dashes starting with a letter or digit - so `$where` or an empty tag is
     refused rather than stored.
