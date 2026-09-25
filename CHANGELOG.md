@@ -17,6 +17,42 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
+- Pushing a `vX.Y.Z` tag now publishes the release. The workflow refuses to continue unless the tag
+  matches `pyproject.toml` and `McritConfig.VERSION`, `CHANGELOG.md` has a section for it, the commit
+  is on `main` and CI passed there; it then builds the sdist and wheel in an isolated environment,
+  installs the wheel into a clean environment to import it and run `mcrit --help`, uploads to PyPI
+  through trusted publishing with signed provenance, and creates the GitHub release from that
+  version's changelog section with the generated contributor list appended. Pre-release tags
+  (`v1.10.0rc1`) are marked as such, and a manual run rehearses the same path against TestPyPI.
+  Before, publishing was `make publish` with an API token, GitHub releases stopped at v1.3.0, and
+  nothing checked that the three version strings agreed. See `RELEASING.md`; the trusted publisher
+  and the `pypi` and `testpypi` environments are configured once by a maintainer.
+- A pull request that changes `mcrit/` or `pyproject.toml` has to add a `CHANGELOG.md` entry or
+  carry the `no-changelog` label; CI checks it.
+
+### Changed
+
+- Pairwise scoring now compares each **distinct** MinHash signature once rather than once per
+  function holding it. This is exact, not approximate: a score depends only on the two
+  signatures, so functions sharing one score identically against any query. Worth 2.46x on 257
+  real Malpedia samples (185,387 hashed functions over 75,323 distinct signatures) and a
+  projected ~24x at a million samples from the fitted Heaps' law V(n) = 1412.8 * n^0.7247. Peak
+  matcher memory falls with the matrix by the same factor. Verified against the existing
+  golden-result suites, which pass unchanged.
+
+- `getSampleFunctionCounts` takes the sample ids to answer for. The shortlist ranking needs a
+  function count per *candidate*, and asked for every sample in the corpus - once per matching
+  job. At a few thousand samples that map is free, which is why four benchmark points across
+  3.59x of corpus growth show no trace of it; at 10^9 samples it is a 10^9-entry dict per query.
+  It is now an indexed lookup of the samples that received a vote (a few thousand at most).
+  Callers passing nothing still get the whole-corpus map, so no consumer breaks. **Ranking
+  behaviour is unchanged.**
+
+### Removed
+
+- **Python 3.11 is no longer supported**; `requires-python` is `>=3.12`. Nothing in MCRIT needed
+  3.12 - the MCRIT ecosystem now shares a 3.12 floor so one interpreter serves every component. The
+  reference `docker-mcrit` deployment already runs 3.12.
 - **Two-stage 1-vs-N matching**, behind two knobs that both default to `0` (off), so an upgraded
   instance is bit-identical until it opts in. Every stage of a 1-vs-N query grew with corpus
   size, and so did the answer - a query whose result names 5,930 matched samples is not an
@@ -57,25 +93,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   per-stage 1-vs-N timing, corpus-structure analysis, Heaps' law fit, synthetic corpus growth
   fitted to a real corpus, quality comparison, and a scaling sweep.
 
-### Changed
-
-
-- Pairwise scoring now compares each **distinct** MinHash signature once rather than once per
-  function holding it. This is exact, not approximate: a score depends only on the two
-  signatures, so functions sharing one score identically against any query. Worth 2.46x on 257
-  real Malpedia samples (185,387 hashed functions over 75,323 distinct signatures) and a
-  projected ~24x at a million samples from the fitted Heaps' law V(n) = 1412.8 * n^0.7247. Peak
-  matcher memory falls with the matrix by the same factor. Verified against the existing
-  golden-result suites, which pass unchanged.
-
-- `getSampleFunctionCounts` takes the sample ids to answer for. The shortlist ranking needs a
-  function count per *candidate*, and asked for every sample in the corpus - once per matching
-  job. At a few thousand samples that map is free, which is why four benchmark points across
-  3.59x of corpus growth show no trace of it; at 10^9 samples it is a 10^9-entry dict per query.
-  It is now an indexed lookup of the samples that received a vote (a few thousand at most).
-  Callers passing nothing still get the whole-corpus map, so no consumer breaks. **Ranking
-  behaviour is unchanged.**
-
 ### Fixed
 
 - **`LogBucket` raised `KeyError` for any value past its precomputed table**, which aborts the
@@ -98,7 +115,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   runs - it assigned each run's size in turn, keeping only the last. Such samples were
   undercounted, distorting their coverage ranking in the shortlist. Both the whole-corpus and the
   per-sample paths now sum.
-
 
 ## [1.9.0] - 2026-09-08
 
