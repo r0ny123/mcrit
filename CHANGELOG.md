@@ -17,21 +17,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
-- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
-  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
-  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
-  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
-  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
-  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
-  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
-  selector that keeps no parseable id selects nothing, never everything ([#210]).
-- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
-  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
-  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
-  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
-  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
-  Family entries carry no sample lists ([#207]).
-
 - **Families carry `actors`, the names they are attributed to**, set through
   `PUT /families/{id}` and `McritClient.modifyFamily(family_id, actors=[...])` (an empty list
   clears them), kept through a rename, and carried by exports as `family_actors`, which imports
@@ -97,6 +82,34 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Fixed
 
+- **The in-memory search compares a list field element-wise, as MongoDB does.** `actors:APT28`
+  compared the whole `actors` list with the string, so it and `actors:?apt` found nothing on
+  `MemoryStorage` while MongoDB found every family with that actor, and `actors:!=APT28` found
+  every family rather than those without it. A condition now holds when some element satisfies
+  it, and a negated one when none does, for every list field; a test on `actors` runs against
+  both backends ([#53]).
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
+- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
+  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
+  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
+  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
+  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
+  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
+  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
+  selector that keeps no parseable id selects nothing, never everything ([#210]).
+- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
+  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
+  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
+  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
+  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
+  Family entries carry no sample lists ([#207]).
+
+### Fixed
+
 - **`McritClient` waited forever on a server that did not answer.** None of its requests passed
   a timeout, and requests has none by default, so a server that was down behind a firewall, or up
   but hung, blocked the caller for good: against a socket that accepts and never replies, a
@@ -109,13 +122,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
   `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
   client's source and fails for any request added without a timeout.
-
-- **The in-memory search compares a list field element-wise, as MongoDB does.** `actors:APT28`
-  compared the whole `actors` list with the string, so it and `actors:?apt` found nothing on
-  `MemoryStorage` while MongoDB found every family with that actor, and `actors:!=APT28` found
-  every family rather than those without it. A condition now holds when some element satisfies
-  it, and a negated one when none does, for every list field; a test on `actors` runs against
-  both backends ([#53]).
 
 ## [1.11.0] - 2026-09-25
 
@@ -654,5 +660,5 @@ date, the version, and what changed.
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#207]: https://github.com/danielplohmann/mcrit/issues/207
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
-[#53]: https://github.com/danielplohmann/mcrit/issues/53
 [#57]: https://github.com/danielplohmann/mcrit/issues/57
+[#53]: https://github.com/danielplohmann/mcrit/issues/53
