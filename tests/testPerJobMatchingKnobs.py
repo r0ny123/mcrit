@@ -18,6 +18,7 @@ from mcrit.matchers.MatcherVs import MatcherVs
 from mcrit.matchers.MatcherVsGroup import MatcherVsGroup
 from mcrit.server.MatchResource import MatchResource
 from mcrit.server.utils import getMatchingParams
+from mcrit.storage.MongoDbStorage import MongoDbStorage
 from mcrit.Worker import Worker
 
 from .context import config
@@ -250,6 +251,26 @@ class VsShortlistTest(unittest.TestCase):
 class ParameterRangeTest(unittest.TestCase):
     def test_values_mongodb_cannot_store_are_ignored(self):
         self.assertEqual({"shortlist_size": 2**63 - 1}, getMatchingParams({"shortlist_size": str(2**63 - 1), "band_df_cutoff": str(2**63)}))
+
+
+class BucketSizeTest(unittest.TestCase):
+    """Under band bucketing only bucket 0 carries df, so a cutoff above the bucket size cannot be applied."""
+
+    def _config(self):
+        mcrit_config = configured(band_df_cutoff=50)
+        mcrit_config.STORAGE_CONFIG = StorageConfig(STORAGE_METHOD="mongodb", STORAGE_BAND_DF_CUTOFF=50, STORAGE_BAND_BUCKET_SIZE=100)
+        return mcrit_config
+
+    def test_the_storage_refuses_a_job_cutoff_above_the_bucket_size(self):
+        storage = MongoDbStorage(self._config())
+        self.assertEqual(50, storage._bandDfCutoff(None))
+        self.assertEqual(100, storage._bandDfCutoff(100))
+        with self.assertRaisesRegex(ValueError, "STORAGE_BAND_BUCKET_SIZE"):
+            storage._bandDfCutoff(101)
+
+    def test_the_server_ignores_it_like_an_unusable_value(self):
+        self.assertEqual({"shortlist_size": 0, "band_df_cutoff": 50}, getMatchingParams({"band_df_cutoff": "101"}, self._config()))
+        self.assertEqual({"shortlist_size": 0, "band_df_cutoff": 100}, getMatchingParams({"band_df_cutoff": "100"}, self._config()))
 
 
 if __name__ == "__main__":

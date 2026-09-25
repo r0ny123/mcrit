@@ -1652,8 +1652,17 @@ class MongoDbStorage(StorageInterface):
         return target_band_hashes_per_band, band_hash_to_function_ids
 
     def _bandDfCutoff(self, band_df_cutoff: Optional[int]) -> int:
-        """The df cutoff a lookup applies: the one its job asked for, else STORAGE_BAND_DF_CUTOFF (#217)."""
-        return getattr(self._storage_config, "STORAGE_BAND_DF_CUTOFF", 0) if band_df_cutoff is None else band_df_cutoff
+        """The df cutoff a lookup applies: the one its job asked for, else STORAGE_BAND_DF_CUTOFF (#217).
+
+        A job's cutoff is held to what __init__ holds the configured one to: only bucket 0 carries
+        df, so a cutoff above the bucket size would serve a spilled hash as bucket 0 alone.
+        """
+        if band_df_cutoff is None:
+            return getattr(self._storage_config, "STORAGE_BAND_DF_CUTOFF", 0)
+        bucket_size = self._bandBucketSize()
+        if bucket_size and band_df_cutoff > bucket_size:
+            raise ValueError(f"band_df_cutoff ({band_df_cutoff}) must not exceed STORAGE_BAND_BUCKET_SIZE ({bucket_size}).")
+        return band_df_cutoff
 
     def _bandLookupPipeline(self, band_hashes: List[int], band_df_cutoff: Optional[int] = None) -> List[Dict[str, Any]]:
         """Aggregation returning the wanted band documents, dropping over-long posting lists.

@@ -109,12 +109,13 @@ a request that names neither. Both change which matches a report holds - hunting
 wants the shortlist off, identifying a sample wants it on - so each job records the values it was
 run with, and a result is only reused for a request with the same values. Upgrading to a version
 with this (#217) therefore computes each matching request once more, since earlier results were
-stored without them. Matching one sample against another, or within a group
-(`sample_group_only`), takes no shortlist: it is restricted to the samples it names already. A
-requested shortlist is not applied while the function range index is incomplete - the job matches
-against the whole corpus and logs a warning, as with the configured value - so the result kept for
-that request is the complete one. `MINHASH_PICHASH_MAX_MATCHES` changes reported matches as well
-but remains a deployment setting.
+stored without them. Matching one sample against another, or within a group (`sample_group_only`),
+takes no shortlist: it is restricted to the samples it names already. With band bucketing on, a
+request's `band_df_cutoff` above `STORAGE_BAND_BUCKET_SIZE` is ignored, for the reason such a
+configured cutoff is refused at startup. A requested shortlist is not applied while the function
+range index is incomplete - the job matches against the whole corpus and logs a warning, as with the
+configured value - so the result kept for that request is the complete one.
+`MINHASH_PICHASH_MAX_MATCHES` changes reported matches as well but remains a deployment setting.
 
 ### Suggested starting point
 

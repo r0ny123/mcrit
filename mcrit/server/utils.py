@@ -54,6 +54,10 @@ def getMatchingParams(req_params, config=None):
                 number = int(value)
                 if number >= 2**63:
                     raise ValueError(f"{key} out of range")
+                bucket_size = getattr(getattr(config, "STORAGE_CONFIG", None), "STORAGE_BAND_BUCKET_SIZE", 0) or 0
+                if key == "band_df_cutoff" and bucket_size and number > bucket_size:
+                    # the storage refuses it, as it refuses such a configured cutoff at startup
+                    raise ValueError(f"{key} above STORAGE_BAND_BUCKET_SIZE ({bucket_size})")
                 parameters[key] = max(0, number)
         except (AttributeError, TypeError, ValueError):
             LOGGER.warning(f"Failed to handle request parameter: {key}: {value}")

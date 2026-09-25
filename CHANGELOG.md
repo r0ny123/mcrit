@@ -18,14 +18,15 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 ### Added
 
 - `shortlist_size` and `band_df_cutoff` can be set per matching request, overriding
-  `MINHASH_MATCHING_SHORTLIST_SIZE` and `STORAGE_BAND_DF_CUTOFF` for that job alone (#217): as
-  query parameters of the `/matches/sample/...` and `/query/...` endpoints, and as keyword
-  arguments of `McritClient.requestMatchesForSample`, `requestMatchesCross`,
-  `getMatchesForSmdaFunction` and the three `requestMatchesFor...` query methods. Both change which
-  matches are reported, so they are a choice per request rather than per deployment. A value below
-  0 counts as 0 (off), like the configuration knobs; one MongoDB cannot store (2^63 or more) is
-  ignored like any unreadable value. Matching one sample against another, or within a group
-  (`sample_group_only`), takes only `band_df_cutoff`.
+  `MINHASH_MATCHING_SHORTLIST_SIZE` and `STORAGE_BAND_DF_CUTOFF` for that job alone (#217): as query
+  parameters of the `/matches/sample/...` and `/query/...` endpoints, and as keyword arguments of
+  `McritClient.requestMatchesForSample`, `requestMatchesCross`, `getMatchesForSmdaFunction` and the
+  three `requestMatchesFor...` query methods. Both change which matches are reported, so they are a
+  choice per request rather than per deployment. A value below 0 counts as 0 (off), like the
+  configuration knobs; one MongoDB cannot store (2^63 or more) is ignored like any unreadable value.
+  Matching one sample against another, or within a group (`sample_group_only`), takes only
+  `band_df_cutoff`. With band bucketing on, a `band_df_cutoff` above `STORAGE_BAND_BUCKET_SIZE` is
+  ignored by the server and refused by the storage, as such a configured cutoff is at startup.
 
 ### Fixed
 
