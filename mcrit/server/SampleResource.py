@@ -56,6 +56,31 @@ class SampleResource:
         db_log_msg(self.index, req, "SampleResource.on_get_by_sha256 - success.")
 
     @timing
+    def on_post_by_ids(self, req, resp):
+        if not req.content_length:
+            resp.data = jsonify(
+                {
+                    "status": "failed",
+                    "data": {"message": "POST request without body can't be processed."},
+                }
+            )
+            resp.status = falcon.HTTP_400
+            db_log_msg(self.index, req, "SampleResource.on_post_by_ids - failed - no POST body.")
+            return
+        # assume the POST body consists of comma separated sample_ids (negative ids are query samples)
+        post_body = req.stream.read()
+        if re.match(rb"^-?\d+(?:[\s]*,[\s]*-?\d+)*$", post_body):
+            target_sample_ids = [int(sample_id) for sample_id in post_body.split(b",")]
+            sample_entries = self.index.getSamplesByIds(target_sample_ids)
+            data = {sample_id: sample_entry.toDict() for sample_id, sample_entry in sample_entries.items()}
+            resp.data = jsonify({"status": "successful", "data": data})
+            resp.status = falcon.HTTP_200
+            db_log_msg(self.index, req, "SampleResource.on_post_by_ids - success.")
+            return
+        resp.status = falcon.HTTP_400
+        db_log_msg(self.index, req, "SampleResource.on_post_by_ids - failed - invalid body format.")
+
+    @timing
     def on_delete(self, req, resp, sample_id=None):
         successful = self.index.deleteSample(sample_id, force_recalculation=True, username=get_username(req))
         if successful:

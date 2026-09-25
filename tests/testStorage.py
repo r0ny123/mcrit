@@ -726,6 +726,49 @@ class MemoryStorageTest(TestCase):
                 function_entries = self.storage.getFunctionsBySampleId(sample_entry.sample_id)
                 self.assertTrue(function_entries)
 
+    def testGetSampleEntriesByIds(self):
+        # #111's batch read: one $in per collection instead of one find_one per sample_id
+        self.storage.clearStorage()
+        report_a, report_b = self._twoReports()
+        sample_a = self.storage.addSmdaReport(report_a)
+        sample_b = self.storage.addSmdaReport(report_b)
+        assert sample_a is not None and sample_b is not None
+        query_sample = self.storage.addSmdaReport(report_a, isQuery=True)
+        assert query_sample is not None
+        self.assertLess(query_sample.sample_id, 0)
+        unknown_id = max(sample_a.sample_id, sample_b.sample_id) + 1000
+        requested_ids = [sample_a.sample_id, sample_b.sample_id, query_sample.sample_id, unknown_id, sample_a.sample_id]
+        entries = self.storage.getSampleEntriesByIds(requested_ids)
+        # the unknown id is left out, the duplicate is answered once
+        self.assertEqual({sample_a.sample_id, sample_b.sample_id, query_sample.sample_id}, set(entries.keys()))
+        self.assertEqual(sample_a.toDict(), entries[sample_a.sample_id].toDict())
+        self.assertEqual(sample_b.toDict(), entries[sample_b.sample_id].toDict())
+        self.assertEqual(query_sample.toDict(), entries[query_sample.sample_id].toDict())
+        self.assertEqual({}, self.storage.getSampleEntriesByIds([]))
+        self.assertEqual({}, self.storage.getSampleEntriesByIds([unknown_id]))
+
+    def testGetFamilyEntriesByIds(self):
+        self.storage.clearStorage()
+        id_a = self.storage.addFamily("family_a")
+        id_b = self.storage.addFamily("family_b")
+        unknown_id = max(id_a, id_b) + 1000
+        entries = self.storage.getFamilyEntriesByIds([id_a, id_b, unknown_id, id_a])
+        # the unknown id is left out, the duplicate is answered once
+        self.assertEqual({id_a, id_b}, set(entries.keys()))
+        self.assertEqual("family_a", entries[id_a].family_name)
+        self.assertEqual("family_b", entries[id_b].family_name)
+        # batch entries carry no sample list, same as getFamily
+        self.assertIsNone(entries[id_a].samples)
+        self.assertIsNone(entries[id_b].samples)
+        self.assertEqual({}, self.storage.getFamilyEntriesByIds([]))
+        self.assertEqual({}, self.storage.getFamilyEntriesByIds([unknown_id]))
+        # nor after GET /families/<id> has attached one to what getFamily handed out
+        family = self.storage.getFamily(id_a)
+        assert family is not None
+        family.samples = {}
+        self.assertIsNone(self.storage.getFamilyEntriesByIds([id_a])[id_a].samples)
+        self.assertNotIn("samples", self.storage.getFamilyEntriesByIds([id_a])[id_a].toDict())
+
 
 @pytest.mark.mongo
 class MongoDbStorageTest(MemoryStorageTest):
