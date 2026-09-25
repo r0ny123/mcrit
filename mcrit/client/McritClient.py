@@ -417,7 +417,7 @@ class McritClient:
         response = requests.get(f"{self.mcrit_server}/samples/{sample_id}/smda", headers=self.headers)
         if self.raw:
             return response
-        data = handle_response(response)
+        data = self._handle(response)
         if data is None:
             return None
         return SmdaReport.fromDict(data)
