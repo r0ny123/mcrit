@@ -15,6 +15,16 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **Unique blocks in memory mode failed for any subset of the stored samples.**
+  `MemoryStorage.getUniqueBlocks` raised `KeyError` whenever the store held samples other than the
+  ones asked about: it collected the blocks of every stored function and then counted them against
+  the requested samples only. It now reads the blocks of the requested samples, as `MongoDbStorage`
+  does, and answers the same.
+
+## [1.12.0] - 2026-09-25
+
 ### Added
 
 - **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
@@ -46,12 +56,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
   `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
   client's source and fails for any request added without a timeout.
-
-- **Unique blocks in memory mode failed for any subset of the stored samples.**
-  `MemoryStorage.getUniqueBlocks` raised `KeyError` whenever the store held samples other than the
-  ones asked about: it collected the blocks of every stored function and then counted them against
-  the requested samples only. It now reads the blocks of the requested samples, as `MongoDbStorage`
-  does, and answers the same.
 
 ## [1.11.0] - 2026-09-25
 
