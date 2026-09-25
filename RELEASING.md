@@ -2,7 +2,7 @@
 
 This repository follows the release process shared across the MCRIT ecosystem
 ([smda](https://github.com/danielplohmann/smda), [purepdb](https://github.com/danielplohmann/purepdb),
-[mcrit](https://github.com/familiary/mcrit), [mcritweb](https://github.com/fkie-cad/mcritweb),
+[mcrit](https://github.com/familiary/mcrit), [mcritweb](https://github.com/familiary/mcritweb),
 [mcrit-plugin](https://github.com/familiary/mcrit-plugin),
 [docker-mcrit](https://github.com/familiary/docker-mcrit)). The shape is the same everywhere;
 this file states the values that are specific to this repository.
