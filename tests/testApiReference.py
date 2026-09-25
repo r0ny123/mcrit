@@ -1,3 +1,4 @@
+import ast
 import logging
 import os
 import unittest
@@ -42,6 +43,54 @@ class ApiReferenceTest(unittest.TestCase):
             committed = handle.read()
         self.assertEqual(api_reference.render(self.entries), committed, "docs/api_reference.md is stale: python -m mcrit.server.api_reference")
         self.assertTrue(os.path.exists(api_reference.CLIENT_SOURCE))
+
+
+def _client_methods():
+    with open(api_reference.CLIENT_SOURCE) as handle:
+        tree = ast.parse(handle.read())
+    client = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "McritClient")
+    return [node for node in client.body if isinstance(node, ast.FunctionDef)]
+
+
+def _sends_a_request(method):
+    for node in ast.walk(method):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            target = node.func.value
+            if isinstance(target, ast.Name) and target.id == "requests":
+                return True
+            if isinstance(target, ast.Name) and target.id == "self" and node.func.attr == "_search_request":
+                return True
+    return False
+
+
+class ClientSurfaceTest(unittest.TestCase):
+    """The client half of #54: every public McritClient method is typed and documented, and every
+    one that sends a request honours raw_responses through _passthrough. Read off the source, so a
+    method added later - on main or on another branch - cannot quietly go without."""
+
+    def test_every_public_client_method_is_typed_and_documented(self):
+        missing = [
+            "%s (%s)" % (method.name, ", ".join(what for what, absent in (("docstring", not ast.get_docstring(method)), ("return annotation", method.returns is None)) if absent))
+            for method in _client_methods()
+            if not method.name.startswith("_") and (not ast.get_docstring(method) or method.returns is None)
+        ]
+        self.assertEqual([], missing)
+
+    def test_every_request_method_honours_raw_responses(self):
+        # _search_request hands the response to the methods that do the checking
+        ignoring_raw = [
+            method.name
+            for method in _client_methods()
+            if method.name != "_search_request" and _sends_a_request(method) and not any(isinstance(node, ast.Attribute) and node.attr == "raw" for node in ast.walk(method))
+        ]
+        self.assertEqual([], ignoring_raw)
+        # and answers the response through _passthrough, which is what keeps the annotations honest
+        bare = [
+            method.name
+            for method in _client_methods()
+            if method.name != "_passthrough" and any(isinstance(node, ast.Return) and isinstance(node.value, ast.Name) and node.value.id == "response" for node in ast.walk(method))
+        ]
+        self.assertEqual([], bare)
 
 
 if __name__ == "__main__":

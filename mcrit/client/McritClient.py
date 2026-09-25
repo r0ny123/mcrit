@@ -539,14 +539,14 @@ class McritClient:
         if data is not None:
             return FunctionEntry.fromDict(data)
 
-    def modifyFunction(self, function_id: int, function_name: str):
-        """
-        Set the name of the function <function_id>; the name is also recorded as a label by this client's username.
-        Supported by mcritweb API pass-through
+    def modifyFunction(self, function_id: int, function_name: str) -> Optional[Dict[str, Any]]:
+        """PUT /functions/{function_id}: rename a function; the name is also recorded as a label by this client's username. Answers the confirmation message, None when rejected.
+
+        Supported by mcritweb API pass-through.
         """
         response = requests.put(f"{self.mcrit_server}/functions/{function_id}", {"function_name": function_name}, headers=self.headers)
         if self.raw:
-            return response
+            return self._passthrough(response)
         return self._handle(response)
 
     ###########################################
@@ -1054,7 +1054,7 @@ class McritClient:
         response = self._search_request(search_kind, search_term, cursor=cursor, is_ascending=is_ascending, sort_by=sort_by, limit=limit)
         if self.raw:
             # like the other camel-case accessors: the requests.Response itself
-            return response
+            return self._passthrough(response)
         data = self._handle(response)
         if data is None:
             return None
