@@ -74,6 +74,15 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
     `tags:!=x` has to look at every entity on either backend, as a negated condition on any field
     does ([#53]).
 
+### Fixed
+
+- **The in-memory search compares a list field element-wise, as MongoDB does.** `actors:APT28`
+  compared the whole `actors` list with the string, so it and `actors:?apt` found nothing on
+  `MemoryStorage` while MongoDB found every family with that actor, and `actors:!=APT28` found
+  every family rather than those without it. A condition now holds when some element satisfies
+  it, and a negated one when none does, for every list field; a test on `actors` runs against
+  both backends ([#53]).
+
 ## [1.11.0] - 2026-09-25
 
 ### Added

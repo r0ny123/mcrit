@@ -243,6 +243,19 @@ class MemoryStorageTags(unittest.TestCase):
         with self.assertRaises(TagLimitError):
             self.storage.addTags("family", family_b, ["new"])
 
+    def test_search_on_actors_is_element_wise(self):
+        """actors is a list field like tags, and the in-memory search matches it as MongoDB does"""
+        family_a, family_b = self.sample.family_id, self.other_sample.family_id
+        self.assertTrue(self.storage.modifyFamily(family_b, {"actors": ["APT28", "Sofacy"]}))
+        all_families = self._search("family", "family_id:>=0")
+        self.assertIn(family_a, all_families)
+        self.assertEqual([family_b], self._search("family", "actors:APT28"))
+        self.assertEqual([family_b], self._search("family", "actors:Sofacy"))
+        self.assertEqual([family_id for family_id in all_families if family_id != family_b], self._search("family", "actors:!=APT28"))
+        self.assertEqual([family_b], self._search("family", "actors:?sofa"))
+        self.assertEqual([family_id for family_id in all_families if family_id != family_b], self._search("family", "actors:!?sofa"))
+        self.assertEqual([], self._search("family", "actors:APT29"))
+
     def _search(self, kind, term):
         parsed = SearchQueryParser().parse(term)
         id_field = f"{kind}_id"
