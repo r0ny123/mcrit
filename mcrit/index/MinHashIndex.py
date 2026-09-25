@@ -465,6 +465,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
     def getFamily(self, family_id):
         return self.getStorage().getFamily(family_id)
 
+    def getFamiliesByIds(self, family_ids: List[int]) -> Dict[int, FamilyEntry]:
+        return self.getStorage().getFamilyEntriesByIds(family_ids)
+
     def getFunctionsBySampleId(self, sample_id):
         return self.getStorage().getFunctionsBySampleId(sample_id)
 
@@ -485,6 +488,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
 
     def getSampleById(self, sample_id):
         return self.getStorage().getSampleById(sample_id)
+
+    def getSamplesByIds(self, sample_ids: List[int]) -> Dict[int, SampleEntry]:
+        return self.getStorage().getSampleEntriesByIds(sample_ids)
 
     def getSamples(self, start_index, limit):
         return self.getStorage().getSamples(start_index, limit)

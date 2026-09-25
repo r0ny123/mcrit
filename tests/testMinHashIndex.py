@@ -135,6 +135,35 @@ class SearchByIdentifierTestSuite(unittest.TestCase):
         self.assertIsNone(index.getFunctionSearchResults("0xffffffffff")["id_match"])
 
 
+class BatchLookupTestSuite(unittest.TestCase):
+    """getSamplesByIds/getFamiliesByIds just forward to the storage batch reads; this pins the
+    delegation (method name, argument), which resource-level tests mock away."""
+
+    def testGetSamplesByIdsDelegatesToStorage(self):
+        index = MinHashIndex(config)
+        this_file_path = str(os.path.abspath(__file__))
+        example_file_path = os.sep.join([os.path.dirname(this_file_path), "example_report.smda"])
+        with open(example_file_path) as fjson:
+            smda_report = SmdaReport.fromDict(json.load(fjson))
+        assert smda_report is not None
+        index.addReport(smda_report)
+        sample_entry = index.getStorage().getSampleBySha256(smda_report.sha256)
+        assert sample_entry is not None
+        result = index.getSamplesByIds([sample_entry.sample_id, 999999])
+        self.assertEqual({sample_entry.sample_id}, set(result.keys()))
+        self.assertEqual(sample_entry.sha256, result[sample_entry.sample_id].sha256)
+        self.assertEqual({}, index.getSamplesByIds([]))
+
+    def testGetFamiliesByIdsDelegatesToStorage(self):
+        index = MinHashIndex(config)
+        family_id = index.getStorage().addFamily("batch_family")
+        result = index.getFamiliesByIds([family_id, 999999])
+        self.assertEqual({family_id}, set(result.keys()))
+        self.assertEqual("batch_family", result[family_id].family_name)
+        self.assertIsNone(result[family_id].samples)
+        self.assertEqual({}, index.getFamiliesByIds([]))
+
+
 class UniqueBlocksCoverTestSuite(unittest.TestCase):
     """yara_covers used to be written once as 0 and never assigned again (#144)"""
 
