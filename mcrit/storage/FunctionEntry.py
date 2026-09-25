@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from smda.common.BinaryInfo import BinaryInfo
 from smda.common.SmdaFunction import SmdaFunction
@@ -37,6 +37,8 @@ class FunctionEntry:
     binweight: float
     offset: int
     xcfg: Optional[Dict]
+    # free labels an analyst attached, normalised by mcrit.libs.tags (#53)
+    tags: List[str]
 
     def __init__(
         self,
@@ -60,6 +62,7 @@ class FunctionEntry:
             self.pichash = smda_function.pic_hash or 0
             self.picblockhashes = []
         self.function_labels = []
+        self.tags = []
         self.matches = {}
         empty_minhash = MinHash()
         self.minhash = minhash.getMinHash() if minhash else empty_minhash.getMinHash()
@@ -93,6 +96,7 @@ class FunctionEntry:
             "pichash": self.pichash,
             "picblockhashes": self.picblockhashes,
             "sample_id": self.sample_id,
+            "tags": list(self.tags),
             "xcfg": self.xcfg,
         }
         return function_entry
@@ -118,6 +122,8 @@ class FunctionEntry:
         function_entry.binweight = entry_dict["binweight"]
         function_entry.offset = decode_two_complement(entry_dict["offset"])
         function_entry.xcfg = entry_dict["xcfg"] if "xcfg" in entry_dict else None
+        # functions stored before #53 carry no tags, and MongoDbStorage leaves the field out while empty
+        function_entry.tags = list(entry_dict.get("tags") or [])
         return function_entry
 
     def __str__(self):

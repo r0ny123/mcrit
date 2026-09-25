@@ -14,6 +14,7 @@ from picblocks.blockhasher import BlockHasher
 
 from mcrit.index.SearchCursor import FullSearchCursor
 from mcrit.index.SearchQueryTree import AndNode, BaseVisitor, FilterSingleElementLists, NodeType, OrNode, PropagateNot, SearchConditionNode, SearchFieldResolver
+from mcrit.libs.tags import checkTagEntity, normalizeTags
 from mcrit.minhash.MinHash import MinHash
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
@@ -315,6 +316,8 @@ class MemoryStorage(StorageInterface):
             # both actor lists (a review of #57 caught the rename dropping them)
             merged_actors = FamilyEntry.normalizeActors(list(new_family_info.actors or []) + list(old_family_info.actors or []))
             self._families[new_family_id].actors = merged_actors
+            # and so do its tags (#53), as a union with those the target carries already
+            self._families[new_family_id].tags = list(new_family_info.tags) + [tag for tag in old_family_info.tags if tag not in new_family_info.tags]
             # update family_entry
             if family_id == 0:
                 self._families[0].num_samples = 0
@@ -337,6 +340,40 @@ class MemoryStorage(StorageInterface):
                     self._pichashes[function_entry.pichash].add((new_family_id, function_entry.sample_id, function_id))
         self._updateDbState()
         return True
+
+    def _getTaggableEntry(self, entity: str, entity_id: int) -> Optional[Union[FamilyEntry, SampleEntry, FunctionEntry]]:
+        # the stored object itself, not a copy: getSampleById and getFunctionById hand out copies
+        if checkTagEntity(entity) == "family":
+            return self._families.get(entity_id)
+        if entity_id < 0:
+            return None
+        if entity == "sample":
+            return self._samples.get(entity_id)
+        return self._functions.get(entity_id)
+
+    def addTags(self, entity: str, entity_id: int, tags: List[str]) -> Optional[List[str]]:
+        tags = normalizeTags(tags)
+        entry = self._getTaggableEntry(entity, entity_id)
+        if entry is None:
+            return None
+        entry.tags = list(entry.tags) + [tag for tag in tags if tag not in entry.tags]
+        return list(entry.tags)
+
+    def removeTags(self, entity: str, entity_id: int, tags: List[str]) -> Optional[List[str]]:
+        tags = normalizeTags(tags)
+        entry = self._getTaggableEntry(entity, entity_id)
+        if entry is None:
+            return None
+        entry.tags = [tag for tag in entry.tags if tag not in tags]
+        return list(entry.tags)
+
+    def getTagCounts(self, entity: str) -> Dict[str, int]:
+        entries = {"family": self._families, "sample": self._samples, "function": self._functions}[checkTagEntity(entity)]
+        counts: Dict[str, int] = defaultdict(int)
+        for entry in entries.values():
+            for tag in entry.tags:
+                counts[tag] += 1
+        return dict(sorted(counts.items()))
 
     def recomputeFamilyStats(self, progress_reporter=None) -> Dict[str, Any]:
         report: Dict[str, Any] = {"num_families": 0, "num_families_corrected": 0, "num_families_created": 0, "corrections": {}}

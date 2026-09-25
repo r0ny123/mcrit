@@ -409,6 +409,17 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         # is answered synchronously instead of as a job (fkie-cad/mcritweb#72)
         return self.getStorage().modifyFunction(function_id, update_information, username=username)
 
+    # tags (#53) touch one document and no statistics, so like modifyFunction they are answered
+    # synchronously rather than as a job
+    def addTags(self, entity: str, entity_id: int, tags: List[str]) -> Optional[List[str]]:
+        return self.getStorage().addTags(entity, entity_id, tags)
+
+    def removeTags(self, entity: str, entity_id: int, tags: List[str]) -> Optional[List[str]]:
+        return self.getStorage().removeTags(entity, entity_id, tags)
+
+    def getTagCounts(self, entity: str) -> Dict[str, int]:
+        return self.getStorage().getTagCounts(entity)
+
     def getMatchesCross(self, sample_ids: List[int], sample_group_only=False, force_recalculation=False, username=None, **params):
         sample_to_job_id = {}
         for id in sample_ids:
