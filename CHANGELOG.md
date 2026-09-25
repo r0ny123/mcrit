@@ -52,7 +52,9 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   only updated an existing bucket 0, so a hash whose bucket 0 was gone while higher buckets
   survived kept no df anywhere: the cutoff never served its postings and the coverage report
   (#201) could not count them, with no error either way. The rebuild now upserts bucket 0 while
-  postings survive, as the recompute after a deletion already did.
+  postings survive, as the recompute after a deletion already did. Both now create it with an
+  empty posting list: the recompute's upsert left `function_ids` out, so the next candidate lookup
+  that returned the recreated document raised `KeyError: 'function_ids'` and failed the job.
 
 ## [1.11.0] - 2026-09-25
 

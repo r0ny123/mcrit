@@ -406,6 +406,19 @@ class MongoBandDfCutoffCoverageTest(unittest.TestCase):
         totals = storage.getBandDfCutoffCoverage(band_df_cutoff=1)["totals"]
         self.assertEqual((totals["band_hashes"], totals["postings"], totals["max_df"]), (2, 6, 3))
         self.assertEqual((totals["band_hashes_over_cutoff"], totals["postings_over_cutoff"]), (2, 6))
+        # the recreated bucket 0 is returned by a lookup too, which reads function_ids off every
+        # document; a query function whose only band hash is 9 still finds the surviving postings
+        query = mock.Mock(hasMinHash=mock.Mock(return_value=True))
+        with mock.patch.object(storage, "getBandHashesForMinHash", return_value={0: 9}):
+            for accumulation in ("dict", "numpy"):
+                with self.subTest(accumulation=accumulation), mock.patch.object(storage._storage_config, "STORAGE_CANDIDATE_ACCUMULATION", accumulation):
+                    candidates = storage.getCandidatesForMinHashes({42: query})
+                    self.assertEqual({key: set(value) for key, value in candidates.items()}, {42: {6, 10, 11}})
+        # the recompute after a pull recreates a missing bucket 0 the same way
+        band_0.delete_one({"band_hash": 9, "bucket": 0})
+        storage._updateBands({0: {9: [6]}}, method="pull")
+        recomputed = band_0.find_one({"band_hash": 9, "bucket": 0})
+        self.assertEqual((recomputed["function_ids"], recomputed["df"]), ([], 2))
 
     def testLargestBsonIntegerIsAccepted(self):
         report = self.mongo._storage.getBandDfCutoffCoverage(band_df_cutoff=BAND_DF_CUTOFF_MAX)

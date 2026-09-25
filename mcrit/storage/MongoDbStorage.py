@@ -1621,7 +1621,11 @@ class MongoDbStorage(StorageInterface):
         # whose bucket 0 is missing (e.g. removed before this was fixed) would otherwise stay
         # invisible to the cutoff and restart placement at bucket 0 on the next push
         updates = [
-            UpdateOne({"band_hash": band_hash, "bucket": 0}, {"$set": {"df": df, "tail": tail, "tail_n": tail_n}}, upsert=df > 0)
+            UpdateOne(
+                {"band_hash": band_hash, "bucket": 0},
+                {"$set": {"df": df, "tail": tail, "tail_n": tail_n}, "$setOnInsert": {"function_ids": []}},
+                upsert=df > 0,
+            )
             for band_hash, (df, tail, tail_n) in totals.items()
         ]
         collection.bulk_write(updates, ordered=False)
@@ -2093,9 +2097,16 @@ class MongoDbStorage(StorageInterface):
                     break
             # upsert while postings survive, as _recomputeBandBookkeeping does: a hash whose bucket 0
             # is missing carries no df anywhere, so without it the cutoff never serves its postings
-            # and the coverage report does not count them
+            # and the coverage report does not count them. A recreated bucket 0 gets an empty posting
+            # list, since every lookup reads function_ids off each document it returns
             df = int(row["df"])
-            pending.append(UpdateOne({"band_hash": row["_id"], "bucket": {"$in": [0, None]}}, {"$set": {"bucket": 0, "df": df, "tail": tail, "tail_n": tail_n}}, upsert=df > 0))
+            pending.append(
+                UpdateOne(
+                    {"band_hash": row["_id"], "bucket": {"$in": [0, None]}},
+                    {"$set": {"bucket": 0, "df": df, "tail": tail, "tail_n": tail_n}, "$setOnInsert": {"function_ids": []}},
+                    upsert=df > 0,
+                )
+            )
             if len(pending) >= 5000:
                 collection.bulk_write(pending, ordered=False)
                 num_hashes += len(pending)
