@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcrit"
-version = "1.9.0"
+version = "1.11.0"
 description = "MCRIT is a framework created for simplified application of the MinHash algorithm to code similarity."
 readme = { file = "README.md", content-type = "text/markdown" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 authors = [
@@ -20,7 +20,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -65,13 +64,14 @@ dev = [
     # found #186, a parameter that had been silently ignored for as long as it existed. Take the
     # bump in its own change once the tree is clean under the new version, and never merge a red
     # one - during a deep PR queue it reddens every open branch for reasons unrelated to them.
-    "ty==0.0.79",
+    "ty==0.0.82",
 ]
 
 [project.urls]
-Homepage = "https://github.com/danielplohmann/mcrit"
-Repository = "https://github.com/danielplohmann/mcrit"
-Issues = "https://github.com/danielplohmann/mcrit/issues"
+Homepage = "https://github.com/familiary/mcrit"
+Repository = "https://github.com/familiary/mcrit"
+Issues = "https://github.com/familiary/mcrit/issues"
+Changelog = "https://github.com/familiary/mcrit/blob/main/CHANGELOG.md"
 
 [project.scripts]
 mcrit = "mcrit.__main__:main"
@@ -91,7 +91,7 @@ exclude = ["tests*", "data*", "docs*", "examples*", "plugins*"]
 mcrit = ["cache/*.json"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 180
 
 [tool.ruff.lint]
