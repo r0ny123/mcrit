@@ -4,17 +4,21 @@ import json
 import logging
 import os
 import unittest
+from unittest.mock import MagicMock, patch
 
+import falcon.testing
 import pymongo
 import pytest
 from smda.common.SmdaReport import SmdaReport
 
+from mcrit.client.McritClient import McritBadRequest, McritClient, McritNotFound
 from mcrit.config.McritConfig import McritConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.index.SearchCursor import FullSearchCursor
 from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.libs.tags import isValidTag, normalizeTags
+from mcrit.server import application_routes
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
 from mcrit.storage.SampleEntry import SampleEntry
@@ -250,6 +254,123 @@ class MongoDbStorageTags(MemoryStorageTags):
         # the query uses the index
         plan = db.functions.find({"tags": "a"}).explain()["queryPlanner"]["winningPlan"]
         self.assertIn("tags_1", json.dumps(plan))
+
+
+class TagRoutes(unittest.TestCase):
+    """The routes as get_app registers them, over a memory storage."""
+
+    def setUp(self):
+        self.index = MinHashIndex(storage_config())
+        self.sample = self.index.getStorage().addSmdaReport(load_report(EXAMPLE_REPORT, family="family_a"))
+        assert self.sample is not None
+        self.function_id = sorted(self.index.getStorage().getFunctionIdsBySampleId(self.sample.sample_id))[0]
+        with patch.object(application_routes, "create_index", return_value=self.index), patch.object(McritConfig, "AUTH_TOKEN", ""):
+            self.client = falcon.testing.TestClient(application_routes.get_app())
+
+    def test_add_and_remove_on_every_entity(self):
+        for route, entity, entity_id in (("families", "family", self.sample.family_id), ("samples", "sample", self.sample.sample_id), ("functions", "function", self.function_id)):
+            result = self.client.simulate_post(f"/{route}/{entity_id}/tags", json={"tags": ["Packed", "source:vt"]})
+            self.assertEqual(falcon.HTTP_200, result.status, route)
+            self.assertEqual({"entity": entity, "entity_id": entity_id, "tags": ["packed", "source:vt"]}, result.json["data"], route)
+            result = self.client.simulate_delete(f"/{route}/{entity_id}/tags", json={"tags": ["packed"]})
+            self.assertEqual(falcon.HTTP_200, result.status, route)
+            self.assertEqual(["source:vt"], result.json["data"]["tags"], route)
+            result = self.client.simulate_get("/tags", params={"entity": entity})
+            self.assertEqual(falcon.HTTP_200, result.status, route)
+            self.assertEqual({"entity": entity, "tags": {"source:vt": 1}}, result.json["data"], route)
+        # the tags are part of what the entity's own route answers
+        self.assertEqual(["source:vt"], self.client.simulate_get(f"/samples/{self.sample.sample_id}").json["data"]["tags"])
+        self.assertEqual(["source:vt"], self.client.simulate_get(f"/functions/{self.function_id}").json["data"]["tags"])
+        self.assertEqual(["source:vt"], self.client.simulate_get(f"/families/{self.sample.family_id}").json["data"]["tags"])
+
+    def test_malformed_requests_answer_400_and_change_nothing(self):
+        path = f"/samples/{self.sample.sample_id}/tags"
+        for body, fragment in (
+            ({"tags": [""]}, "invalid tag"),
+            ({"tags": ["x" * 65]}, "invalid tag"),
+            ({"tags": ["$where"]}, "invalid tag"),
+            ({"tags": ["fine", "$where"]}, "invalid tag"),
+            ({"tags": "packed"}, "list of strings"),
+            ({"tags": [5]}, "invalid tag"),
+            ({"tags": []}, "at least one tag"),
+            ({"tag": ["packed"]}, '{"tags": [...]}'),
+            (["packed"], '{"tags": [...]}'),
+        ):
+            for method in (self.client.simulate_post, self.client.simulate_delete):
+                result = method(path, json=body)
+                self.assertEqual(falcon.HTTP_400, result.status, body)
+                self.assertEqual("failed", result.json["status"], body)
+                self.assertIn(fragment, result.json["data"]["message"], body)
+        self.assertEqual(falcon.HTTP_400, self.client.simulate_post(path).status)
+        self.assertEqual([], self.index.getStorage().getSampleById(self.sample.sample_id).tags)
+
+    def test_unknown_ids_answer_404(self):
+        for route, entity in (("families", "family"), ("samples", "sample"), ("functions", "function")):
+            for method in (self.client.simulate_post, self.client.simulate_delete):
+                result = method(f"/{route}/4242/tags", json={"tags": ["x"]})
+                self.assertEqual(falcon.HTTP_404, result.status, route)
+                # MCRIT's own answer, not the router's for a path it does not know
+                self.assertEqual({"status": "failed", "data": {"message": f"We don't have a {entity} with that id."}}, result.json, route)
+        # a query sample (negative id) carries no tags
+        query_sample = self.index.getStorage().addSmdaReport(load_report(EXAMPLE_REPORT), isQuery=True)
+        assert query_sample is not None
+        result = self.client.simulate_post(f"/samples/{query_sample.sample_id}/tags", json={"tags": ["x"]})
+        self.assertEqual(falcon.HTTP_404, result.status)
+        self.assertEqual("We don't have a sample with that id.", result.json["data"]["message"])
+
+    def test_the_listing_needs_a_valid_entity(self):
+        for params in ({}, {"entity": "report"}, {"entity": "families"}):
+            result = self.client.simulate_get("/tags", params=params)
+            self.assertEqual(falcon.HTTP_400, result.status, params)
+            self.assertIn("entity must be one of family, sample, function", result.json["data"]["message"])
+
+
+class TagClient(unittest.TestCase):
+    def _answer(self, data, status_code=200):
+        response = MagicMock(status_code=status_code, url="http://mcrit.test/x")
+        response.json.return_value = {"status": "successful", "data": data} if status_code == 200 else {"status": "failed", "data": {"message": "nope"}}
+        return response
+
+    def test_requests(self):
+        client = McritClient("http://mcrit.test", username="alice")
+        with patch("mcrit.client.McritClient.requests.post", return_value=self._answer({"entity": "sample", "entity_id": 4, "tags": ["a", "b"]})) as post:
+            self.assertEqual(["a", "b"], client.addTags("sample", 4, ["a", "b"]))
+        self.assertEqual("http://mcrit.test/samples/4/tags", post.call_args.args[0])
+        self.assertEqual({"tags": ["a", "b"]}, post.call_args.kwargs["json"])
+        self.assertEqual("alice", post.call_args.kwargs["headers"]["username"])
+        with patch("mcrit.client.McritClient.requests.delete", return_value=self._answer({"entity": "family", "entity_id": 2, "tags": []})) as delete:
+            # a single string is one tag
+            self.assertEqual([], client.removeTags("family", 2, "a"))
+        self.assertEqual("http://mcrit.test/families/2/tags", delete.call_args.args[0])
+        self.assertEqual({"tags": ["a"]}, delete.call_args.kwargs["json"])
+        with patch("mcrit.client.McritClient.requests.post", return_value=self._answer({"entity": "function", "entity_id": 9, "tags": ["c"]})) as post:
+            client.addTags("function", 9, ("c",))
+        self.assertEqual("http://mcrit.test/functions/9/tags", post.call_args.args[0])
+        with patch("mcrit.client.McritClient.requests.get", return_value=self._answer({"entity": "function", "tags": {"c": 3}})) as get:
+            self.assertEqual({"c": 3}, client.getTags("function"))
+        self.assertEqual("http://mcrit.test/tags", get.call_args.args[0])
+        self.assertEqual({"entity": "function"}, get.call_args.kwargs["params"])
+        with self.assertRaises(ValueError):
+            client.addTags("report", 1, ["x"])
+
+    def test_error_modes(self):
+        # default: a failure answers None
+        with patch("mcrit.client.McritClient.requests.post", return_value=self._answer(None, 404)):
+            self.assertIsNone(McritClient("http://mcrit.test").addTags("sample", 4, ["a"]))
+        raising = McritClient("http://mcrit.test", raise_client_errors=True)
+        with patch("mcrit.client.McritClient.requests.post", return_value=self._answer(None, 404)):
+            with self.assertRaises(McritNotFound):
+                raising.addTags("sample", 4, ["a"])
+        with patch("mcrit.client.McritClient.requests.delete", return_value=self._answer(None, 400)):
+            with self.assertRaises(McritBadRequest):
+                raising.removeTags("sample", 4, ["$a"])
+        with patch("mcrit.client.McritClient.requests.get", return_value=self._answer(None, 400)):
+            with self.assertRaises(McritBadRequest):
+                raising.getTags("report")
+        raw = McritClient("http://mcrit.test", raw_responses=True)
+        answer = self._answer({"tags": {}})
+        with patch("mcrit.client.McritClient.requests.get", return_value=answer):
+            self.assertIs(answer, raw.getTags("sample"))
 
 
 if __name__ == "__main__":

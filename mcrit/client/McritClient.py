@@ -3,7 +3,7 @@ import functools
 import logging
 import time
 import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import requests
 from smda.common.SmdaReport import SmdaReport
@@ -515,6 +515,56 @@ class McritClient:
         if self.raw:
             return response
         return self._handle(response)
+
+    ###########################################
+    ### Tags
+    ###########################################
+
+    _TAG_ROUTES = {"family": "families", "sample": "samples", "function": "functions"}
+
+    def _tagsRequest(self, entity: str, entity_id: int, tags: Union[str, Iterable[str]]) -> Tuple[str, Dict[str, List[str]]]:
+        """The URL and JSON body of a tag change; a single string is one tag, not its characters."""
+        if entity not in self._TAG_ROUTES:
+            raise ValueError(f"entity must be one of {', '.join(self._TAG_ROUTES)}, not {entity!r}.")
+        tags = [tags] if isinstance(tags, str) else list(tags)
+        return f"{self.mcrit_server}/{self._TAG_ROUTES[entity]}/{int(entity_id)}/tags", {"tags": tags}
+
+    def addTags(self, entity: str, entity_id: int, tags: Union[str, Iterable[str]]):
+        """
+        Add <tags> to the family, sample or function (<entity>) <entity_id>; tags it carries already are kept once (#53)
+        Answers the entity's tags after the change
+        """
+        url, body = self._tagsRequest(entity, entity_id, tags)
+        response = requests.post(url, json=body, headers=self.headers)
+        if self.raw:
+            return response
+        data = self._handle(response)
+        if data is not None:
+            return data["tags"]
+
+    def removeTags(self, entity: str, entity_id: int, tags: Union[str, Iterable[str]]):
+        """
+        Remove <tags> from the family, sample or function (<entity>) <entity_id>; tags it does not carry are ignored (#53)
+        Answers the entity's tags after the change
+        """
+        url, body = self._tagsRequest(entity, entity_id, tags)
+        response = requests.delete(url, json=body, headers=self.headers)
+        if self.raw:
+            return response
+        data = self._handle(response)
+        if data is not None:
+            return data["tags"]
+
+    def getTags(self, entity: str):
+        """
+        The distinct tags on families, samples or functions (<entity>), each with the number of entities carrying it (#53)
+        """
+        response = requests.get(f"{self.mcrit_server}/tags", params={"entity": entity}, headers=self.headers)
+        if self.raw:
+            return response
+        data = self._handle(response)
+        if data is not None:
+            return data["tags"]
 
     ###########################################
     ### Matching
