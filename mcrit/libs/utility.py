@@ -1,6 +1,8 @@
 import base64
 import io
+import re
 import zipfile
+from typing import Any, Optional
 
 
 def generate_unique_pairs(data):
@@ -73,3 +75,20 @@ def decode_two_complement(int64):
     if int64 < 0:
         return int64 + 0x10000000000000000
     return int64
+
+
+def parse_sample_id(value: Any) -> Optional[int]:
+    """A sample id as the job selectors take it: an int, or a string of one such as "7" or "-3".
+
+    None for anything else - a bool, a float, "7.0", "x" - rather than whatever int() makes of it,
+    so that True never selects sample 1 and 7.9 never selects sample 7. LocalQueue and MongoQueue
+    both read their sample_ids selector through this, and JobResource decides with it which
+    entries to reject, so all three agree on what an id is.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\s*-?[0-9]+\s*", value):
+        return int(value)
+    return None

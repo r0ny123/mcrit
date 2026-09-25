@@ -23,8 +23,12 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `payload.descriptor` that are literal to their end, so each bounds one range of the existing
   index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
   where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
-  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
-  selector that keeps no parseable id selects nothing, never everything ([#210]).
+  `sample_ids` matches the first positional argument only, stored as an integer, and answers 400
+  without `method`. An entry that is not an integer, or not the 24 hex characters of a job id,
+  answers 400 naming it rather than being dropped, which would have answered for a different
+  selection, and so does a selection parameter given twice (it used to raise into a 500). A
+  selector with no entry at all selects nothing, never everything. `LocalQueue` and `MongoQueue`
+  read a sample id given as a string such as `"7"` alike, as `7` ([#210]).
 
 ## [1.11.0] - 2026-09-25
 

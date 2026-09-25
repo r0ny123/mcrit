@@ -1,63 +1,91 @@
 import datetime
 import re
+from typing import Optional
 
 import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.libs.utility import parse_sample_id
 from mcrit.queue.LocalQueue import Job
 from mcrit.server.utils import db_log_msg, jsonify, timing
 
 # TODO these should also return status and data in their json response
 
 
-def _parse_int_csv(value):
-    """Comma-separated ints; entries that do not parse are ignored, like start/limit."""
-    ids = []
-    for item in value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            ids.append(int(item))
-        except ValueError:
-            pass
-    return ids
+# the parameters that select jobs, shared by GET /jobs and GET /jobs/count, and those only the
+# listing reads on top of them
+_SELECTION_PARAMETERS = ("method", "state", "filter", "username", "sample_ids", "job_ids")
+_PAGING_PARAMETERS = ("start", "limit", "ascending")
 
 
-def _parse_str_csv(value):
-    """Comma-separated ids; blank entries are ignored."""
+def _split_csv(value):
+    """The entries of a comma-separated parameter; blank entries, as a trailing comma leaves, are no entries."""
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _name_invalid(entries, shown=10):
+    """The rejected entries for a 400 message, as many as are useful to read."""
+    named = ", ".join(repr(entry[:40]) for entry in entries[:shown])
+    if len(entries) > shown:
+        named += f" and {len(entries) - shown} more"
+    return named
 
 
 class JobResource:
     def __init__(self, index: MinHashIndex):
         self.index = index
 
-    @staticmethod
-    def _selection(req):
-        """The parameters that select jobs, shared by the listing and its count."""
-        return {
+    def _reject(self, req, resp, responder, message, log_message=None):
+        resp.status = falcon.HTTP_400
+        resp.data = jsonify({"status": "failed", "data": {"message": message}})
+        db_log_msg(self.index, req, f"JobResource.{responder} - failed - {log_message or message}")
+
+    def _selection(self, req, resp, responder, other_parameters=()) -> Optional[dict]:
+        """The parameters that select jobs, shared by the listing and its count, or None once a 400 is answered.
+
+        Every parameter is taken once: falcon hands a repeated one over as a list, which none of them
+        is parsed as. sample_ids takes integers and requires method, job_ids takes ObjectIds - the 24
+        hex characters /jobs/{job_id} asks for, here checked over the whole entry. An entry that does
+        not parse is named in the 400 rather than dropped, since dropping it would answer for a
+        different selection than the one asked for.
+        """
+        repeated = [name for name in (*_SELECTION_PARAMETERS, *other_parameters) if isinstance(req.params.get(name), list)]
+        if repeated:
+            self._reject(req, resp, responder, f"Query parameters may be given only once: {', '.join(repeated)}.")
+            return None
+        selection = {
             "method": req.params.get("method", None),
             "state": req.params.get("state", None),
             "filter": req.params.get("filter", None),
             "username": req.params.get("username", None),
-            "sample_ids": _parse_int_csv(req.params["sample_ids"]) if "sample_ids" in req.params else None,
-            "job_ids": _parse_str_csv(req.params["job_ids"]) if "job_ids" in req.params else None,
+            "sample_ids": None,
+            "job_ids": None,
         }
-
-    def _reject_sample_ids_without_method(self, req, resp, selection) -> bool:
-        if selection["sample_ids"] is None or selection["method"] is not None:
-            return False
-        resp.status = falcon.HTTP_400
-        resp.data = jsonify({"status": "failed", "data": {"message": "sample_ids requires method to be set as well."}})
-        db_log_msg(self.index, req, "JobResource - failed - sample_ids without method.")
-        return True
+        if "sample_ids" in req.params:
+            if selection["method"] is None:
+                self._reject(req, resp, responder, "sample_ids requires method to be set as well.", "sample_ids without method.")
+                return None
+            entries = _split_csv(req.params["sample_ids"])
+            invalid = [entry for entry in entries if parse_sample_id(entry) is None]
+            if invalid:
+                self._reject(req, resp, responder, f"Invalid sample_ids, which must be integers: {_name_invalid(invalid)}.", "invalid sample_ids.")
+                return None
+            selection["sample_ids"] = [parse_sample_id(entry) for entry in entries]
+        if "job_ids" in req.params:
+            entries = _split_csv(req.params["job_ids"])
+            invalid = [entry for entry in entries if re.fullmatch("[0-9a-fA-F]{24}", entry) is None]
+            if invalid:
+                self._reject(req, resp, responder, f"Invalid job_ids, which must be 24 hex characters: {_name_invalid(invalid)}.", "invalid job_ids.")
+                return None
+            # lower case, as str(ObjectId) renders an id; MongoQueue's ObjectId() takes either case
+            selection["job_ids"] = [entry.lower() for entry in entries]
+        return selection
 
     @timing
     def on_get_count(self, req, resp):
         """How many jobs match the same selection ``GET /jobs`` takes, without paging through them. Answers ``count``."""
-        selection = self._selection(req)
-        if self._reject_sample_ids_without_method(req, resp, selection):
+        selection = self._selection(req, resp, "on_get_count")
+        if selection is None:
             return
         count = self.index.getQueueCount(**selection)
         resp.data = jsonify({"status": "successful", "data": {"count": count}})
@@ -65,13 +93,13 @@ class JobResource:
 
     @timing
     def on_get_collection(self, req, resp):
+        selection = self._selection(req, resp, "on_get_collection", other_parameters=_PAGING_PARAMETERS)
+        if selection is None:
+            return
         # parse optional request parameters
         ascending = False
         if "ascending" in req.params:
             ascending = req.params["ascending"].lower().strip() == "true"
-        selection = self._selection(req)
-        if self._reject_sample_ids_without_method(req, resp, selection):
-            return
         start_job_id = 0
         if "start" in req.params:
             try:

@@ -12,6 +12,7 @@ import pytest
 
 from mcrit.config.QueueConfig import QueueConfig
 from mcrit.libs.mongoqueue import MongoQueue
+from mcrit.queue.LocalQueue import LocalQueue
 from mcrit.queue.QueueRemoteCalls import _createJobPayload, get_descriptor, rearrange_params
 
 from .context import getTestMongoServerAndPort
@@ -560,6 +561,49 @@ class MongoQueueSelectorTest(TestCase):
         selected = self.queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=cast(List[int], ["8", "x", None]))
         self.assertEqual([job_8], [job.job_id for job in selected])
         self.assertEqual([], self.queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=cast(List[int], ["x"])))
+
+    def test_a_sample_id_given_as_a_string_selects_what_the_int_does(self):
+        job_7 = self.queue.put(_payload("getMatchesForSample", 7))
+        self.queue.put(_payload("getMatchesForSample", 70))
+        job_neg = self.queue.put(_payload("getMatchesForSample", -7))
+        for selector, expected in (([7], {job_7}), (["7"], {job_7}), ([" -7 "], {job_neg}), (["7", 7], {job_7})):
+            with self.subTest(sample_ids=selector):
+                selected = {job.job_id for job in self.queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=cast(List[int], selector))}
+                self.assertEqual(expected, selected)
+                self.assertEqual(len(expected), self.queue.get_job_count(method="getMatchesForSample", sample_ids=cast(List[int], selector)))
+
+    def test_a_selector_entry_that_is_no_sample_id_selects_nothing(self):
+        # int() made True into 1 and 7.0 into 7, which LocalQueue did not select alike
+        self.queue.put(_payload("getMatchesForSample", 7))
+        self.queue.put(_payload("getMatchesForSample", 1))
+        for selector in (["x"], [None], [True], [7.0], ["7.0"]):
+            with self.subTest(sample_ids=selector):
+                self.assertEqual([], self.queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=cast(List[int], selector)))
+
+    def test_only_a_first_argument_stored_as_an_integer_is_a_sample_id(self):
+        job_7 = self.queue.put(_payload("getMatchesForSample", 7))
+        self.queue.put(_payload("getMatchesForSample", "7"))
+        self.queue.put(_payload("getMatchesForSample", 7.0))
+        self.queue.put(_payload("getMatchesForSample", True))
+        selected = {job.job_id for job in self.queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=[7, 1])}
+        self.assertEqual({job_7}, selected)
+
+    def test_local_queue_selects_the_same_jobs(self):
+        # the same jobs in both queues, told apart by the repr of their first argument
+        local_queue = LocalQueue()
+        first_arguments = [7, "7", 7.0, True, 1, 70, -7, "x"]
+        mongo_labels = {}
+        local_labels = {}
+        for number, first_argument in enumerate(first_arguments):
+            mongo_labels[self.queue.put(_payload("getMatchesForSample", first_argument))] = repr(first_argument)
+            local_id = f"job-{number}"
+            local_queue._jobs[local_id] = {"_id": local_id, "number": number, "payload": _payload("getMatchesForSample", first_argument)}
+            local_labels[local_id] = repr(first_argument)
+        for selector in ([7], ["7"], [" 7 "], [1], [True], [7.0], ["x"], [-7, "70"], []):
+            with self.subTest(sample_ids=selector):
+                in_mongo = {mongo_labels[job.job_id] for job in self.queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=cast(List[int], selector))}
+                in_local = {local_labels[job.job_id] for job in local_queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=selector)}
+                self.assertEqual(in_mongo, in_local)
 
     def test_sample_ids_without_a_method_selects_nothing(self):
         # JobResource refuses this with 400; get_jobs itself has no method to anchor the

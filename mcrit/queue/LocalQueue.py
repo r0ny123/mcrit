@@ -6,6 +6,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
+from mcrit.libs.utility import parse_sample_id
+
 # Only do basicConfig if no handlers have been configured
 if not logging.root.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(message)s")
@@ -419,18 +421,18 @@ class LocalQueue:
     @staticmethod
     def _has_matching_first_argument(job_document, sample_ids) -> bool:
         # the same selection MongoQueue makes on payload.descriptor (first positional
-        # argument via rearrange_params' "0" key), applied to payload.params instead
+        # argument via rearrange_params' "0" key), applied to payload.params instead. Its
+        # regexes match a JSON integer only, so a first argument stored as "7", 7.0 or true is
+        # no sample id here either
         first_argument = json.loads(job_document["payload"]["params"]).get("0")
-        try:
-            return int(first_argument) in sample_ids
-        except (TypeError, ValueError):
-            return False
+        return isinstance(first_argument, int) and not isinstance(first_argument, bool) and first_argument in sample_ids
 
     def _matching_jobs(self, method=None, state=None, filter=None, username=None, ascending=False, sample_ids=None, job_ids=None):
         # the same selection MongoQueue._job_query makes (fkie-cad/mcritweb#57), in submission order
         if sample_ids is not None and method is None:
             return []
-        selected_sample_ids = set(sample_ids) if sample_ids is not None else None
+        # "7" selects what 7 does and entries that are no id are dropped, as on MongoQueue
+        selected_sample_ids = {parse_sample_id(sample_id) for sample_id in sample_ids} - {None} if sample_ids is not None else None
         selected_job_ids = set(job_ids) if job_ids is not None else None
         jobs = []
         for job_id, job_document in self._jobs.items():

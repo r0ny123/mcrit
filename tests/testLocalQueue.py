@@ -1,5 +1,6 @@
 import unittest
 
+from mcrit.libs.utility import parse_sample_id
 from mcrit.queue.LocalQueue import LocalQueue
 from mcrit.queue.QueueRemoteCalls import _createJobPayload, get_descriptor, rearrange_params
 
@@ -95,11 +96,52 @@ class LocalQueueSelectorTest(unittest.TestCase):
         self.assertEqual({job_8_a, job_9}, selected)
         self.assertNotIn(job_8_b, selected)
 
+    def test_a_sample_id_given_as_a_string_selects_what_the_int_does(self):
+        # MongoQueue always read "7" as 7; LocalQueue compared the string with the int and selected nothing
+        job_7 = self._queue_job("getMatchesForSample", 7)
+        self._queue_job("getMatchesForSample", 70)
+        job_neg = self._queue_job("getMatchesForSample", -7)
+        for selector, expected in (([7], {job_7}), (["7"], {job_7}), ([" -7 "], {job_neg}), (["7", 7], {job_7})):
+            with self.subTest(sample_ids=selector):
+                selected = {job.job_id for job in self.queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=selector)}
+                self.assertEqual(expected, selected)
+                self.assertEqual(len(expected), self.queue.get_job_count(method="getMatchesForSample", sample_ids=selector))
+
+    def test_a_selector_entry_that_is_no_sample_id_selects_nothing(self):
+        self._queue_job("getMatchesForSample", 7)
+        self._queue_job("getMatchesForSample", 1)
+        for selector in (["x"], [None], [True], [7.0], ["7.0"]):
+            with self.subTest(sample_ids=selector):
+                self.assertEqual([], self.queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=selector))
+
+    def test_only_a_first_argument_stored_as_an_integer_is_a_sample_id(self):
+        # MongoQueue's regexes match a JSON integer only; int() here also took "7", 7.0 and true (as 1)
+        job_7 = self._queue_job("getMatchesForSample", 7)
+        self._queue_job("getMatchesForSample", "7")
+        self._queue_job("getMatchesForSample", 7.0)
+        self._queue_job("getMatchesForSample", True)
+        selected = {job.job_id for job in self.queue.get_jobs(0, 100, method="getMatchesForSample", sample_ids=[7, 1])}
+        self.assertEqual({job_7}, selected)
+
     def test_neither_selector_keeps_existing_behaviour(self):
         job_a = self._queue_job("getMatchesForSample", 1)
         job_b = self._queue_job("getMatchesForSample", 2)
         selected = {job.job_id for job in self.queue.get_jobs(0, 100, method="getMatchesForSample")}
         self.assertEqual({job_a, job_b}, selected)
+
+
+class ParseSampleIdTest(unittest.TestCase):
+    """What both queues and JobResource accept as a sample id in a selector."""
+
+    def test_an_int_or_a_string_of_one_is_a_sample_id(self):
+        for value, expected in ((7, 7), (-3, -3), (0, 0), ("7", 7), (" -3 ", -3), ("007", 7)):
+            with self.subTest(value=value):
+                self.assertEqual(expected, parse_sample_id(value))
+
+    def test_anything_else_is_none_rather_than_what_int_makes_of_it(self):
+        for value in (True, False, 7.0, 7.9, "7.0", "x", "", "0x7", "1_000", "+7", None, [7]):
+            with self.subTest(value=value):
+                self.assertIsNone(parse_sample_id(value))
 
 
 if __name__ == "__main__":

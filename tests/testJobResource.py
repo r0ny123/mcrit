@@ -1,11 +1,12 @@
 import json
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import falcon
 import falcon.testing
 
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.server.application_routes import get_app
 from mcrit.server.JobResource import JobResource
 
 from .context import config
@@ -106,6 +107,7 @@ class JobCollectionSelectorsTest(unittest.TestCase):
     def _resource(self):
         index = MagicMock()
         index.getQueueData.return_value = []
+        index.getQueueCount.return_value = 0
         return index, JobResource(index)
 
     def test_sample_ids_without_method_is_a_400_and_never_queries(self):
@@ -115,22 +117,93 @@ class JobCollectionSelectorsTest(unittest.TestCase):
         self.assertEqual(falcon.HTTP_400, resp.status)
         index.getQueueData.assert_not_called()
 
-    def test_sample_ids_parses_as_ints_and_ignores_invalid_entries(self):
+    def _assert_rejected(self, index, resp, *named):
+        self.assertEqual(falcon.HTTP_400, resp.status)
+        index.getQueueData.assert_not_called()
+        index.getQueueCount.assert_not_called()
+        assert resp.data is not None
+        message = json.loads(resp.data)["data"]["message"]
+        for name in named:
+            self.assertIn(name, message)
+        return message
+
+    def test_sample_ids_parses_as_ints_and_skips_blank_entries(self):
         index, resource = self._resource()
         resp = falcon.Response()
-        resource.on_get_collection(self._request("method=getMatchesForSample&sample_ids=7,x,9,"), resp)
+        resource.on_get_collection(self._request("method=getMatchesForSample&sample_ids=7, -9,"), resp)
         self.assertNotEqual(falcon.HTTP_400, resp.status)
         kwargs = index.getQueueData.call_args.kwargs
         self.assertEqual("getMatchesForSample", kwargs["method"])
-        self.assertEqual([7, 9], kwargs["sample_ids"])
+        self.assertEqual([7, -9], kwargs["sample_ids"])
         self.assertIsNone(kwargs["job_ids"])
 
-    def test_sample_ids_present_but_all_invalid_is_forwarded_as_an_empty_list(self):
+    def test_sample_ids_present_but_empty_is_forwarded_as_an_empty_list(self):
         index, resource = self._resource()
         resp = falcon.Response()
-        resource.on_get_collection(self._request("method=getMatchesForSample&sample_ids=x,y"), resp)
+        resource.on_get_collection(self._request("method=getMatchesForSample&sample_ids=,"), resp)
         kwargs = index.getQueueData.call_args.kwargs
         self.assertEqual([], kwargs["sample_ids"])
+
+    def test_invalid_sample_ids_are_a_400_naming_them(self):
+        # dropping them used to answer for the valid rest, a different selection than the one asked for
+        for responder in ("on_get_collection", "on_get_count"):
+            for query, named, not_named in (
+                ("method=getMatchesForSample&sample_ids=7,x,9", ("'x'",), ("'7'", "'9'")),
+                ("method=getMatchesForSample&sample_ids=x,7.0,0x7", ("'x'", "'7.0'", "'0x7'"), ("'7'",)),
+            ):
+                with self.subTest(responder=responder, query=query):
+                    index, resource = self._resource()
+                    resp = falcon.Response()
+                    getattr(resource, responder)(self._request(query), resp)
+                    message = self._assert_rejected(index, resp, "sample_ids", *named)
+                    for name in not_named:
+                        self.assertNotIn(name, message)
+
+    def test_invalid_job_ids_are_a_400_naming_them(self):
+        # 25 hex characters start with 24 and passed an unanchored check, then failed as an ObjectId
+        too_long = JOB_ID + "0"
+        for responder in ("on_get_collection", "on_get_count"):
+            with self.subTest(responder=responder):
+                index, resource = self._resource()
+                resp = falcon.Response()
+                getattr(resource, responder)(self._request(f"job_ids={JOB_ID},nope,{too_long}"), resp)
+                message = self._assert_rejected(index, resp, "job_ids", "'nope'", repr(too_long))
+                self.assertNotIn(repr(JOB_ID), message)
+
+    def test_a_long_list_of_invalid_ids_is_named_in_part(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_get_collection(self._request("method=m&sample_ids=" + ",".join(f"x{n}" for n in range(25))), resp)
+        message = self._assert_rejected(index, resp, "'x0'", "'x9'", "and 15 more")
+        self.assertNotIn("'x10'", message)
+
+    def test_a_repeated_parameter_is_a_400_not_a_500(self):
+        # falcon hands a repeated parameter over as a list, which split(",") and int() raised on
+        for responder, query, named in (
+            ("on_get_collection", "method=getMatchesForSample&sample_ids=7&sample_ids=8", "sample_ids"),
+            ("on_get_count", "method=getMatchesForSample&sample_ids=7&sample_ids=8", "sample_ids"),
+            ("on_get_collection", f"job_ids={JOB_ID}&job_ids={RESULT_ID}", "job_ids"),
+            ("on_get_count", "filter=a&filter=b", "filter"),
+            ("on_get_collection", "start=0&start=5", "start"),
+            ("on_get_collection", "ascending=true&ascending=false", "ascending"),
+        ):
+            with self.subTest(responder=responder, query=query):
+                index, resource = self._resource()
+                resp = falcon.Response()
+                getattr(resource, responder)(self._request(query), resp)
+                self._assert_rejected(index, resp, "only once", named)
+
+    def test_a_repeated_parameter_answers_400_through_the_app(self):
+        index = MagicMock()
+        with patch("mcrit.server.application_routes.create_index", return_value=index):
+            client = falcon.testing.TestClient(get_app())
+        for path in ("/jobs", "/jobs/count"):
+            with self.subTest(path=path):
+                response = client.simulate_get(path, query_string="method=getMatchesForSample&sample_ids=7&sample_ids=8")
+                self.assertEqual(400, response.status_code)
+                self.assertIn("sample_ids", response.json["data"]["message"])
+        index.getQueueData.assert_not_called()
+        index.getQueueCount.assert_not_called()
 
     def test_job_ids_does_not_require_method(self):
         index, resource = self._resource()
@@ -140,6 +213,12 @@ class JobCollectionSelectorsTest(unittest.TestCase):
         kwargs = index.getQueueData.call_args.kwargs
         self.assertEqual(["0123456789abcdef01234567", "fedcba9876543210fedcba98"], kwargs["job_ids"])
         self.assertIsNone(kwargs["sample_ids"])
+
+    def test_job_ids_are_handed_on_in_lower_case(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_get_collection(self._request(f"job_ids={JOB_ID.upper()}"), resp)
+        self.assertEqual([JOB_ID], index.getQueueData.call_args.kwargs["job_ids"])
 
     def test_job_ids_present_but_empty_is_forwarded_as_an_empty_list(self):
         index, resource = self._resource()

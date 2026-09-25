@@ -29,6 +29,8 @@ from bson.objectid import ObjectId
 from bson.regex import Regex
 from pymongo import MongoClient, ReturnDocument, UpdateOne
 
+from mcrit.libs.utility import parse_sample_id
+
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_INSERT: Dict[str, Any] = {
@@ -515,13 +517,15 @@ class MongoQueue:
         bounds its own range of the payload.descriptor index; a single regex with an alternation
         gets no bounds and is tested against every key. The literal prefix pins the method, so
         payload.method is not queried as well.
+
+        The regexes match a first argument stored as a JSON integer only, and an id given as a
+        string such as "7" selects the same jobs as 7 (parse_sample_id), both as LocalQueue does.
         """
         selected_ids: Dict[int, None] = {}
         for sample_id in sample_ids:
-            try:
-                selected_ids[int(sample_id)] = None
-            except (TypeError, ValueError):
-                continue
+            parsed_id = parse_sample_id(sample_id)
+            if parsed_id is not None:
+                selected_ids[parsed_id] = None
         if method is None or not selected_ids:
             # no method to anchor the regexes on, or no id that parses: select nothing
             return {"_id": {"$exists": False}}
