@@ -4,6 +4,7 @@ import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.server.utils import db_log_msg, get_username, jsonify, timing
+from mcrit.storage.FamilyEntry import FamilyEntry
 
 
 class FamilyResource:
@@ -62,7 +63,7 @@ class FamilyResource:
             actors = information_update["actors"]
             if isinstance(actors, str):
                 actors = [actor for actor in actors.split(",")]
-            if not isinstance(actors, list) or not all(isinstance(actor, str) and re.match(r"^[\w .\-]{1,64}$", actor.strip()) for actor in actors):
+            if not isinstance(actors, list) or not all(FamilyEntry.isValidActor(actor) for actor in actors):
                 resp.data = jsonify(
                     {"status": "failed", "data": {"message": "actors must be a list of 1-64 character names (letters, digits, spaces, dots, dashes, underscores)."}}
                 )
