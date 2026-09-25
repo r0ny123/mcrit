@@ -67,6 +67,41 @@ class MalformedSearchQueryTestSuite(unittest.TestCase):
         self.assertIn("search_results", index.getFunctionSearchResults("offset:>0x100"))
 
 
+class SortedSearchPagingTestSuite(unittest.TestCase):
+    """Sorting by a field breaks ties by the id in the same direction (fkie-cad/mcritweb#59): the order is total,
+    and paging through it by cursor neither skips nor repeats an entry, in either direction"""
+
+    def testTieBreakFollowsTheSortDirection(self):
+        index = MinHashIndex(config)
+        self.assertEqual([("function_id", True)], index._get_sort_data("function_id", None, True))
+        self.assertEqual([("function_id", False)], index._get_sort_data("function_id", "function_id", False))
+        self.assertEqual([("num_blocks", True), ("function_id", True)], index._get_sort_data("function_id", "num_blocks", True))
+        self.assertEqual([("num_blocks", False), ("function_id", False)], index._get_sort_data("function_id", "num_blocks", False))
+
+    def testCursorPagingIsCompleteInBothDirections(self):
+        index = MinHashIndex(config)
+        this_file_path = str(os.path.abspath(__file__))
+        for name in ("example_report.smda", "example_report_2.smda", "library_report.smda"):
+            with open(os.sep.join([os.path.dirname(this_file_path), name])) as fjson:
+                index.addReport(SmdaReport.fromDict(json.load(fjson)))
+        all_functions = index.getFunctionSearchResults("offset:>=0", limit=1000)["search_results"]
+        self.assertGreater(len(all_functions), 5)
+        for is_ascending in (True, False):
+            with self.subTest(ascending=is_ascending):
+                seen = []
+                cursor = None
+                while True:
+                    page = index.getFunctionSearchResults("offset:>=0", sort_by="num_instructions", is_ascending=is_ascending, cursor=cursor, limit=4)
+                    seen.extend(page["search_results"].values())
+                    cursor = page["cursor"]["forward"]
+                    if cursor is None or not page["search_results"]:
+                        break
+                keys = [(entry["num_instructions"], entry["function_id"]) for entry in seen]
+                self.assertEqual(sorted(keys, reverse=not is_ascending), keys)
+                self.assertEqual(len(all_functions), len(seen))
+                self.assertEqual(len(all_functions), len(set(keys)))
+
+
 class SearchByIdentifierTestSuite(unittest.TestCase):
     """An identifier that looks valid but is not stored is an empty match, not a server fault (#158)"""
 
@@ -95,6 +130,35 @@ class SearchByIdentifierTestSuite(unittest.TestCase):
         self.assertIsNone(index.getSampleSearchResults("12345")["id_match"])
         self.assertIsNone(index.getFunctionSearchResults("12345")["id_match"])
         self.assertIsNone(index.getFunctionSearchResults("0xffffffffff")["id_match"])
+
+
+class BatchLookupTestSuite(unittest.TestCase):
+    """getSamplesByIds/getFamiliesByIds just forward to the storage batch reads; this pins the
+    delegation (method name, argument), which resource-level tests mock away."""
+
+    def testGetSamplesByIdsDelegatesToStorage(self):
+        index = MinHashIndex(config)
+        this_file_path = str(os.path.abspath(__file__))
+        example_file_path = os.sep.join([os.path.dirname(this_file_path), "example_report.smda"])
+        with open(example_file_path) as fjson:
+            smda_report = SmdaReport.fromDict(json.load(fjson))
+        assert smda_report is not None
+        index.addReport(smda_report)
+        sample_entry = index.getStorage().getSampleBySha256(smda_report.sha256)
+        assert sample_entry is not None
+        result = index.getSamplesByIds([sample_entry.sample_id, 999999])
+        self.assertEqual({sample_entry.sample_id}, set(result.keys()))
+        self.assertEqual(sample_entry.sha256, result[sample_entry.sample_id].sha256)
+        self.assertEqual({}, index.getSamplesByIds([]))
+
+    def testGetFamiliesByIdsDelegatesToStorage(self):
+        index = MinHashIndex(config)
+        family_id = index.getStorage().addFamily("batch_family")
+        result = index.getFamiliesByIds([family_id, 999999])
+        self.assertEqual({family_id}, set(result.keys()))
+        self.assertEqual("batch_family", result[family_id].family_name)
+        self.assertIsNone(result[family_id].samples)
+        self.assertEqual({}, index.getFamiliesByIds([]))
 
 
 class UniqueBlocksCoverTestSuite(unittest.TestCase):
