@@ -144,6 +144,16 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   never reuse a failed or terminated one. NOTE that this changes which job answers: a pending
   forced rematch no longer shadows an earlier finished result, verified against a running
   instance ([mcritweb#47]).
+- **Searches sorted by anything but the id had no index to be served from**, so MongoDB sorted
+  every filtered document in memory. A compound `(field, id)` index now exists for every field
+  MCRITweb sorts families, samples and functions by, and the tie-break follows the sort
+  direction so one index serves both; `explain()` on a real database went from
+  `SORT -> FETCH -> IXSCAN` to `LIMIT -> FETCH -> IXSCAN`. NOTE that the first start after
+  upgrading builds these indexes - six of them on `functions` - which on a large corpus takes
+  noticeable time before the server is ready (for scale: one instance holds 11.6M function
+  documents and 2.38 GB of indexes). Also fixed: **paging stopped early whenever a page ended on
+  id 0** (function 0, sample 0, the unknown family), as the cursor was tested for truthiness
+  ([mcritweb#59]).
 
 
 ## [1.9.0] - 2026-09-08
@@ -433,3 +443,4 @@ date, the version, and what changed.
 [#208]: https://github.com/danielplohmann/mcrit/issues/208
 [#209]: https://github.com/danielplohmann/mcrit/issues/209
 [mcritweb#47]: https://github.com/fkie-cad/mcritweb/issues/47
+[mcritweb#59]: https://github.com/fkie-cad/mcritweb/issues/59
