@@ -102,15 +102,15 @@ class SampleResource:
             return
         # sanitize sample information
         information_update = req.media
-        if "family_name" in information_update and not re.match(r"^(?=[a-zA-Z0-9._\-]{0,64}$)(?!.*[\-_.]{2})[^\-_.].*[^\-_.]$", information_update["family_name"]):
+        if "family_name" in information_update and not re.match(r"^(?![\-_.])(?!.*[\-_.]{2})(?!.*[\-_.]\Z)[a-zA-Z0-9._\-]{0,64}\Z", information_update["family_name"]):
             resp.data = jsonify({"status": "failed", "data": {"message": "family_name may be 0-64 alphanumeric chars with single dots, dashes, underscores inbetween."}})
             db_log_msg(self.index, req, "SampleResource.on_put - failed - invalid family name.")
             return
-        if "version" in information_update and not re.match("^[ -~]{1,64}$", information_update["version"]):
+        if "version" in information_update and not re.match(r"^[ -~]{0,64}\Z", information_update["version"]):
             resp.data = jsonify({"status": "failed", "data": {"message": "version may be 0-64 printable characters."}})
             db_log_msg(self.index, req, "SampleResource.on_put - failed - invalid version name.")
             return
-        if "component" in information_update and not re.match("^[ -~]{1,64}$", information_update["component"]):
+        if "component" in information_update and not re.match(r"^[ -~]{0,64}\Z", information_update["component"]):
             resp.data = jsonify({"status": "failed", "data": {"message": "component may be 0-64 printable characters."}})
             db_log_msg(self.index, req, "SampleResource.on_put - failed - invalid component name.")
             return
