@@ -40,6 +40,7 @@ class FamilyResource:
 
     @timing
     def on_post_by_ids(self, req, resp):
+        """The families with the comma-separated ids in the body, keyed by family id, without their sample lists; ids that are not found are left out."""
         if not req.content_length:
             resp.data = jsonify(
                 {

@@ -65,7 +65,7 @@ class JobResource:
 
     @timing
     def on_get_collection(self, req, resp):
-        """The queued jobs, newest first unless ``ascending=true``; ``start``, ``limit``, and the filters ``method`` (job method name), ``state`` and ``filter`` (substring of the job descriptor)."""
+        """The queued jobs, newest first unless ``ascending=true``; ``start``, ``limit``, and the filters ``method`` (job method name), ``state``, ``filter`` (substring of the job descriptor), ``sample_ids`` (comma-separated; jobs of ``method``, which it requires, by their first argument) and ``job_ids`` (comma-separated)."""
         # parse optional request parameters
         ascending = False
         if "ascending" in req.params:

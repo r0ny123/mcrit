@@ -12,6 +12,7 @@ Every response is a JSON document `{"status": "successful" | "failed", "data": .
 | `GET` | `/export` | Export every family, sample and function entry (with minhashes) of the instance for import into another one. ``compress=true`` compresses the function entries per sample. | `getExportData` |
 | `GET` | `/export/{comma_separated_sample_ids}` | Export only the samples with the given comma separated ids, in the same format as ``/export``. | `getExportData` |
 | `GET` | `/families` | All families keyed by id; optional ``start`` (first family id) and ``limit``. | `getFamilies` |
+| `POST` | `/families/ids` | The families with the comma-separated ids in the body, keyed by family id, without their sample lists; ids that are not found are left out. | `getFamiliesByIds` |
 | `DELETE` | `/families/{family_id:int}` | Delete a family and its samples; with ``keep_samples=true`` the samples move to the unknown family instead. Unknown ids answer 404. | `deleteFamily` |
 | `GET` | `/families/{family_id:int}` | One family by id, with its samples unless ``with_samples=false``. Unknown ids answer 404. | `getFamily`, `isFamilyId` |
 | `PUT` | `/families/{family_id:int}` | Modify a family; JSON body with ``family_name`` (alphanumeric, dots, dashes, underscores) and/or ``is_library``. Answers 202 on success, 400 for a malformed body. | `modifyFamily` |
@@ -21,8 +22,8 @@ Every response is a JSON document `{"status": "successful" | "failed", "data": .
 | `PUT` | `/functions/{function_id:int}` | Rename a function; JSON body with ``function_name`` (up to 256 printable chars). The name is recorded as a label by the requesting user. Answers 200 on success (the rename is synchronous, not a job), 400 for a malformed body, 404 for an unknown id. | `modifyFunction` |
 | `POST` | `/import` | Import the JSON body an export produced. Adds to the instance (ids are remapped, existing samples by sha256 are skipped); it does not replace it. Answers an import report. | `addImportData` |
 | `DELETE` | `/jobs` | Delete jobs matching all given filters: ``method``, ``created_before`` and ``finished_before`` (``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM:SS``). Answers ``num_deleted``. | `deleteQueueData` |
-| `GET` | `/jobs` | The queued jobs, newest first unless ``ascending=true``; ``start``, ``limit``, and the filters ``method`` (job method name), ``state`` and ``filter`` (substring of the job descriptor). | `getJobCount`, `getQueueData` |
-| `GET` | `/jobs/count` | How many jobs match the same ``method``, ``state``, ``filter`` and ``username`` selection ``GET /jobs`` takes, without paging through them. Answers ``count``. | `getQueueCount` |
+| `GET` | `/jobs` | The queued jobs, newest first unless ``ascending=true``; ``start``, ``limit``, and the filters ``method`` (job method name), ``state``, ``filter`` (substring of the job descriptor), ``sample_ids`` (comma-separated; jobs of ``method``, which it requires, by their first argument) and ``job_ids`` (comma-separated). | `getJobCount`, `getQueueData` |
+| `GET` | `/jobs/count` | How many jobs match the same selection ``GET /jobs`` takes, without paging through them. Answers ``count``. | `getQueueCount` |
 | `GET` | `/jobs/stats` | Queue statistics per method and state; ``with_refresh=true`` recounts instead of answering the cached numbers. | `getQueueStatistics` |
 | `DELETE` | `/jobs/{job_id}` | Delete one job (and its result) by id. | `deleteJob` |
 | `GET` | `/jobs/{job_id}` | One job by its 24 hex digit id. Malformed ids answer 400, unknown ones 404. | `getJobData` |
@@ -54,6 +55,7 @@ Every response is a JSON document `{"status": "successful" | "failed", "data": .
 | `GET` | `/samples` | All samples keyed by id; optional ``start`` (first sample id) and ``limit``. | `getSamples` |
 | `POST` | `/samples` | Submit a disassembled SMDA report (JSON body) as a new sample. Answers the sample entry and, when hashing was scheduled, the ``job_id`` of the minhash job; an already known sha256 answers the existing entry with ``existed``. | `addReport` |
 | `POST` | `/samples/binary` | Submit a raw binary (request body) for disassembly and insertion. Query parameters: ``filename``, ``family``, ``version``, ``is_dump``, ``base_addr`` (hex) and ``bitness`` (32/64) for memory dumps. Answers the job id of the disassembly job. | `addBinarySample` |
+| `POST` | `/samples/ids` | The samples with the comma-separated ids in the body, keyed by sample id; negative ids resolve against query samples, and ids that are not found are left out. | `getSamplesByIds` |
 | `GET` | `/samples/sha256/{sample_sha256}` | One sample by its sha256. Malformed hashes answer 400, unknown ones 404. | `getSampleBySha256` |
 | `DELETE` | `/samples/{sample_id:int}` | Delete a sample and its functions, minhashes and band entries; a family left without samples is removed as well. | `deleteSample` |
 | `GET` | `/samples/{sample_id:int}` | One sample by id. Unknown ids answer 404. | `getSampleById`, `isSampleId` |

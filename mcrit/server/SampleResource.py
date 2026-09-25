@@ -59,6 +59,7 @@ class SampleResource:
 
     @timing
     def on_post_by_ids(self, req, resp):
+        """The samples with the comma-separated ids in the body, keyed by sample id; negative ids resolve against query samples, and ids that are not found are left out."""
         if not req.content_length:
             resp.data = jsonify(
                 {
