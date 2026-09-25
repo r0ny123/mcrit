@@ -17,6 +17,7 @@ it fails the suite rather than a corpus.
 import glob
 import json
 import os
+import re
 import unittest
 from unittest.mock import patch
 
@@ -91,9 +92,13 @@ class IdaReportVersionTest(unittest.TestCase):
         self.storage.clearStorage()
 
     def _recalculateAndReport(self):
+        """The "Found N outdated samples" summary recalculateAllPicHashes logs, whichever info call it is."""
         with patch("mcrit.storage.MongoDbStorage.LOGGER") as logger:
             self.storage.recalculateAllPicHashes()
-        return logger.info.call_args.args[0]
+        messages = [str(call.args[0]) for call in logger.info.call_args_list if call.args]
+        summaries = [message for message in messages if re.match(r"Found \d+ outdated samples", message)]
+        self.assertEqual(1, len(summaries), messages)
+        return summaries[0]
 
     def test_pichash_recalculation_takes_an_ida_report_of_this_smda_as_current(self):
         # the smda_version IdaReportProducer writes; recalculateAllPicHashes reads its last token
