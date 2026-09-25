@@ -85,7 +85,8 @@ class TagNormalisation(unittest.TestCase):
         tags = [f"tag{number}" for number in range(40000)]
         started = time.monotonic()
         normalized = normalizeTags(tags + tags)
-        self.assertLess(time.monotonic() - started, 2.0)
+        # milliseconds when linear, ~27 s when quadratic: a bound with room for a slow runner
+        self.assertLess(time.monotonic() - started, 10.0)
         self.assertEqual(tags, normalized)
 
     def test_a_limit_counts_the_list_before_looking_at_it(self):
@@ -508,7 +509,8 @@ class TagRoutes(unittest.TestCase):
             for method in (self.client.simulate_post, self.client.simulate_delete):
                 started = time.monotonic()
                 result = method(path, json={"tags": tags})
-                self.assertLess(time.monotonic() - started, 2.0)
+                # milliseconds when counted first, ~30 s when normalised first: room for a slow runner
+                self.assertLess(time.monotonic() - started, 10.0)
                 self.assertEqual(falcon.HTTP_400, result.status)
                 self.assertIn(f"at most {MAX_TAGS_PER_REQUEST} tags per request", result.json["data"]["message"])
         self.assertEqual(MAX_TAGS_PER_REQUEST, len(self.index.getStorage().getSampleById(self.sample.sample_id).tags))
