@@ -105,6 +105,14 @@ class BandDfCutoffCoverageTest(unittest.TestCase):
         self.assertEqual(report["bands"][5]["postings"], 0)
         self.assertEqual(report["bands"][5]["postings_over_cutoff_fraction"], 0.0)
 
+    def testNegativeConfiguredCutoffReportsAsOff(self):
+        """The lookup treats a cutoff <= 0 as off, so the report must not refuse a negative setting."""
+        report = syntheticIndex(band_df_cutoff=-1)._storage.getBandDfCutoffCoverage()
+        self.assertTrue(report["available"])
+        self.assertEqual((report["band_df_cutoff"], report["configured_band_df_cutoff"]), (0, 0))
+        self.assertEqual(report["totals"]["postings_over_cutoff"], 0)
+        self.assertEqual(report["totals"]["postings"], 372)
+
     def testExplicitCutoffOverridesTheConfiguredOne(self):
         report = syntheticIndex(band_df_cutoff=2)._storage.getBandDfCutoffCoverage(band_df_cutoff=5)
         self.assertEqual(report["band_df_cutoff"], 5)
@@ -421,6 +429,17 @@ class MongoBandDfCutoffCoverageTest(unittest.TestCase):
         storage._updateBands({0: {9: [6]}}, method="pull")
         recomputed = band_0.find_one({"band_hash": 9, "bucket": 0})
         self.assertEqual((recomputed["function_ids"], recomputed["df"]), ([], 2))
+
+    def testAHashWithoutPostingsGetsNoBucketZero(self):
+        """Only surviving postings recreate a bucket 0; an emptied hash must not leave a df-0 document behind."""
+        bucketed = self._freshMongo("_bucketed", bucket_size=2)
+        storage = bucketed._storage
+        band_0 = storage._getDb()["band_0"]
+        band_0.insert_one({"band_hash": 9, "bucket": 1, "function_ids": []})
+        storage.rebuildBandDfIndex()
+        self.assertIsNone(band_0.find_one({"band_hash": 9, "bucket": 0}))
+        storage._recomputeBandBookkeeping(band_0, [9])
+        self.assertIsNone(band_0.find_one({"band_hash": 9, "bucket": 0}))
 
     def testLargestBsonIntegerIsAccepted(self):
         report = self.mongo._storage.getBandDfCutoffCoverage(band_df_cutoff=BAND_DF_CUTOFF_MAX)

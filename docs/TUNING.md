@@ -157,7 +157,7 @@ counting skipped postings per lookup would roughly double the index work of ever
 measurement is a job instead:
 
     curl http://localhost:8000/band_df_cutoff_coverage                      # the configured cutoff
-    curl http://localhost:8000/band_df_cutoff_coverage?band_df_cutoff=500   # any other one
+    curl 'http://localhost:8000/band_df_cutoff_coverage?band_df_cutoff=500' # any other one
 
 Both answer a job id (`McritClient.requestBandDfCutoffCoverage()` does the same); the report is the
 job's result under `/jobs/<job_id>/result`, and the worker logs its headline at INFO. Per band and

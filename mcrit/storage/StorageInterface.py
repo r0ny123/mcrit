@@ -868,7 +868,8 @@ class StorageInterface:
         Raises:
             ValueError: if band_df_cutoff is not an integer from 0 to BAND_DF_CUTOFF_MAX
         """
-        configured_cutoff = int(getattr(self._storage_config, "STORAGE_BAND_DF_CUTOFF", 0) or 0)
+        # the lookup treats any cutoff <= 0 as off, so a negative setting reports as 0 rather than failing
+        configured_cutoff = max(0, int(getattr(self._storage_config, "STORAGE_BAND_DF_CUTOFF", 0) or 0))
         if band_df_cutoff is None:
             cutoff, cutoff_source = configured_cutoff, "STORAGE_BAND_DF_CUTOFF"
         else:
