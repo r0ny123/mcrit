@@ -17,21 +17,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
-- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
-  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
-  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
-  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
-  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
-  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
-  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
-  selector that keeps no parseable id selects nothing, never everything ([#210]).
-- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
-  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
-  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
-  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
-  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
-  Family entries carry no sample lists ([#207]).
-
 - `mcrit client submit --disassembler ida`, using IDA Pro headlessly instead of SMDA to disassemble
   submitted files, with `--ida-sigs` applying a FLIRT signature bundle and `--ida-sig-min-matches`
   setting how many functions a signature must name to be kept. It needs IDA Pro 9.1+, its licence
@@ -72,6 +57,43 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Fixed
 
+- `mcrit client submit --mode recursive` submits again. An unconditional `continue` directly after
+  the "Processing file:" line made every file below it unreachable, so the mode walked the tree,
+  printed one line per sample and submitted nothing - it looked like a successful run and left the
+  corpus empty. The failure mode is silent: the only symptom was a sample count that never moved.
+
+- `mcrit client submit --worker` works together with `--server` and `--apitoken`. The spawned
+  command placed both after `submit`, where the parser does not know them, so every worker exited
+  with a usage error and nothing was submitted; the error reached the console only as the worker's
+  relayed stderr. Without the two options (server taken from the environment) it worked.
+
+- `--force_update` reaches the worker: it was not forwarded, so with `--worker` a known sample was
+  always skipped and its family, version and library flag never updated.
+
+- A worker that exceeds `--worker-timeout` is now killed. It was only reported, and kept running
+  after the parent had moved on, so a run over many slow files accumulated orphaned processes.
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
+- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
+  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
+  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
+  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
+  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
+  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
+  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
+  selector that keeps no parseable id selects nothing, never everything ([#210]).
+- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
+  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
+  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
+  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
+  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
+  Family entries carry no sample lists ([#207]).
+
+### Fixed
+
 - **`McritClient` waited forever on a server that did not answer.** None of its requests passed
   a timeout, and requests has none by default, so a server that was down behind a firewall, or up
   but hung, blocked the caller for good: against a socket that accepts and never replies, a
@@ -84,19 +106,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
   `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
   client's source and fails for any request added without a timeout.
-
-- `mcrit client submit --mode recursive` submits again. An unconditional `continue` directly after
-  the "Processing file:" line made every file below it unreachable, so the mode walked the tree,
-  printed one line per sample and submitted nothing - it looked like a successful run and left the
-  corpus empty. The failure mode is silent: the only symptom was a sample count that never moved.
-- `mcrit client submit --worker` works together with `--server` and `--apitoken`. The spawned
-  command placed both after `submit`, where the parser does not know them, so every worker exited
-  with a usage error and nothing was submitted; the error reached the console only as the worker's
-  relayed stderr. Without the two options (server taken from the environment) it worked.
-- `--force_update` reaches the worker: it was not forwarded, so with `--worker` a known sample was
-  always skipped and its family, version and library flag never updated.
-- A worker that exceeds `--worker-timeout` is now killed. It was only reported, and kept running
-  after the parent had moved on, so a run over many slow files accumulated orphaned processes.
 
 ## [1.11.0] - 2026-09-25
 
