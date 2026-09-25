@@ -15,6 +15,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-09-25
+
 ### Added
 
 - **Band posting lists can be split across documents**, behind `STORAGE_BAND_BUCKET_SIZE`, which
