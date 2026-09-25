@@ -193,6 +193,12 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
   `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
   selector that keeps no parseable id selects nothing, never everything ([#210]).
+- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
+  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
+  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
+  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
+  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
+  Family entries carry no sample lists ([#207]).
 
 ### Changed
 
@@ -599,3 +605,4 @@ date, the version, and what changed.
 [mcritweb#76]: https://github.com/fkie-cad/mcritweb/issues/76
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
+[#207]: https://github.com/danielplohmann/mcrit/issues/207
