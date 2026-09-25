@@ -300,7 +300,10 @@ class MemoryStorage(StorageInterface):
                 if family_id == sample_entry.family_id:
                     self._samples[sample_id].is_library = update_information["is_library"]
             self._families[family_id].num_library_samples = self._families[family_id].num_samples
-        if "family_name" in update_information:
+        # the family's own name is not a rename: merging a family into itself dropped it and then failed
+        # on the lookup, or for family 0 doubled its counters. Compared with the stored name rather than
+        # looked up, because another family may carry the same name
+        if "family_name" in update_information and update_information["family_name"] != old_family_info.family_name:
             old_family_info = self.getFamily(family_id)
             family_name = update_information["family_name"]
             new_family_id = self.addFamily(family_name)
@@ -327,8 +330,8 @@ class MemoryStorage(StorageInterface):
             for function_id, function_entry in self._functions.items():
                 if family_id == function_entry.family_id:
                     self._functions[function_id].family_id = new_family_id
-                    self._pichashes[function_entry.pichash].remove((family_id, sample_id, function_id))
-                    self._pichashes[function_entry.pichash].add((new_family_id, sample_id, function_id))
+                    self._pichashes[function_entry.pichash].remove((family_id, function_entry.sample_id, function_id))
+                    self._pichashes[function_entry.pichash].add((new_family_id, function_entry.sample_id, function_id))
         self._updateDbState()
         return True
 
@@ -610,11 +613,16 @@ class MemoryStorage(StorageInterface):
         sample_ids = {}
         sample_to_func_ids = {}
         minhashes = {}
+        # one signature object per distinct signature, shared by every function carrying it -
+        # the same deduplication MongoDbStorage._fetchCacheSlice does while decoding, so both
+        # backends hand the matcher a cache of the same shape
+        interned_signatures: Dict[bytes, bytes] = {}
         for function_id in set(function_ids):
             function_entry = self._query_functions[function_id] if function_id < 0 else self._functions[function_id]
             function_id = function_entry.function_id
             sample_id = function_entry.sample_id
-            minhashes[function_id] = function_entry.minhash
+            minhash = function_entry.minhash
+            minhashes[function_id] = interned_signatures.setdefault(minhash, minhash)
             sample_ids[function_id] = sample_id
             if sample_id not in sample_to_func_ids:
                 sample_to_func_ids[sample_id] = set()
