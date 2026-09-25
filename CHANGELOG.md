@@ -17,6 +17,14 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
+- `docs/limitations.md` records what the data model deliberately leaves out, starting with
+  functions whose body a linker folded under several names: MCRIT keeps one of them, which bounds
+  attribution by name and understates it when scored against a single expected name ([#126]).
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
 - **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
   `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
   `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
@@ -31,10 +39,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
   as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
   Family entries carry no sample lists ([#207]).
-
-- `docs/limitations.md` records what the data model deliberately leaves out, starting with
-  functions whose body a linker folded under several names: MCRIT keeps one of them, which bounds
-  attribution by name and understates it when scored against a single expected name ([#126]).
 
 ### Fixed
 
