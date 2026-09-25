@@ -3,10 +3,10 @@ from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from smda.common.BinaryInfo import BinaryInfo
-from smda.common.SmdaFunction import SmdaFunction
 
 import mcrit.matchers.MatcherFlags as MatcherFlags
 from mcrit.libs.graph import Graph
+from mcrit.storage.FunctionEntry import smdaFunctionFromXcfg
 from mcrit.storage.MatchedFunctionEntry import MatchedFunctionEntry
 from mcrit.storage.MatchedSampleEntry import MatchedSampleEntry
 from mcrit.storage.SampleEntry import SampleEntry
@@ -572,9 +572,10 @@ class MatchingResult:
         all_function_links = {}
         for function_entry in function_entries:
             binfo.architecture = function_entry.architecture
-            if function_entry.xcfg is None:
+            # None too for an entry whose disassembly was dropped, which reads back as {}
+            smda_function = smdaFunctionFromXcfg(function_entry.xcfg, binfo)
+            if smda_function is None:
                 continue
-            smda_function = SmdaFunction.fromDict(function_entry.xcfg, binfo)
             for _, to_offsets in (smda_function.outrefs or {}).items():
                 for to_offset in [o for o in to_offsets if o in function_offsets]:
                     from_offset = smda_function.offset

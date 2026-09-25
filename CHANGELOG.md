@@ -15,6 +15,24 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **One function stored without its disassembly failed every function hashed beside it.** A
+  function's `xcfg` reads back as `{}` once `STORAGE_DROP_DISASSEMBLY` removed it, once a blob over
+  MongoDB's 16 MiB limit was dropped at insert ([#42]), or after importing an export of such an
+  instance, and smda rejects `{}` ("serialized function is incomplete"; smda before 4.4.5 raised
+  `KeyError`). `Worker.calculateMinHashes` handed it over anyway, so the minhashing job of that
+  sample - and every `complete_minhashes` batch of 10,000 functions it fell into - failed, on
+  every retry; `recalculateAllPicHashes` stopped on a stored `{}` and link-hunt clustering
+  (`MatchingResult.clusterLinkHuntResult`) on any entry without disassembly. All of them now
+  rebuild through one helper, `FunctionEntry.smdaFunctionFromXcfg`, and skip such a function with
+  a warning; `FunctionEntry.toSmdaFunction` answers `None` for it, so a caller that used its
+  result unchecked now has to handle `None`. An `xcfg` that is present but lacks a field smda
+  requires still raises, now naming the fields. The cause does not depend on the smda version:
+  every smda release MCRIT supports requires the same fields (4.4.5 and newer check for them,
+  older ones read them unconditionally), and none can rebuild a function from `{}`. A skipped
+  function stays without a minhash, and the warning with the count is the only trace of it.
+
 ## [1.11.0] - 2026-09-25
 
 ### Added

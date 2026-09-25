@@ -36,7 +36,7 @@ from mcrit.index.SearchQueryTree import (
 from mcrit.libs.utility import decode_two_complement, encode_two_complement
 from mcrit.minhash.MinHash import MinHash
 from mcrit.storage.FamilyEntry import FamilyEntry
-from mcrit.storage.FunctionEntry import FunctionEntry
+from mcrit.storage.FunctionEntry import FunctionEntry, smdaFunctionFromXcfg
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache
 from mcrit.storage.SampleEntry import SampleEntry
@@ -2718,7 +2718,10 @@ class MongoDbStorage(StorageInterface):
                         blockhash["hash"] = int(blockhash["hash"], 16)
                         old_blockhashes.append(blockhash)
                     picblockhashes_updatable += len(old_blockhashes)
-                smda_function = SmdaFunction.fromDict(smda_xcfg, binary_info=binary_info)
+                smda_function = smdaFunctionFromXcfg(smda_xcfg, binary_info)
+                if smda_function is None:
+                    xcfg_missing += 1
+                    continue
                 new_pichash = smda_function.getPicHash(binary_info)
                 if old_pichash != new_pichash:
                     functions_updated += 1
