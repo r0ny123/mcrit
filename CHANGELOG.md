@@ -17,21 +17,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
-- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
-  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
-  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
-  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
-  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
-  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
-  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
-  selector that keeps no parseable id selects nothing, never everything ([#210]).
-- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
-  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
-  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
-  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
-  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
-  Family entries carry no sample lists ([#207]).
-
 - **What `STORAGE_BAND_DF_CUTOFF` skips is measurable** ([#201]), as a job:
   `GET /band_df_cutoff_coverage` (optionally `?band_df_cutoff=N`, refused with a 400 unless an
   integer from 0 to 2^63 - 1, the largest a BSON integer holds) answers a job id, and
@@ -63,6 +48,35 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Fixed
 
+- **`rebuild_band_df_index` recreates a missing bucket 0** under `STORAGE_BAND_BUCKET_SIZE`. It
+  only updated an existing bucket 0, so a hash whose bucket 0 was gone while higher buckets
+  survived kept no df anywhere: the cutoff never served its postings and the coverage report
+  ([#201]) could not count them, with no error either way. The rebuild now upserts bucket 0 while
+  postings survive, as the recompute after a deletion already did. Both now create it with an
+  empty posting list: the recompute's upsert left `function_ids` out, so the next candidate lookup
+  that returned the recreated document raised `KeyError: 'function_ids'` and failed the job.
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
+- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
+  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
+  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
+  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
+  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
+  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
+  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
+  selector that keeps no parseable id selects nothing, never everything ([#210]).
+- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
+  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
+  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
+  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
+  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
+  Family entries carry no sample lists ([#207]).
+
+### Fixed
+
 - **`McritClient` waited forever on a server that did not answer.** None of its requests passed
   a timeout, and requests has none by default, so a server that was down behind a firewall, or up
   but hung, blocked the caller for good: against a socket that accepts and never replies, a
@@ -75,14 +89,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
   `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
   client's source and fails for any request added without a timeout.
-
-- **`rebuild_band_df_index` recreates a missing bucket 0** under `STORAGE_BAND_BUCKET_SIZE`. It
-  only updated an existing bucket 0, so a hash whose bucket 0 was gone while higher buckets
-  survived kept no df anywhere: the cutoff never served its postings and the coverage report
-  ([#201]) could not count them, with no error either way. The rebuild now upserts bucket 0 while
-  postings survive, as the recompute after a deletion already did. Both now create it with an
-  empty posting list: the recompute's upsert left `function_ids` out, so the next candidate lookup
-  that returned the recreated document raised `KeyError: 'function_ids'` and failed the job.
 
 ## [1.11.0] - 2026-09-25
 
