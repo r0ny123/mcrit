@@ -70,11 +70,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   MongoDbStorage decoded a missing or `{}` blob to `{}` and indexed it anyway. Such blocks are now
   reported without instructions (an empty `instructions` list and `escaped_sequence`) on both
   backends, as MemoryStorage already did for a block offset its xcfg lacks, instead of failing the
-  job. Neither the job's block cover nor `UniqueBlocksResult.generateYaraRule` selects such a block
-  any more, as there are no bytes to match on: a cover built from them claimed a complete rule that
-  then failed to render (`max()` of no instructions) or rendered an empty, invalid string.
-  `statistics["blocks_without_instructions"]` counts them. A sample hashed under
-  `STORAGE_DROP_DISASSEMBLY` therefore still gets its unique blocks, but no YARA rule.
+  job. The job leaves them out of its result and counts them in
+  `statistics["blocks_without_instructions"]`: with no instructions to show and no bytes to match
+  on, a block cover that picked them claimed a complete rule that then failed to render (`max()` of
+  no instructions) or rendered an empty, invalid string, and MCRITweb's block table fails on a
+  block without instructions the same way. `UniqueBlocksResult.generateBlockCover` skips such a
+  block too, for results stored before. A sample hashed under `STORAGE_DROP_DISASSEMBLY` therefore
+  completes the job with no unique blocks to show and no YARA rule, and says why in that count.
 
 ## [1.11.0] - 2026-09-25
 

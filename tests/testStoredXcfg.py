@@ -102,46 +102,52 @@ class RebuildPathsTest(unittest.TestCase):
         self.assertEqual(2, logger.warning.call_args.args[1])
         self.assertIn("no disassembly", logger.warning.call_args.args[0])
 
-    def test_unique_blocks_of_a_sample_without_disassembly_carry_no_instructions(self):
-        """The job completes; blocks whose function has no disassembly have no instructions to show."""
-        with_disassembly = self.storage.getUniqueBlocks([self.sample_entry.sample_id])["unique_blocks"]
+    def test_unique_blocks_of_a_sample_without_disassembly_are_counted_not_returned(self):
+        """The job completes; blocks with nothing to show or match on are counted instead of returned."""
+        sample_id = self.sample_entry.sample_id
+        with_disassembly = self.storage.getUniqueBlocks([sample_id])["unique_blocks"]
         # what STORAGE_DROP_DISASSEMBLY does once the sample is hashed
-        self.storage.deleteXcfgForSampleId(self.sample_entry.sample_id)
-        result = self.worker.getUniqueBlocks([self.sample_entry.sample_id])
-        self.assertEqual(set(with_disassembly), set(result["unique_blocks"]))
-        for block in result["unique_blocks"].values():
-            self.assertEqual([], block["instructions"])
-            self.assertEqual("", block["escaped_sequence"])
+        self.storage.deleteXcfgForSampleId(sample_id)
+        found = self.storage.getUniqueBlocks([sample_id])["unique_blocks"]
+        self.assertEqual(set(with_disassembly), set(found))
+        self.assertTrue(all(block["instructions"] == [] for block in found.values()))
+        result = self.worker.getUniqueBlocks([sample_id])
+        # MCRITweb's block table reads every returned block's instructions
+        self.assertEqual({}, result["unique_blocks"])
+        self.assertEqual(len(with_disassembly), result["statistics"]["blocks_without_instructions"])
+        self.assertEqual(0, result["statistics"]["blocks_considered"])
         # no bytes to match on, so no rule - rather than a cover that cannot be rendered
         self.assertEqual([], result["yara_rule"])
         self.assertFalse(result["statistics"]["has_yara_rule"])
         self.assertFalse(result["statistics"]["has_complete_yara_rule"])
-        self.assertEqual(len(with_disassembly), result["statistics"]["blocks_without_instructions"])
-        cover = UniqueBlocksResult.fromDict(json.loads(json.dumps(result))).generateBlockCover()
-        self.assertEqual([], cover["block_hashes"])
-        self.assertFalse(cover["has_rule"])
 
-    def test_a_block_cover_never_selects_a_block_without_disassembly(self):
+    def test_the_job_leaves_out_only_the_blocks_without_disassembly(self):
         sample_id = self.sample_entry.sample_id
         before = self.worker.getUniqueBlocks([sample_id])
         self.assertEqual(0, before["statistics"]["blocks_without_instructions"])
-        # empty the function of a block both covers select while it still has its disassembly
+        # empty the function of a block the cover selects while it still has its disassembly
         selected = before["yara_rule"][0]
-        self.assertIn(selected, UniqueBlocksResult.fromDict(before).generateBlockCover()["block_hashes"])
         emptied = before["unique_blocks"][selected]["function_id"]
+        without = {block_hash for block_hash, block in before["unique_blocks"].items() if block["function_id"] == emptied}
         self.storage._functions[emptied].xcfg = {}
         result = self.worker.getUniqueBlocks([sample_id])
-        without = {block_hash for block_hash, block in result["unique_blocks"].items() if block["function_id"] == emptied}
-        self.assertIn(selected, without)
+        self.assertEqual(set(before["unique_blocks"]) - without, set(result["unique_blocks"]))
+        self.assertTrue(all(block["instructions"] for block in result["unique_blocks"].values()))
         self.assertEqual(len(without), result["statistics"]["blocks_without_instructions"])
         self.assertTrue(result["yara_rule"])
         self.assertFalse(without.intersection(result["yara_rule"]))
-        # the rule is rendered from the wire shape, where block hashes are strings
-        wire = json.loads(json.dumps(result))
+
+    def test_a_stored_result_with_a_block_without_disassembly_still_renders(self):
+        """A result stored before the job left such blocks out can still carry one; the cover skips it."""
+        wire = json.loads(json.dumps(self.worker.getUniqueBlocks([self.sample_entry.sample_id])))
+        blocks = UniqueBlocksResult.fromDict(wire)
+        selected = blocks.generateBlockCover()["block_hashes"][0]
+        wire["unique_blocks"][selected]["instructions"] = []
+        wire["unique_blocks"][selected]["escaped_sequence"] = ""
         blocks = UniqueBlocksResult.fromDict(wire)
         cover = blocks.generateBlockCover()
         self.assertTrue(cover["block_hashes"])
-        self.assertFalse({str(block_hash) for block_hash in without}.intersection(cover["block_hashes"]))
+        self.assertNotIn(selected, cover["block_hashes"])
         rule = blocks.generateYaraRule(wrap_at=0)
         self.assertNotIn("{  }", rule)
         for block_hash in cover["block_hashes"]:
