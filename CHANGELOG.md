@@ -17,21 +17,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Added
 
-- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
-  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
-  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
-  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
-  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
-  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
-  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
-  selector that keeps no parseable id selects nothing, never everything ([#210]).
-- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
-  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
-  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
-  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
-  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
-  Family entries carry no sample lists ([#207]).
-
 - **`shortlist_size` and `band_df_cutoff` can be set per matching request** ([#217]), overriding
   `MINHASH_MATCHING_SHORTLIST_SIZE` and `STORAGE_BAND_DF_CUTOFF` for that job alone: as query
   parameters of the `/matches/sample/...` and `/query/...` endpoints, and as keyword arguments of
@@ -46,6 +31,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   against another, within a group (`sample_group_only`) or across several (a cross compare).
   Refused rather than replaced or dropped, unlike the older options, because a changed value
   answers a question the caller did not ask and nothing in the response would say so.
+
 - **Every match report records its knobs under `info.matching`** ([#217]): `requested` (the values
   the job was submitted with; the server and `MinHashIndex` fill in the configured value of every
   knob a caller leaves out, so `null` appears for a knob the job does not take - the shortlist of a
@@ -60,19 +46,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `fromDict`/`toDict`.
 
 ### Fixed
-
-- **`McritClient` waited forever on a server that did not answer.** None of its requests passed
-  a timeout, and requests has none by default, so a server that was down behind a firewall, or up
-  but hung, blocked the caller for good: against a socket that accepts and never replies, a
-  `getVersion()` was still waiting after 15 s and would have waited indefinitely. In MCRITweb that
-  is a gunicorn request thread, which gunicorn's own `-t` does not reclaim under the `gthread`
-  worker. Every request now passes `timeout=`, from a new `timeout` argument, also settable as
-  `client.timeout`, that defaults to `(10, None)`: the connect is bounded at 10 s, and the read is
-  left open, because `/import`, `/export` and `/status` on a large corpus answer only once their
-  work is done. A caller that knows its bound sets one; MCRITweb, behind an NGINX that gives up
-  after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
-  `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
-  client's source and fails for any request added without a timeout.
 
 - **A matching job's cached result could be served for different settings** ([#217]). A job is reused
   for any later request with the same arguments, and a request that left an option out was keyed
@@ -99,6 +72,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   still queued or running does receive that result, with the fallback named in
   `info.matching.fallbacks`. Knob values are normalised in the key (`50.0` and `50`, `True` and `1`
   are one job).
+
 - **A matching request's `minhash_score` had no effect on the result** ([#217]). The matchers filtered
   candidate pairs on the configured `MINHASH_MATCHING_THRESHOLD` alone; the requested threshold was
   handed to the scoring call only together with `ignore_threshold=True`. It now decides which
@@ -108,8 +82,10 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `minhash_score` and `pichash_size` on as `None`, hard-coded `exclude_self_matches` to `False`
   although `McritClient.getMatchesForSmdaFunction` sends it, and failed on `force_recalculation`;
   it applies all three now and accepts the last.
+
 - **`MemoryStorage` ignored `STORAGE_BAND_DF_CUTOFF`** ([#217]); it applies it now, and a job's own
   `band_df_cutoff`.
+
 - **A match between named samples could leave some of them out** ([#217]). Matching one sample
   against another (`/matches/sample/{a}/{b}`), within a group
   (`sample_group_only`) or across several (`/matches/sample/cross/...`) with
@@ -119,6 +95,7 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   asked for is refused, with a 400 on the routes and a `TypeError` for a direct `MinHashIndex`
   caller, and a cross compare asks its 1-vs-corpus jobs for `shortlist_size=0` explicitly, since a
   job left without one would take the configured shortlist.
+
 - **The df-cutoff fallback served a spilled band hash as bucket 0 alone** ([#196]). With band
   bucketing on and the df index not yet trusted (before `rebuild_band_df_index` has run), the
   fallback measures bucket 0's list, and a full bucket 0 is exactly `STORAGE_BAND_BUCKET_SIZE`
@@ -126,6 +103,40 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   was served. The fallback no longer serves a hash whose bucket 0 names a tail above 0; one that
   pulls shrank below the cutoff is therefore left out by it rather than served truncated. (The
   df-indexed lookup reads such a shrunk hash's upper buckets only with the separate fix for it.)
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
+- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
+  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
+  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
+  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
+  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
+  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
+  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
+  selector that keeps no parseable id selects nothing, never everything ([#210]).
+- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
+  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
+  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
+  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
+  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
+  Family entries carry no sample lists ([#207]).
+
+### Fixed
+
+- **`McritClient` waited forever on a server that did not answer.** None of its requests passed
+  a timeout, and requests has none by default, so a server that was down behind a firewall, or up
+  but hung, blocked the caller for good: against a socket that accepts and never replies, a
+  `getVersion()` was still waiting after 15 s and would have waited indefinitely. In MCRITweb that
+  is a gunicorn request thread, which gunicorn's own `-t` does not reclaim under the `gthread`
+  worker. Every request now passes `timeout=`, from a new `timeout` argument, also settable as
+  `client.timeout`, that defaults to `(10, None)`: the connect is bounded at 10 s, and the read is
+  left open, because `/import`, `/export` and `/status` on a large corpus answer only once their
+  work is done. A caller that knows its bound sets one; MCRITweb, behind an NGINX that gives up
+  after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
+  `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
+  client's source and fails for any request added without a timeout.
 
 ## [1.11.0] - 2026-09-25
 
