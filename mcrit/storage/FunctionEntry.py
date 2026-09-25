@@ -96,9 +96,12 @@ class FunctionEntry:
             "pichash": self.pichash,
             "picblockhashes": self.picblockhashes,
             "sample_id": self.sample_id,
-            "tags": list(self.tags),
             "xcfg": self.xcfg,
         }
+        # most functions carry no tags, and a whole-corpus export or report holds millions of them,
+        # so the key is left out while empty; fromDict reads it missing as no tags (#53)
+        if self.tags:
+            function_entry["tags"] = list(self.tags)
         return function_entry
 
     @classmethod

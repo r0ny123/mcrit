@@ -117,6 +117,9 @@ class EntryTags(unittest.TestCase):
         self.assertEqual([], SampleEntry.fromDict(legacy_sample).tags)
         function = FunctionEntry(sample, report.getFunctions().__next__(), 7)
         self.assertEqual([], function.tags)
+        # an untagged function leaves the key out, which a whole-corpus export or report repeats per function
+        self.assertNotIn("tags", function.toDict())
+        self.assertEqual([], FunctionEntry.fromDict(function.toDict()).tags)
         function.tags = ["c"]
         self.assertEqual(["c"], FunctionEntry.fromDict(function.toDict()).tags)
         legacy_function = function.toDict()
@@ -415,8 +418,8 @@ class ExportImportTags(unittest.TestCase):
         export_data = json.loads(json.dumps(source.getExportData()))
         del export_data["family_tags"]
         export_data["sample_entries"][sample.sha256]["tags"] = ["fine", "$bad"]
-        for function_dict in export_data["function_entries"][sample.sha256].values():
-            del function_dict["tags"]
+        # an untagged function's entry leaves the key out, as an export written before #53 does
+        self.assertTrue(all("tags" not in function_dict for function_dict in export_data["function_entries"][sample.sha256].values()))
         target = MinHashIndex(storage_config(self.target_db))
         target.getStorage().clearStorage()
         self.assertEqual(1, target.addImportData(export_data)["num_samples_imported"])

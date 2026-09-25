@@ -746,6 +746,7 @@ class MongoDbStorage(StorageInterface):
         MongoDbStorage._encodePichash(function_dict, delete_old=delete_old)
         MongoDbStorage._encodeXcfg(function_dict, delete_old=delete_old)
         # an untagged function stores no tags field, which keeps it out of the sparse tags index;
+        # FunctionEntry.toDict leaves an empty list out already, this covers a dict built otherwise.
         # FunctionEntry.fromDict reads the missing field as no tags (#53)
         if "tags" in function_dict and not function_dict["tags"]:
             del function_dict["tags"]
