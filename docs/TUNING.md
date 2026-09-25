@@ -161,6 +161,96 @@ Tuning the cutoff at 12,500 samples, shortlist held at 100: cutoff 1000 gives a 
 200 gives 0.374 s, 100 gives 0.332 s — all three at top-10 and top-25 recall of 1.000. 200 is
 where the traversal stops scaling; below that there is little left to win.
 
+## Growing past ~270,000 samples: `STORAGE_BAND_BUCKET_SIZE`
+
+Separate from latency, and a hard stop rather than a slowdown. A band posting list is a
+`function_ids` array inside one document, and MongoDB caps a document at 16 MB. Measured by
+pushing ids into one document until the write is refused, a document holds about **1.35 million
+ids** while they fit in 32 bits and about **1.05 million** once they need BSON int64. On a
+7,244-sample real corpus the longest posting list across all 20 bands held 36,183 ids, so
+extrapolating it linearly puts the ceiling near **270,000 samples**.
+
+What happens there is not gradual: `$push` raises `BSONObj size ... is invalid` and the write
+fails, so indexing stops for any sample containing a function whose band hash is already at the
+cap. **Adding machines does not help** - a document cannot span shards, so this is not something
+sharding fixes.
+
+    STORAGE_BAND_BUCKET_SIZE = 100000
+
+splits a hash across `(band_hash, bucket)` documents once it would exceed that. `0` (the default)
+keeps the single-document shape. Set it comfortably above `STORAGE_BAND_DF_CUTOFF`: the cutoff
+selects hashes by the total `df` stored on bucket 0, and that stays exact only while an
+under-cutoff posting list still fits in a single bucket. At the suggested values (100,000 against
+a cutoff of 200) there is a 500x margin.
+
+**Enabling it on an existing database requires a rebuild first:**
+
+    curl http://localhost:8000/rebuild_band_df_index
+
+Documents written before the knob was on have no `bucket` field, so the upsert filter
+`{band_hash, bucket: 0}` will not match them - it would insert a second document for the hash and
+split the posting list invisibly, which no error would report. The rebuild stamps `bucket: 0` and
+is what makes them addressable. Run it after setting the knob and before the next ingest.
+
+Matching results are unchanged with it on or off; the tests assert identical matches against a
+corpus where the split is forced.
+
+The corpus that hits this ceiling depends on more than sample count. Malpedia is curated and
+deduplicated; a collection carrying many near-duplicate packed variants concentrates `df` faster
+and would reach the cap sooner. `df` on bucket 0 is worth watching:
+
+    db.band_0.find({}, {band_hash: 1, df: 1}).sort({df: -1}).limit(5)
+
+## Rebuilding the PicHash counts on a large corpus: `STORAGE_REBUILD_PARTITION_SIZE`
+
+This one is about an offline operation, not about query latency. All the indexes are maintained
+incrementally on write; a full rebuild is what you run after a bulk import, a schema change, or
+a repair. On a large corpus it is the operation that takes longest, and it is the one you are
+running when something is already wrong.
+
+    STORAGE_REBUILD_PARTITION_SIZE = 500000
+
+`0` (the default) keeps the original rebuild: one server-side `$group` over every pichash, then
+one upsert per distinct hash. A positive value switches to a partitioned scan that reads the
+`_pichash` index in slices of that many keys, counts runs of equal keys as it goes, and writes
+the counts as plain inserts in ascending key order.
+
+**The result is identical, and checked rather than assumed.** The rebuild verifies the holders
+it counted against an independent count of the functions carrying a pichash, and falls back to
+the original implementation if they disagree. The test suite compares the full
+`_pichash -> df` map produced by both implementations, entry for entry, at partition sizes small
+enough that boundary cases actually occur.
+
+Measured on corpora projected from a 7,244-sample real corpus, three repeats, medians:
+
+| samples | distinct hashes | default (`0`) | at `500000` | speedup |
+|---|---|---|---|---|
+| 1,000 | 393,858 | 51.9 s | 10.8 s | 4.81x |
+| 2,000 | 722,815 | 91.2 s | 20.8 s | 4.38x |
+| 4,000 | 1,486,935 | 188.8 s | 43.6 s | 4.33x |
+| 7,244 | 2,337,173 | 301.6 s | 73.1 s | 4.12x |
+
+Where the time goes: at the largest size the original spends 32.6 s producing the counts and
+269.0 s writing them, because upserts in the group's output order land at random positions in a
+growing index (8,690/s against 38,765/s for ascending inserts). The partitioned scan also holds
+its intermediate state in two local variables instead of a table with one entry per distinct
+hash, which is what makes the rebuild's memory independent of the corpus - the original's
+accumulator crosses MongoDB's 100 MB `$group` limit between 1,000 and 2,000 samples on this
+corpus and spills to disk from there on (4 spills, 36.7 MB at 7,244 samples).
+
+**What the measurement does not show.** It was taken on corpora reduced to the single field the
+rebuild reads, so they fit in the WiredTiger cache where a full corpus of that size does not.
+Both implementations measured *linear* there, against an earlier full-fidelity measurement of the
+original rebuild that had it growing superlinearly (437.1 s at 7,244 samples against 211.9 s at
+5,243). Treat the 4.1x as solid and the scaling behaviour as unsettled: on a corpus large enough
+to leave cache, the gap is expected to be wider, not narrower, but that has not been measured.
+The full accounting - the harness, the raw numbers and the write-up - is on the
+`research/scaling-notes` branch under `docs/scaling/`.
+
+Sizing the knob: 500,000 keys is roughly 40 MB of BSON in flight per partition, and few enough
+partitions that the per-partition round trip is noise. Lower it if the rebuild shares a small
+machine; raising it buys nothing once the round trip has stopped mattering.
+
 ## Caveats
 
 * Constants are measured on one corpus and one host. The relationships generalise; the specific
