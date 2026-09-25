@@ -15,6 +15,294 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /samples/{id}/smda` and `McritClient.getSmdaReportForSample` rebuild a sample's SMDA
+  report from storage.** `SampleEntry` keeps `smda_extras` - the report's top-level fields and
+  metadata it holds no field for, minus `xcfg` - and the disassembly comes from the functions'
+  blobs in one batched fetch. The example report round-trips byte for byte. NOTE that entries
+  stored before this carry no extras and rebuild with an empty report's defaults for them, and
+  functions whose disassembly was dropped are absent from the rebuilt xcfg ([#94]).
+
+## [1.12.0] - 2026-09-25
+
+### Added
+
+- **`GET /jobs` and `GET /jobs/count` select jobs by `sample_ids` (with `method`) and by
+  `job_ids`**, applied in the query before paging, and `McritClient.getQueueData` /
+  `getQueueCount` pass them on. Each sample id becomes two anchored regexes on
+  `payload.descriptor` that are literal to their end, so each bounds one range of the existing
+  index: on a 60,000-job queue the jobs of 25 samples read 102-124 index keys in under 2 ms,
+  where one regex with an alternation read all 60,000 documents in ~100 ms. NOTE that
+  `sample_ids` matches the first positional argument only, answers 400 without `method`, and a
+  selector that keeps no parseable id selects nothing, never everything ([#210]).
+- **`POST /samples/ids` and `POST /families/ids`, with `McritClient.getSamplesByIds` and
+  `getFamiliesByIds`, answer several entries in one request** - one `$in` query per collection
+  instead of a round trip per id. All 66 samples of a corpus took 5.2 ms in one request against
+  206.9 ms in 66, and 16 families 2.6 ms against 40.1 ms. The body is a comma-separated id list,
+  as for `POST /functions`; unknown ids are left out, and an empty or malformed body answers 400.
+  Family entries carry no sample lists ([#207]).
+
+### Fixed
+
+- **`McritClient` waited forever on a server that did not answer.** None of its requests passed
+  a timeout, and requests has none by default, so a server that was down behind a firewall, or up
+  but hung, blocked the caller for good: against a socket that accepts and never replies, a
+  `getVersion()` was still waiting after 15 s and would have waited indefinitely. In MCRITweb that
+  is a gunicorn request thread, which gunicorn's own `-t` does not reclaim under the `gthread`
+  worker. Every request now passes `timeout=`, from a new `timeout` argument, also settable as
+  `client.timeout`, that defaults to `(10, None)`: the connect is bounded at 10 s, and the read is
+  left open, because `/import`, `/export` and `/status` on a large corpus answer only once their
+  work is done. A caller that knows its bound sets one; MCRITweb, behind an NGINX that gives up
+  after 300 s, should. A request that runs out raises `requests.exceptions.ConnectTimeout` or
+  `ReadTimeout`, as a refused connection already raised `ConnectionError`. A test reads the
+  client's source and fails for any request added without a timeout.
+
+## [1.11.0] - 2026-09-25
+
+### Added
+
+- **Band posting lists can be split across documents**, behind `STORAGE_BAND_BUCKET_SIZE`, which
+  defaults to `0` (off) and keeps the single-document shape byte for byte.
+
+  A posting list is a `function_ids` array inside one document and MongoDB caps a document at
+  16 MB. Measured directly by pushing ids into one document until the write is refused: it holds
+  about **1.35 million ids** while they fit in 32 bits (12.2 bytes each) and about **1.05
+  million** once they need BSON int64 (15.9 bytes each), after which `$push` raises `BSONObj
+  size ... is invalid`. On a 7,244-sample real corpus the longest posting list across all 20
+  bands held **36,183 ids** (in `band_14`), so extrapolating it linearly puts the wall near
+  **270,000 samples**. The write **fails** rather than slowing down, so indexing stops for any sample holding a function
+  whose band hash is already at the cap. **Sharding does not move this**: a document cannot span
+  shards.
+
+  Bucket 0 carries the bookkeeping for the whole hash - `df` as the total across every bucket,
+  plus `tail`/`tail_n` for placement - and higher buckets carry only postings. That is what keeps
+  the cutoff filter and its `(band_hash, df)` index unchanged: a hash under the cutoff is far
+  below one bucket's worth so it never spills, and a hash that spilled has a `df` that rejects it.
+  Buckets fill in order rather than by hashing the function id, so a short posting list stays in
+  one document instead of being scattered across many.
+
+  **Migration**: enabling the knob on an existing database requires running
+  `rebuild_band_df_index` before the next write. Documents written earlier have no `bucket` field,
+  so the upsert filter `{band_hash, bucket: 0}` would not match them and would insert a *second*
+  document for the hash, splitting the posting list invisibly. The rebuild stamps `bucket: 0` and
+  is what makes them addressable. Matching results are unchanged either way - the tests assert
+  identical matches with bucketing on and off, against a corpus where the split is forced.
+
+  Deleting a sample reaches every bucket of a hash, and keeps bucket 0 (the only holder of
+  `df`/`tail`/`tail_n`) for as long as any other bucket of that hash still holds postings.
+  `STORAGE_BAND_DF_CUTOFF` above `STORAGE_BAND_BUCKET_SIZE` is refused at startup, since only
+  bucket 0 carries `df` and such a cutoff would serve a spilled hash as bucket 0 alone.
+
+- **`STORAGE_REBUILD_PARTITION_SIZE`**, defaulting to `0` (off), which rebuilds the PicHash count
+  index from a partitioned scan of the `_pichash` index instead of one server-side `$group`
+  followed by an upsert per distinct hash. `500000` is the measured recommendation. The rebuild
+  is offline and never touches query latency, but it was the last operation whose cost followed
+  corpus size rather than request size.
+  - The old rebuild held two structures shaped like the corpus: a `$group` accumulator with one
+    entry per *distinct* hash, which crosses MongoDB's 100 MB limit and spills (4 spills, 36.7 MB
+    at 7,244 samples), and an upsert per hash arriving in group order rather than key order, so
+    each landed at a random position in a growing index. A covered index scan already arrives
+    sorted, which the old code discarded; counting runs of equal keys makes the intermediate
+    state two local variables, and makes the writes ascending inserts.
+  - Measured on corpora projected from a 7,244-sample real corpus, three repeats, medians:
+    **51.9 s -> 10.8 s** at 1,000 samples and **301.6 s -> 73.1 s** at 7,244 (4.81x to 4.12x).
+    At the largest size the old rebuild spends 32.6 s reading and 269.0 s writing - 8,690
+    upserts/s against 38,765 inserts/s.
+  - **Result-preserving**, and verified rather than assumed: the rebuild checks the holders it
+    counted against an independent count of the functions carrying a pichash and falls back to
+    the old implementation if they disagree. This matters because keyset paging brackets by BSON
+    type, so a pichash that was not a string would silently truncate the index - and a missing
+    count document is *excluded* by the cutoff filter, i.e. exact matches would quietly stop
+    being found. The tests compare the full `_pichash -> df` map from both implementations.
+  - **Caveat on the scaling claim**: the measured corpora are reduced to the one field the
+    rebuild reads, so they stay inside the WiredTiger cache and both implementations measured
+    *linear* there - the superlinear exponent (k ~ +2.2) seen earlier on full-fidelity corpora
+    did not reproduce. What is demonstrated is a 4.1x constant factor and a memory shape
+    independent of the corpus, not a repaired exponent. `rebuildPicBlockHashIndex` and the band
+    bookkeeping rebuild share the `$group` shape and are unchanged and unmeasured.
+
+- `docs/scaling/` - the architecture before and after, the comparison of indexing approaches
+  considered and why most of the field is eliminated before latency is even discussed (MCRIT
+  compares MinHash signatures field-for-field and estimates Jaccard; a cosine/L2 ANN index
+  answers a different question), the full research log, and the measured results.
+- `benchmarks/` - the harness behind every number above: Malpedia fetch, SMDA report cache,
+  per-stage 1-vs-N timing, corpus-structure analysis, Heaps' law fit, synthetic corpus growth
+  fitted to a real corpus, quality comparison, and a scaling sweep.
+
+### Changed
+
+- The **matching-cache fetch decodes one MinHash per distinct signature**, not one per candidate
+  function, and every function carrying a signature shares that one decoded object. Exact, not
+  approximate: the decode is a pure function of the stored hex string. Candidate sets repeat
+  signatures far more than the corpus does, because they are assembled by band collision -
+  measured **3.99x to 29.59x** on the candidate sets of three query samples against a 7,244-sample
+  real corpus, where the corpus-wide figure is 2.46x. The fetch logs its own factor. In isolation
+  this is 7%-50% off the fetch and 0%-24% off its allocation, growing with the candidate set;
+  **end to end it is not measurable** at this corpus size (fetch stage 10.193 s -> 10.487 s with
+  the two-stage knobs off, 0.269 s -> 0.270 s with them on, summed over three queries, three
+  repeats - a run-to-run spread several times larger than the effect), because the stage is
+  dominated by per-function cache-object construction that this does not touch. It is worth having
+  as a reduction in work proportional to the candidate set, which is what grows with the corpus,
+  and not as a speed-up anybody will notice today. The fetch still *reads* one document per
+  candidate function: each carries per-function attribution (`sample_id`), and reading fewer would
+  need a signature-keyed index, i.e. a schema change. Match reports are unchanged, asserted by a
+  test that replays a query with the deduplication defeated and compares the whole report.
+
+## [1.10.0] - 2026-09-25
+
+### Added
+
+- Pushing a `vX.Y.Z` tag now publishes the release. The workflow refuses to continue unless the tag
+  matches `pyproject.toml` and `McritConfig.VERSION`, `CHANGELOG.md` has a section for it, the commit
+  is on `main` and CI passed there; it then builds the sdist and wheel in an isolated environment,
+  installs the wheel into a clean environment to import it and run `mcrit --help`, uploads to PyPI
+  through trusted publishing with signed provenance, and creates the GitHub release from that
+  version's changelog section with the generated contributor list appended. Pre-release tags
+  (`v1.10.0rc1`) are marked as such, and a manual run rehearses the same path against TestPyPI.
+  Before, publishing was `make publish` with an API token, GitHub releases stopped at v1.3.0, and
+  nothing checked that the three version strings agreed. See `RELEASING.md`; the trusted publisher
+  and the `pypi` and `testpypi` environments are configured once by a maintainer.
+- A pull request that changes `mcrit/` or `pyproject.toml` has to add a `CHANGELOG.md` entry or
+  carry the `no-changelog` label; CI checks it.
+
+### Changed
+
+- Pairwise scoring now compares each **distinct** MinHash signature once rather than once per
+  function holding it. This is exact, not approximate: a score depends only on the two
+  signatures, so functions sharing one score identically against any query. Worth 2.46x on 257
+  real Malpedia samples (185,387 hashed functions over 75,323 distinct signatures) and a
+  projected ~24x at a million samples from the fitted Heaps' law V(n) = 1412.8 * n^0.7247. Peak
+  matcher memory falls with the matrix by the same factor. Verified against the existing
+  golden-result suites, which pass unchanged.
+
+- `getSampleFunctionCounts` takes the sample ids to answer for. The shortlist ranking needs a
+  function count per *candidate*, and asked for every sample in the corpus - once per matching
+  job. At a few thousand samples that map is free, which is why four benchmark points across
+  3.59x of corpus growth show no trace of it; at 10^9 samples it is a 10^9-entry dict per query.
+  It is now an indexed lookup of the samples that received a vote (a few thousand at most).
+  Callers passing nothing still get the whole-corpus map, so no consumer breaks. **Ranking
+  behaviour is unchanged.**
+
+### Removed
+
+- **Python 3.11 is no longer supported**; `requires-python` is `>=3.12`. Nothing in MCRIT needed
+  3.12 - the MCRIT ecosystem now shares a 3.12 floor so one interpreter serves every component. The
+  reference `docker-mcrit` deployment already runs 3.12.
+- **Two-stage 1-vs-N matching**, behind two knobs that both default to `0` (off), so an upgraded
+  instance is bit-identical until it opts in. Every stage of a 1-vs-N query grew with corpus
+  size, and so did the answer - a query whose result names 5,930 matched samples is not an
+  answer anybody reads, and bounding the answer is the only thing that bounds the work.
+  - `MINHASH_MATCHING_SHORTLIST_SIZE` ranks candidate samples cheaply (one vote per distinct
+    query function, plus weighted PicHash evidence, ranked by vote count *and* by coverage
+    because MCRIT scores a matched sample by the percentage of it that matched) and runs the
+    existing exact matching against only the best N.
+  - `STORAGE_BAND_DF_CUTOFF` skips band hashes whose posting list is longer than the cutoff. A
+    band hash held by much of the corpus is a stopword: expensive to read, uninformative about
+    *which* samples match.
+  - Measured over a **48.6x** growth in corpus size (257 -> 12,500 samples), fixed query set,
+    warm cache, repeated runs, at shortlist 100 / cutoff 200: one-stage median went
+    0.429 s -> 4.427 s (latency ~ corpus^0.60) while **two-stage went 0.645 s -> 0.374 s**, with
+    mean -4% and max +7% - no measurable growth. Extrapolated to a million samples: ~62 s
+    against ~0.4 s.
+  - **NOTE that unlike the tuning knobs, these two are not result-preserving.** Matching *within*
+    a shortlisted sample is unchanged - same candidates, same scores - and top-10 and top-25
+    sample recall against the unrestricted result measured 1.000 at every corpus size tested,
+    with 0.9936-1.000 of surviving function matches keeping a bit-identical score. What a
+    shortlist costs is tail samples: overall sample recall at 12,500 samples was 0.67. PicHash
+    matching is unaffected and stays exact. See `docs/TUNING.md`.
+- `function_ranges` index and `GET /rebuild_function_range_index`, mapping a function id back to
+  its sample without reading the function - the shortlist has to do that per candidate, which is
+  the cost it exists to avoid. Stored as one span per contiguous id run, so it is exact whether
+  or not a sample's ids happen to be dense (an import adding functions later, or concurrent
+  writers interleaving counter reservations, makes them not be). Read only when a completeness
+  flag vouches for it; until then matching falls back to the whole corpus.
+- `df` on band documents plus a `(band_hash, df)` index, and `GET /rebuild_band_df_index`.
+  Filtering the cutoff on `$size` instead was measured to save nothing worth having - mongod
+  reads the document to measure it - at 12,500 samples, 1.172 s at cutoff 1000 against 0.374 s
+  once df is indexed at cutoff 200.
+### Fixed
+
+- **`McritClient`'s error modes reach the three maintenance jobs.** `rebuildPicBlockHashIndex`,
+  `repairMinHashes` and `recomputeFamilyStats` parsed their answer with `handle_response`
+  directly instead of `self._handle`, so a client built with `raise_client_errors` or
+  `raise_server_errors` still got `None` from them - a refused or failed job request that looked
+  like one nothing had answered. They landed while the modes were being written, which is how
+  they were missed. `testClientErrors` now fails on any method that parses outside the client's
+  mode, not only on these three.
+- **`LogBucket` raised `KeyError` for any value past its precomputed table**, which aborts the
+  whole indexing job. The table covers `0..SHINGLER_LOGBUCKETS-1` (100,000 by default) and
+  `FuzzyStatPairShingler` buckets `max_block_size`, `num_ins_C`, `num_ins_S` and `num_calls`
+  through it without bounding any of them - only `stack_size` is clamped, at its own call site.
+  A single basic block of 108,837 bytes in a real corpus was enough to make that corpus
+  unindexable, and the failure gets *likelier* as corpora grow. Values outside the table are now
+  clamped to its bounds. **No MinHash changes**: only inputs that previously raised behave
+  differently, asserted across the whole table.
+- **`Worker.updateMinHashes` raised `UnboundLocalError` when there was nothing left to hash.**
+  `minhashes` was bound only inside the batch loop, so a run with an empty backlog failed exactly
+  like a crash - and that is the normal state of a *resumed* index, which is where it was hit.
+  The same statement also returned the size of the **last batch** rather than the total, silently
+  under-reporting any run longer than one workpack (a 238,991-function backlog across 24 batches
+  reported whatever the final batch held). Every caller reads it as a total, so it now
+  accumulates. **This changes the number returned**, toward what `recalculateMinHashes`,
+  `updateMinHashesForSample` and `/status` already meant by it.
+- `getSampleFunctionCounts` summed nothing when a sample owned several non-contiguous function-id
+  runs - it assigned each run's size in turn, keeping only the last. Such samples were
+  undercounted, distorting their coverage ranking in the shortlist. Both the whole-corpus and the
+  per-sample paths now sum.
+- **Renaming a family to its own name deleted it on MongoDB**, while its samples and functions
+  kept its id, and raised `KeyError` on MemoryStorage; for family 0, named `""`, it doubled the
+  counters. `modifyFamily` merges into whatever family the new name resolves to, which here was
+  the family itself. The rename now runs only when the name differs from the stored one -
+  compared, not looked up, since names are not unique in storage - and the rest of the update
+  still applies. MemoryStorage also failed an ordinary rename with `KeyError` whenever the
+  renamed family's samples were not the last ones stored. NOTE that a same-name rename now writes
+  nothing on MongoDB and so no longer advances `db_state` there ([#208]).
+- **`PUT /samples/<id>` and `PUT /families/<id>` refused `""` and every one-character family
+  name**, although their messages allow 0-64 characters, so a version or component could not be
+  cleared once set and no sample could be moved into family 0, whose name is `""`. The patterns
+  now accept what the messages describe, and end in `\Z` rather than `$`, which also matched
+  before a trailing newline: `"ab\n"` as a family name and `"1.0\n"` as a version are now
+  refused. Checked over 37,210 generated strings against the old patterns: nothing else changes.
+  **Needs the same-name family rename fix ([#208])** - with `""` accepted, renaming family 0 to
+  its own name would otherwise double its counters ([#209]).
+- **A repeated request could be served by a queued or running force rematch** instead of the
+  finished job whose result it could use, because the cache picked the newest job with the same
+  descriptor whatever its state. Both queues now prefer a finished job, then the newest, and
+  never reuse a failed or terminated one. NOTE that this changes which job answers: a pending
+  forced rematch no longer shadows an earlier finished result, verified against a running
+  instance ([mcritweb#47]).
+- **Searches sorted by anything but the id had no index to be served from**, so MongoDB sorted
+  every filtered document in memory. A compound `(field, id)` index now exists for every field
+  MCRITweb sorts families, samples and functions by, and the tie-break follows the sort
+  direction so one index serves both; `explain()` on a real database went from
+  `SORT -> FETCH -> IXSCAN` to `LIMIT -> FETCH -> IXSCAN`. NOTE that the first start after
+  upgrading builds these indexes - six of them on `functions` - which on a large corpus takes
+  noticeable time before the server is ready (for scale: one instance holds 11.6M function
+  documents and 2.38 GB of indexes). Also fixed: **paging stopped early whenever a page ended on
+  id 0** (function 0, sample 0, the unknown family), as the cursor was tested for truthiness
+  ([mcritweb#59]).
+- **A function name search that found nothing examined every function document** - the
+  reported ~30 s on larger databases - since an unanchored case-insensitive regex cannot bound an
+  index. `findFunctionByString` now lists the distinct names over the `function_name` index,
+  matches the term against them in Python and hands MongoDB an `$in` / `$nin`. On two million
+  functions with 5,000 distinct names, a no-result search went 4.2 s -> 22 ms and a sorted
+  search 1.5 s -> 62 ms. NOTE that a common term at the default sort got slower by tens of
+  milliseconds (`main` 15 ms -> 78 ms), and above 10,000 distinct names the search keeps the
+  regex, unbounded as before ([mcritweb#76]). Finding out that a corpus is past that cap is not
+  free - on 11.6M functions with 314,144 distinct names the capped scan takes ~0.9 s - so each
+  process remembers the over-cap verdict for an hour instead of rescanning on every search. Only
+  that verdict is kept, never the names, so writes need not invalidate it.
+- **A document over MongoDB's 16 MiB limit lost the whole sample behind a bare
+  `ValueError("Database insert failed.")`** that named nothing - reported 4 times in 120k files,
+  typically one giant function's `xcfg` blob. `_dbInsertMany` now recognises both shapes of the
+  error (pymongo's `DocumentTooLarge` and the server's write error after an ordered insert) and
+  logs the offending documents with their ids and byte sizes. An oversized `xcfg` / `query_xcfg`
+  blob is dropped with a warning and the rest stored, so the sample survives; NOTE that the
+  affected function then has no disassembly and so no MinHash. An oversized document in any other
+  collection still fails, now naming it ([#42]).
+
+
 ## [1.9.0] - 2026-09-08
 
 Correctness and operator-recovery release, plus a large `getUniqueBlocks` speedup. **Matching
@@ -299,3 +587,12 @@ date, the version, and what changed.
 [#157]: https://github.com/danielplohmann/mcrit/issues/157
 [#158]: https://github.com/danielplohmann/mcrit/issues/158
 [#186]: https://github.com/danielplohmann/mcrit/issues/186
+[#208]: https://github.com/danielplohmann/mcrit/issues/208
+[#209]: https://github.com/danielplohmann/mcrit/issues/209
+[mcritweb#47]: https://github.com/fkie-cad/mcritweb/issues/47
+[mcritweb#59]: https://github.com/fkie-cad/mcritweb/issues/59
+[mcritweb#76]: https://github.com/fkie-cad/mcritweb/issues/76
+[#42]: https://github.com/danielplohmann/mcrit/issues/42
+[#207]: https://github.com/danielplohmann/mcrit/issues/207
+[#210]: https://github.com/danielplohmann/mcrit/issues/210
+[#94]: https://github.com/danielplohmann/mcrit/issues/94
