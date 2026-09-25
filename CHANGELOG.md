@@ -115,9 +115,10 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   (`sample_group_only`) or across several (`/matches/sample/cross/...`) with
   `MINHASH_MATCHING_SHORTLIST_SIZE` set could leave out the very samples it was asked about: the
   shortlist is ranked over the whole corpus, and a named sample outside its top entries was not
-  matched - in a cross compare its pair read as 0 %. None of them takes a shortlist any more; a
-  cross compare asks its 1-vs-corpus jobs for `shortlist_size=0` explicitly, since a job left
-  without one would take the configured shortlist.
+  matched - in a cross compare its pair read as 0 %. None of them takes a shortlist any more: one
+  asked for is refused, with a 400 on the routes and a `TypeError` for a direct `MinHashIndex`
+  caller, and a cross compare asks its 1-vs-corpus jobs for `shortlist_size=0` explicitly, since a
+  job left without one would take the configured shortlist.
 - **The df-cutoff fallback served a spilled band hash as bucket 0 alone** ([#196]). With band
   bucketing on and the df index not yet trusted (before `rebuild_band_df_index` has run), the
   fallback measures bucket 0's list, and a full bucket 0 is exactly `STORAGE_BAND_BUCKET_SIZE`

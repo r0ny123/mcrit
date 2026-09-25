@@ -243,6 +243,9 @@ class JobCacheTest(unittest.TestCase):
                 if not takes_shortlist:
                     with self.assertRaises(TypeError):
                         getattr(self.index, name)(*args, shortlist_size=3)
+                    # None means "not set" and passes, as it does everywhere else
+                    getattr(self.index, name)(*args, shortlist_size=None, shortlist_unavailable=None)
+                    self.assertNotIn("shortlist_size", submitted["kwargs"])
 
     def test_direct_callers_are_keyed_on_the_values_too(self):
         """Resolution happens in MinHashIndex, so a script or library caller gets it as the server does."""
@@ -579,18 +582,28 @@ class ForwardingTest(unittest.TestCase):
 
     def test_group_only_cross_matching_leaves_the_shortlist_out(self):
         index = MagicMock()
-        MinHashIndex.getMatchesCross(index, [1, 2], sample_group_only=True, shortlist_unavailable="function_range_index_incomplete", **KNOBS)
+        MinHashIndex.getMatchesCross(index, [1, 2], sample_group_only=True, shortlist_unavailable="function_range_index_incomplete", band_df_cutoff=4)
         self.assertEqual({"band_df_cutoff": 4}, {knob: value for knob, value in index.getMatchesForSampleVsGroup.call_args.kwargs.items() if knob in KNOBS})
         self.assertNotIn("shortlist_unavailable", index.getMatchesForSampleVsGroup.call_args.kwargs)
 
     def test_cross_matching_asks_its_children_for_no_shortlist(self):
         """A cross compare reads the named samples out of each child's report; a shortlist could drop them."""
         index = MagicMock()
-        MinHashIndex.getMatchesCross(index, [1, 2], shortlist_unavailable="function_range_index_incomplete", **KNOBS)
+        MinHashIndex.getMatchesCross(index, [1, 2], shortlist_unavailable="function_range_index_incomplete", shortlist_size=None, band_df_cutoff=4)
         kwargs = index.getMatchesForSample.call_args.kwargs
         # explicitly 0, since a child left without one would take the configured shortlist
         self.assertEqual({"shortlist_size": 0, "band_df_cutoff": 4}, {knob: kwargs[knob] for knob in KNOBS})
         self.assertNotIn("shortlist_unavailable", kwargs)
+
+    def test_cross_matching_refuses_a_shortlist_it_is_asked_for(self):
+        """Refused rather than dropped, as on the vs routes and the cross route."""
+        for sample_group_only in (False, True):
+            with self.subTest(sample_group_only=sample_group_only):
+                index = MagicMock()
+                with self.assertRaises(TypeError):
+                    MinHashIndex.getMatchesCross(index, [1, 2], sample_group_only=sample_group_only, **KNOBS)
+                index.getMatchesForSample.assert_not_called()
+                index.getMatchesForSampleVsGroup.assert_not_called()
 
     def test_cross_matching_keeps_the_samples_it_names(self):
         """End to end: a configured shortlist of 1 used to zero the pairs a cross compare exists for."""

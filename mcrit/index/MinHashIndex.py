@@ -402,10 +402,13 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
     # a caller left out (#217). The server resolves them as well; resolving again is a no-op.
 
     def _submitMatchingJob(self, method_name, job_args, knobs, job_options, with_shortlist=True):
-        if not with_shortlist and {"shortlist_size", "shortlist_unavailable"} & set(job_options):
+        # None is "not set", as everywhere else, and passes
+        if not with_shortlist and any(job_options.get(name) is not None for name in ("shortlist_size", "shortlist_unavailable")):
             # refused here rather than stored as an argument the worker method does not take,
             # which would fail the job on every attempt
             raise TypeError(f"{method_name} takes no shortlist: it is restricted to the samples it names.")
+        if not with_shortlist:
+            job_options = {name: value for name, value in job_options.items() if name not in ("shortlist_size", "shortlist_unavailable")}
         resolved = resolveMatchingParams(knobs, self.config, storage=self._storage, with_shortlist=with_shortlist)
         return getattr(super(), method_name)(*job_args, **resolved, **job_options)
 
@@ -492,11 +495,13 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         sample_to_job_id = {}
         # a cross compare reads the named samples out of each child's report, so a shortlist -
         # ranked over the whole corpus - could only drop some of them: vs-group children take
-        # none, and 1-vs-corpus children are asked for none rather than the configured one
+        # none, and 1-vs-corpus children are asked for none rather than the configured one. One a
+        # caller asks for is refused, as on the vs routes, rather than quietly dropped
+        if params.get("shortlist_size") is not None:
+            raise TypeError("getMatchesCross takes no shortlist: it reads the samples it names out of each report.")
+        params.pop("shortlist_size", None)
         params.pop("shortlist_unavailable", None)
-        if sample_group_only:
-            params.pop("shortlist_size", None)
-        else:
+        if not sample_group_only:
             params["shortlist_size"] = 0
         for id in sample_ids:
             if sample_group_only:
