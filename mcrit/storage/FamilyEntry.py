@@ -1,3 +1,4 @@
+import re
 from typing import Dict, List, Optional
 
 from mcrit.storage.SampleEntry import SampleEntry
@@ -22,6 +23,13 @@ class FamilyEntry:
         self.num_library_samples = num_library_samples
         self.actors = list(actors) if actors else []
         self.samples = samples
+
+    # what an actor name may be, for the API and for imports alike
+    ACTOR_NAME_PATTERN = re.compile(r"^[\w .\-]{1,64}$")
+
+    @staticmethod
+    def isValidActor(actor) -> bool:
+        return isinstance(actor, str) and FamilyEntry.ACTOR_NAME_PATTERN.match(actor.strip()) is not None
 
     @staticmethod
     def normalizeActors(actors) -> List[str]:
