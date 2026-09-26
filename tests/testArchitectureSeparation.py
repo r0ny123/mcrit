@@ -13,7 +13,10 @@ from mcrit.config.MinHashConfig import MinHashConfig
 from mcrit.config.QueueConfig import QueueConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.matchers.MatcherQuery import MatcherQuery
 from mcrit.matchers.MatcherSample import MatcherSample
+from mcrit.matchers.MatcherVs import MatcherVs
+from mcrit.matchers.MatcherVsGroup import MatcherVsGroup
 from mcrit.queue.QueueFactory import QueueFactory
 from mcrit.storage.StorageFactory import StorageFactory
 
@@ -45,9 +48,7 @@ def reported_sample_ids(report):
     return by_function | {sample["sample_id"] for sample in report["matches"]["samples"]}
 
 
-class ArchitectureSeparationTest(unittest.TestCase):
-    """Matching reports no matches against samples of another architecture (#93)."""
-
+class MemoryCorpus:
     def _config(self):
         config = McritConfig()
         config.MINHASH_CONFIG = MinHashConfig()
@@ -69,6 +70,10 @@ class ArchitectureSeparationTest(unittest.TestCase):
 
     def _match(self, index, sample_id):
         return MatcherSample(index.queue._worker).getMatchesForSample(sample_id)
+
+
+class ArchitectureSeparationTest(MemoryCorpus, unittest.TestCase):
+    """Matching reports no matches against samples of another architecture (#93)."""
 
     def test_samples_of_another_architecture_are_not_reported(self):
         index, (own, other) = self._corpus(load_report("crossarch_aarch64_a.smda"), load_report("crossarch_aarch64_b.smda"))
@@ -104,6 +109,51 @@ class ArchitectureSeparationTest(unittest.TestCase):
         self.assertGreater(len(reported), 2)
         self.assertEqual(0, per_sample.call_count)
         self.assertEqual(1, batched.call_count)
+
+
+class ArchitectureSeparationOtherMatchersTest(MemoryCorpus, unittest.TestCase):
+    """The query, vs and vs-group reports leave out other architectures just like sample matching."""
+
+    def _stored_copies(self):
+        # two stored samples of the same code, so each matches the other and the query
+        index, (other, same) = self._corpus(load_report("crossarch_aarch64_b.smda"), load_report("crossarch_aarch64_b.smda", sha256="ab" * 32))
+        return index, index.queue._worker, other, same
+
+    def test_query_reports_no_samples_of_another_architecture(self):
+        index, worker, other, same = self._stored_copies()
+        self.assertTrue({other, same} <= reported_sample_ids(MatcherQuery(worker).getMatchesForSmdaReport(load_report("crossarch_aarch64_a.smda"))))
+        self._relabel(index, other, "dalvik")
+        reported = reported_sample_ids(MatcherQuery(worker).getMatchesForSmdaReport(load_report("crossarch_aarch64_a.smda")))
+        self.assertIn(same, reported)
+        self.assertNotIn(other, reported)
+
+    def test_function_query_reports_no_samples_of_another_architecture(self):
+        index, _worker, other, same = self._stored_copies()
+        report = load_report("crossarch_aarch64_a.smda").toDict()
+        # one function of report a that matches report b by MinHash, one by PicHash
+        for offset in (0x100003438, 0x1000039A8):
+            single_function = {**report, "xcfg": {offset: report["xcfg"][offset]}}
+            self._relabel(index, other, "aarch64")
+            self.assertTrue({other, same} <= reported_sample_ids(index.getMatchesForSmdaFunction(single_function)))
+            self._relabel(index, other, "dalvik")
+            reported = reported_sample_ids(index.getMatchesForSmdaFunction(single_function))
+            self.assertIn(same, reported)
+            self.assertNotIn(other, reported)
+
+    def test_vs_reports_nothing_against_another_architecture(self):
+        index, worker, other, same = self._stored_copies()
+        self.assertIn(other, reported_sample_ids(MatcherVs(worker).getMatchesForSample(same, other)))
+        self._relabel(index, other, "dalvik")
+        self.assertNotIn(other, reported_sample_ids(MatcherVs(worker).getMatchesForSample(same, other)))
+
+    def test_vs_group_leaves_out_only_the_other_architecture(self):
+        index, worker, other, same = self._stored_copies()
+        own = index._storage.addSmdaReport(load_report("crossarch_aarch64_a.smda")).sample_id
+        worker.updateMinHashesForSample(own)
+        self._relabel(index, other, "dalvik")
+        reported = reported_sample_ids(MatcherVsGroup(worker).getMatchesForSample(own, [other, same]))
+        self.assertIn(same, reported)
+        self.assertNotIn(other, reported)
 
 
 @pytest.mark.mongo
