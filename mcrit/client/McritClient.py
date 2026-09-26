@@ -200,6 +200,7 @@ class McritClient:
         sample_group_only=False,
         shortlist_size=None,
         band_df_cutoff=None,
+        preset=None,
     ):
         params = {}
         if minhash_threshold is not None:
@@ -219,6 +220,9 @@ class McritClient:
             params["shortlist_size"] = shortlist_size
         if band_df_cutoff is not None:
             params["band_df_cutoff"] = band_df_cutoff
+        # a named bundle of knobs (hunt, identification); knobs given explicitly still win
+        if preset is not None:
+            params["preset"] = preset
         return params
 
     def respawn(self):
@@ -578,10 +582,11 @@ class McritClient:
         force_recalculation=False,
         shortlist_size=None,
         band_df_cutoff=None,
+        preset=None,
     ) -> Any:
         smda_json = smda_report.toDict()
         params = self._getMatchingRequestParams(
-            minhash_threshold, pichash_size, force_recalculation, band_matches_required, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff
+            minhash_threshold, pichash_size, force_recalculation, band_matches_required, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff, preset=preset
         )
         response = requests.post(f"{self.mcrit_server}/query", json=smda_json, headers=self.headers, params=params, timeout=self.timeout)
         if self.raw:
@@ -599,6 +604,7 @@ class McritClient:
         force_recalculation=False,
         shortlist_size=None,
         band_df_cutoff=None,
+        preset=None,
     ) -> Any:
         if disassemble_locally:
             disassembler = Disassembler()
@@ -613,10 +619,11 @@ class McritClient:
                 force_recalculation=force_recalculation,
                 shortlist_size=shortlist_size,
                 band_df_cutoff=band_df_cutoff,
+                preset=preset,
             )
 
         params = self._getMatchingRequestParams(
-            minhash_threshold, pichash_size, force_recalculation, band_matches_required, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff
+            minhash_threshold, pichash_size, force_recalculation, band_matches_required, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff, preset=preset
         )
         response = requests.post(f"{self.mcrit_server}/query/binary/mapped/{base_address}", binary, headers=self.headers, params=params, timeout=self.timeout)
         if self.raw:
@@ -633,6 +640,7 @@ class McritClient:
         force_recalculation=False,
         shortlist_size=None,
         band_df_cutoff=None,
+        preset=None,
     ) -> Any:
         if disassemble_locally:
             disassembler = Disassembler()
@@ -647,10 +655,11 @@ class McritClient:
                 force_recalculation=force_recalculation,
                 shortlist_size=shortlist_size,
                 band_df_cutoff=band_df_cutoff,
+                preset=preset,
             )
 
         params = self._getMatchingRequestParams(
-            minhash_threshold, pichash_size, force_recalculation, band_matches_required, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff
+            minhash_threshold, pichash_size, force_recalculation, band_matches_required, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff, preset=preset
         )
 
         response = requests.post(f"{self.mcrit_server}/query/binary", binary, headers=self.headers, params=params, timeout=self.timeout)
@@ -667,9 +676,10 @@ class McritClient:
         force_recalculation=False,
         shortlist_size=None,
         band_df_cutoff=None,
+        preset=None,
     ) -> Any:
         params = self._getMatchingRequestParams(
-            minhash_threshold, pichash_size, force_recalculation, band_matches_required, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff
+            minhash_threshold, pichash_size, force_recalculation, band_matches_required, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff, preset=preset
         )
         response = requests.get(f"{self.mcrit_server}/matches/sample/{sample_id}", headers=self.headers, params=params, timeout=self.timeout)
         if self.raw:
@@ -685,8 +695,9 @@ class McritClient:
         band_matches_required=None,
         force_recalculation=False,
         band_df_cutoff=None,
+        preset=None,
     ) -> Any:
-        params = self._getMatchingRequestParams(minhash_threshold, pichash_size, force_recalculation, band_matches_required, band_df_cutoff=band_df_cutoff)
+        params = self._getMatchingRequestParams(minhash_threshold, pichash_size, force_recalculation, band_matches_required, band_df_cutoff=band_df_cutoff, preset=preset)
         response = requests.get(f"{self.mcrit_server}/matches/sample/{sample_id}/{other_sample_id}", headers=self.headers, params=params, timeout=self.timeout)
         if self.raw:
             return response
@@ -701,6 +712,7 @@ class McritClient:
         band_matches_required=None,
         force_recalculation=False,
         band_df_cutoff=None,
+        preset=None,
     ) -> Any:
         # no shortlist_size: a cross compare is restricted to the samples it names, and a shortlist
         # ranked over the whole corpus could only drop some of them (#217)
@@ -711,6 +723,7 @@ class McritClient:
             band_matches_required,
             sample_group_only=sample_group_only,
             band_df_cutoff=band_df_cutoff,
+            preset=preset,
         )
         response = requests.get(f"{self.mcrit_server}/matches/sample/cross/{','.join([str(id) for id in sample_ids])}", headers=self.headers, params=params, timeout=self.timeout)
         if self.raw:
@@ -733,13 +746,21 @@ class McritClient:
         exclude_self_matches=False,
         shortlist_size=None,
         band_df_cutoff=None,
+        preset=None,
     ):
         """
         Get all matches for a SmdaReport with a single SmdaFunction
         Supported by mcritweb API pass-through
         """
         params = self._getMatchingRequestParams(
-            minhash_threshold, pichash_size, force_recalculation, band_matches_required, exclude_self_matches, shortlist_size=shortlist_size, band_df_cutoff=band_df_cutoff
+            minhash_threshold,
+            pichash_size,
+            force_recalculation,
+            band_matches_required,
+            exclude_self_matches,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            preset=preset,
         )
         response = requests.post(f"{self.mcrit_server}/query/function", json=smda_report.toDict(), headers=self.headers, params=params, timeout=self.timeout)
         if self.raw:

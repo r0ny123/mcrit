@@ -17,6 +17,43 @@ from mcrit.matchers.MatcherInterface import shortlistUnavailableReason
 MATCHING_KNOBS = ("minhash_threshold", "pichash_size", "band_matches_required", "shortlist_size", "band_df_cutoff", "shortlist_unavailable")
 
 
+# Named bundles of knobs, picked per request (#217). A preset sets the knobs it names unless the
+# request sets them itself; every other knob keeps its configured value. The values come from the
+# measurements in #217, band_matches_required crossed with the shortlist: turning the shortlist on
+# never moved top-10 or top-25 recall at any band_matches_required, while every value >= 2 did.
+# So both presets use k=1 (the default is 2). Identifying a sample turns the shortlist on - a
+# deployment's configured size, else 100, the size measured on #195 - and hunting, which wants the
+# tail a shortlist cuts off, turns it off.
+MATCHING_PRESETS = {
+    "hunt": {"band_matches_required": 1, "shortlist_size": 0},
+    "identification": {"band_matches_required": 1, "shortlist_size": 100},
+}
+
+
+def applyMatchingPreset(parameters: Dict[str, Any], preset: str, with_shortlist: bool = True, config=None) -> Dict[str, Any]:
+    """`parameters` with the knobs of `preset` filled in wherever they are left out (None or absent).
+
+    A preset that turns the shortlist on keeps the size `config` sets, if it sets one. A match
+    restricted to the samples it names takes no shortlist (`with_shortlist=False`), so a preset
+    applies the rest of its knobs there. The name is matched case-insensitively. Raises
+    MatchingParameterError for anything else, a list (a repeated query parameter) included.
+    """
+    name = preset.strip().lower() if isinstance(preset, str) else None
+    if name not in MATCHING_PRESETS:
+        raise MatchingParameterError(f"preset must be one of {', '.join(sorted(MATCHING_PRESETS))}, not {preset!r}.")
+    applied = dict(parameters)
+    for key, value in MATCHING_PRESETS[name].items():
+        if key == "shortlist_size":
+            if not with_shortlist:
+                continue
+            configured = getattr(getattr(config, "MINHASH_CONFIG", None), "MINHASH_MATCHING_SHORTLIST_SIZE", 0) or 0
+            if value > 0 and configured > 0:
+                value = configured
+        if applied.get(key) is None:
+            applied[key] = value
+    return applied
+
+
 def _canonical(value):
     """One representation per value, so equal knobs make equal cache keys: True and 1, 50.0 and 50."""
     if isinstance(value, bool):

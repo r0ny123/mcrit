@@ -32,6 +32,22 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   Refused rather than replaced or dropped, unlike the older options, because a changed value
   answers a question the caller did not ask and nothing in the response would say so.
 
+- **Matching presets, `hunt` and `identification`** ([#217]), per request as `preset=` on the
+  `/matches/sample/...` and `/query/...` endpoints, and as `preset` on `McritClient`'s matching
+  methods and `MinHashIndex`'s matching jobs. Both use `band_matches_required=1`, below the default
+  of 2: in the measurements on [#217] turning the shortlist on never moved top-10 or top-25 recall,
+  while every higher value did. `hunt` turns the shortlist off - the most exhaustive and slowest of
+  the measured configurations, the baseline the others were compared with. `identification` turns
+  it on, at the configured `MINHASH_MATCHING_SHORTLIST_SIZE` or else 100, the size measured on
+  [#195]; k=1 with the shortlist on was the only non-baseline combination that held recall at 1.000
+  on both queries measured, at about 3x the speed of k=1 without it. A preset only fills in the
+  knobs a request leaves out (the df cutoff keeps its configured value unless the request sets one)
+  and is expanded into their values before the job is submitted, so the job is keyed on what it
+  runs with, shares its result with the equivalent explicit request, and its report shows the
+  values rather than the preset's name. On a match restricted to the samples it names it applies
+  all but the shortlist. An unknown or repeated preset is refused with a 400. The "fast" preset the
+  issue floated is left out until a measurement defines it. `docs/TUNING.md` has the table.
+
 - **Every match report records its knobs under `info.matching`** ([#217]): `requested` (the values
   the job was submitted with; the server and `MinHashIndex` fill in the configured value of every
   knob a caller leaves out, so `null` appears for a knob the job does not take - the shortlist of a
@@ -677,3 +693,4 @@ date, the version, and what changed.
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
 [#196]: https://github.com/danielplohmann/mcrit/pull/196
 [#217]: https://github.com/danielplohmann/mcrit/issues/217
+[#195]: https://github.com/danielplohmann/mcrit/pull/195

@@ -4,7 +4,7 @@ from timeit import default_timer as timer
 import falcon
 from bson import json_util
 
-from mcrit.index.MatchingParameters import MatchingParameterError, resolveMatchingParams
+from mcrit.index.MatchingParameters import MatchingParameterError, applyMatchingPreset, resolveMatchingParams
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,15 +49,21 @@ def getMatchingParams(req_params, config=None, with_shortlist=True):
     Given the server's config, every matching knob the request leaves out is filled in with the
     value the job will run with (see mcrit.index.MatchingParameters, which MinHashIndex applies to
     direct callers as well). `with_shortlist=False` is for matches restricted to the samples they
-    name, which take no shortlist.
+    name, which take no shortlist. `preset` names a bundle of knobs (MATCHING_PRESETS) that fills in
+    the ones the request leaves out.
 
-    Raises MatchingParameterError for an unusable shortlist_size or band_df_cutoff, and for a
-    shortlist_size on a match that takes none.
+    Raises MatchingParameterError for an unusable shortlist_size or band_df_cutoff, for a
+    shortlist_size on a match that takes none, and for an unknown preset.
     """
     parameters = {}
+    preset = None
     for key, value in req_params.items():
         if key in ("shortlist_size", "band_df_cutoff"):
             parameters[key] = _parseJobKnob(key, value)
+            continue
+        if key == "preset":
+            # refused when unknown, like the two knobs above, rather than ignored
+            preset = value
             continue
         try:
             if key == "pichash_size":
@@ -86,6 +92,10 @@ def getMatchingParams(req_params, config=None, with_shortlist=True):
         # refused, not dropped, for the reason an unusable value is: the caller asked for something
         # this match does not do, and a silently different answer would not say so
         raise MatchingParameterError("shortlist_size does not apply to a match restricted to the samples it names (one against another, a group or a cross compare).")
+    if preset is not None:
+        # expanded into knob values here, so the job is keyed on the values it runs with and a preset
+        # request shares its job with the equivalent explicit one
+        parameters = applyMatchingPreset(parameters, preset, with_shortlist=with_shortlist, config=config)
     if config is not None:
         parameters = resolveMatchingParams(parameters, config, with_shortlist=with_shortlist)
     return parameters

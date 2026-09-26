@@ -13,7 +13,7 @@ from mcrit.config.McritConfig import McritConfig
 from mcrit.config.MinHashConfig import MinHashConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
-from mcrit.index.MatchingParameters import resolveMatchingParams
+from mcrit.index.MatchingParameters import applyMatchingPreset, resolveMatchingParams
 from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor
 from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.libs.utility import compress_encode, decompress_decode
@@ -409,6 +409,10 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             raise TypeError(f"{method_name} takes no shortlist: it is restricted to the samples it names.")
         if not with_shortlist:
             job_options = {name: value for name, value in job_options.items() if name not in ("shortlist_size", "shortlist_unavailable")}
+        # a preset is expanded into knob values, never stored: the job is keyed on what it runs with
+        preset = job_options.pop("preset", None)
+        if preset is not None:
+            knobs = applyMatchingPreset(knobs, preset, with_shortlist=with_shortlist, config=self.config)
         resolved = resolveMatchingParams(knobs, self.config, storage=self._storage, with_shortlist=with_shortlist)
         return getattr(super(), method_name)(*job_args, **resolved, **job_options)
 
@@ -522,9 +526,14 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         band_df_cutoff=None,
         shortlist_unavailable=None,
         force_recalculation=False,
+        preset=None,
     ):
         # force_recalculation is accepted for the query parameter's sake and has nothing to do:
         # a function query runs in the request and is never cached
+        if preset is not None:
+            names = ("minhash_threshold", "pichash_size", "band_matches_required", "shortlist_size", "band_df_cutoff")
+            knobs = applyMatchingPreset(dict(zip(names, (minhash_threshold, pichash_size, band_matches_required, shortlist_size, band_df_cutoff))), preset, config=self.config)
+            minhash_threshold, pichash_size, band_matches_required, shortlist_size, band_df_cutoff = (knobs[name] for name in names)
         # convert function to FunctionEntry
         smda_report = SmdaReport.fromDict(smda_report_with_function)
         assert smda_report is not None and smda_report.xcfg is not None and smda_report.sha256 is not None

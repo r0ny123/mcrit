@@ -121,6 +121,29 @@ to one of them is refused with a 400. So is a request's `band_df_cutoff` above
 `STORAGE_BAND_BUCKET_SIZE` (with band bucketing on), for the reason such a configured cutoff is
 refused at startup.
 
+Two presets name the combinations that matter, per request as `preset=` (and `preset` on
+`McritClient`'s matching methods and on a `MinHashIndex` matching job):
+
+| preset | sets | when |
+|---|---|---|
+| `hunt` | `band_matches_required=1`, `shortlist_size=0` | looking for every related sample, the tail included; the slowest |
+| `identification` | `band_matches_required=1`, shortlist on | finding out what a sample is |
+
+`identification` uses the configured `MINHASH_MATCHING_SHORTLIST_SIZE` if one is set, and 100 (the
+size measured on #195) if not. A preset only fills in what the request leaves out:
+`preset=identification&shortlist_size=25` runs with a shortlist of 25. Everything a preset does not
+name keeps its configured value, `STORAGE_BAND_DF_CUTOFF` included; add `band_df_cutoff=0` to a hunt
+that must not skip any posting list. The values come from the 48 runs measured on #217 (two queries,
+`band_matches_required` crossed with the shortlist): turning the shortlist on never moved top-10 or
+top-25 recall at any `band_matches_required`, while every value of 2 or more did - so both presets
+use 1, below the default of 2 - and `identification` was the only non-baseline configuration that
+held 1.000 on both queries, at about 3x the speed of `band_matches_required=1` without a shortlist.
+Hunting wants exactly the tail a shortlist cuts off. A third, "fast", has no measured definition
+yet, so there is none. The preset is expanded into knob values before the job is submitted, so a
+preset request and the equivalent explicit one share one job; the report's `info.matching` shows the
+values, not the preset's name. On a match restricted to the samples it names, a preset applies all
+but the shortlist. An unknown preset is refused with a 400.
+
 A shortlist needs the function range index to be complete. A database created empty on a version
 that maintains it is; **one that already held samples is not until `rebuildFunctionRangeIndex` has
 run once** (MCRIT only vouches for an index it built from the first sample), and it is incomplete

@@ -3,6 +3,7 @@
 import json
 import unittest
 from copy import deepcopy
+from typing import Any, List
 from unittest.mock import MagicMock, patch
 
 import falcon
@@ -12,7 +13,7 @@ from smda.common.SmdaReport import SmdaReport
 from mcrit.client.McritClient import McritClient
 from mcrit.config.MinHashConfig import MinHashConfig
 from mcrit.config.StorageConfig import StorageConfig
-from mcrit.index.MatchingParameters import MATCHING_KNOBS, resolveMatchingParams
+from mcrit.index.MatchingParameters import MATCHING_KNOBS, MATCHING_PRESETS, applyMatchingPreset, resolveMatchingParams
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.matchers.MatcherSample import MatcherSample
 from mcrit.matchers.MatcherVs import MatcherVs
@@ -747,6 +748,184 @@ class BucketSizeTest(unittest.TestCase):
                     self.assertNotEqual(400, response.status_code)
                 else:
                     self.assertEqual(100, getattr(index, method).call_args.kwargs["band_df_cutoff"])
+
+
+class PresetTest(unittest.TestCase):
+    """Named bundles of knobs a caller picks per query (#217, step 4)."""
+
+    def test_a_preset_fills_in_only_what_the_request_leaves_out(self):
+        self.assertEqual({"band_matches_required": 1, "shortlist_size": 100}, applyMatchingPreset({}, "identification"))
+        self.assertEqual({"band_matches_required": 3, "shortlist_size": 100}, applyMatchingPreset({"band_matches_required": 3}, "identification"))
+        # None is "not set", as everywhere else
+        self.assertEqual({"band_matches_required": 1, "shortlist_size": 0}, applyMatchingPreset({"band_matches_required": None, "shortlist_size": 0}, "identification"))
+        self.assertEqual({"band_matches_required": 1, "shortlist_size": 0}, applyMatchingPreset({}, "hunt"))
+        # a match restricted to the samples it names takes no shortlist, so it gets the rest
+        self.assertEqual({"band_matches_required": 1}, applyMatchingPreset({}, "identification", with_shortlist=False))
+        self.assertEqual({"band_matches_required": 1}, applyMatchingPreset({}, "hunt", with_shortlist=False))
+        self.assertEqual({"hunt", "identification"}, set(MATCHING_PRESETS))
+        # matched case-insensitively, for the server and a direct caller alike
+        self.assertEqual({"band_matches_required": 1, "shortlist_size": 0}, applyMatchingPreset({}, " Hunt "))
+
+    def test_identification_keeps_a_configured_shortlist_size(self):
+        """A deployment that sized its shortlist keeps that size; the preset only turns it on."""
+        self.assertEqual(500, applyMatchingPreset({}, "identification", config=configured(shortlist_size=500))["shortlist_size"])
+        self.assertEqual(100, applyMatchingPreset({}, "identification", config=configured(shortlist_size=0))["shortlist_size"])
+        # hunt turns it off whatever is configured
+        self.assertEqual(0, applyMatchingPreset({}, "hunt", config=configured(shortlist_size=500))["shortlist_size"])
+
+    def test_an_unknown_preset_is_refused(self):
+        # anything a request can carry, a repeated parameter (a list) included
+        unknown: List[Any] = ["fast", "", "Hunt!", None, ["hunt", "hunt"]]
+        for preset in unknown:
+            with self.subTest(preset=preset), self.assertRaisesRegex(MatchingParameterError, "preset must be one of hunt, identification"):
+                applyMatchingPreset({}, preset)
+        # the refusal quotes what the caller sent
+        with self.assertRaisesRegex(MatchingParameterError, "not 'Fast'"):
+            applyMatchingPreset({}, "Fast")
+
+    def test_the_server_expands_it_into_the_knob_values(self):
+        mcrit_config = configured(shortlist_size=10)
+        defaults = getMatchingParams({}, mcrit_config)
+        self.assertEqual(2, defaults["band_matches_required"])
+        self.assertEqual({**defaults, "band_matches_required": 1, "shortlist_size": 10}, getMatchingParams({"preset": "identification"}, mcrit_config))
+        self.assertEqual({**defaults, "band_matches_required": 1, "shortlist_size": 0}, getMatchingParams({"preset": "hunt"}, mcrit_config))
+        self.assertEqual({**defaults, "band_matches_required": 1, "shortlist_size": 10}, getMatchingParams({"preset": " Identification "}, mcrit_config))
+        unconfigured = configured()
+        self.assertEqual(100, getMatchingParams({"preset": "identification"}, unconfigured)["shortlist_size"])
+        explicit = getMatchingParams({"preset": "identification", "band_matches_required": "2", "shortlist_size": "25"}, mcrit_config)
+        self.assertEqual((2, 25), (explicit["band_matches_required"], explicit["shortlist_size"]))
+        for request in ({"preset": "fast"}, {"preset": ["hunt", "hunt"]}):
+            with self.subTest(request=request), self.assertRaises(MatchingParameterError):
+                getMatchingParams(request, mcrit_config)
+
+    def test_matches_restricted_to_named_samples_take_the_rest_of_a_preset(self):
+        mcrit_config = configured(shortlist_size=10)
+        for request, with_shortlist in (({"preset": "identification"}, False), ({"preset": "identification", "sample_group_only": "true"}, True)):
+            with self.subTest(request=request):
+                parameters = getMatchingParams(request, mcrit_config, with_shortlist=with_shortlist)
+                self.assertEqual(1, parameters["band_matches_required"])
+                self.assertNotIn("shortlist_size", parameters)
+
+    def test_a_preset_request_shares_its_job_with_the_explicit_one(self):
+        """The preset is expanded before submission, so the job is keyed on the values it runs with."""
+        index = MinHashIndex(config=configured())
+        sample_id = index._storage.addSmdaReport(SmdaReport.fromFile("tests/example_report.smda")).sample_id
+        app = falcon.App()
+        app.add_route("/matches/sample/{sample_id:int}", MatchResource(index), suffix="sample")
+        client = falcon.testing.TestClient(app)
+        by_preset = client.simulate_get(f"/matches/sample/{sample_id}", query_string="preset=identification").json["data"]
+        explicit = client.simulate_get(f"/matches/sample/{sample_id}", query_string="band_matches_required=1&shortlist_size=100").json["data"]
+        self.assertEqual(by_preset, explicit)
+        self.assertNotIn("preset", json.loads(index.getJobData(by_preset)["payload"]["params"]))
+        self.assertNotEqual(by_preset, client.simulate_get(f"/matches/sample/{sample_id}", query_string="preset=hunt").json["data"])
+        # a direct caller gets the same job
+        self.assertEqual(by_preset, index.getMatchesForSample(sample_id, preset="identification"))
+
+    def test_every_job_method_takes_a_preset_from_a_direct_caller(self):
+        index = MinHashIndex(config=configured(shortlist_size=10))
+        remote = MinHashIndex.__mro__[1]
+        calls = {
+            "getMatchesForSample": ((7,), True),
+            "getMatchesForSmdaReport": (({},), True),
+            "getMatchesForMappedBinary": ((b"MZ", 0x1000), True),
+            "getMatchesForUnmappedBinary": ((b"MZ",), True),
+            "getMatchesForSampleVs": ((7, 8), False),
+            "getMatchesForSampleVsGroup": ((7, [8, 9]), False),
+        }
+        for name, (args, takes_shortlist) in calls.items():
+            with self.subTest(name), patch.object(remote, name, create=True) as submit:
+                getattr(index, name)(*args, preset="identification")
+                kwargs = submit.call_args.kwargs
+                self.assertNotIn("preset", kwargs)
+                self.assertEqual(1, kwargs["band_matches_required"])
+                self.assertEqual(10 if takes_shortlist else None, kwargs.get("shortlist_size"))
+                with self.assertRaises(MatchingParameterError):
+                    getattr(index, name)(*args, preset="fast")
+                getattr(index, name)(*args, preset="Hunt")
+                self.assertEqual(0 if takes_shortlist else None, submit.call_args.kwargs.get("shortlist_size"))
+        with patch("mcrit.index.MinHashIndex.MatcherQueryFunction") as matcher:
+            matcher.return_value.getMatchesForSmdaFunction.return_value = {"info": {"job": {}}}
+            with patch("mcrit.index.MinHashIndex.SmdaReport.fromDict") as from_dict:
+                from_dict.return_value = MagicMock(xcfg={0x1000: {}}, sha256="ab" * 32)
+                index.getMatchesForSmdaFunction(MagicMock(), preset="identification", band_matches_required=2)
+            self.assertEqual((2, 10), (matcher.call_args.kwargs["band_matches_required"], matcher.call_args.kwargs["shortlist_size"]))
+
+    def test_a_cross_compare_hands_the_preset_to_its_children(self):
+        """Each child applies it; a 1-vs-corpus child keeps the shortlist of 0 a cross compare forces."""
+        for sample_group_only, child in ((False, "getMatchesForSample"), (True, "getMatchesForSampleVsGroup")):
+            with self.subTest(sample_group_only=sample_group_only):
+                index = MagicMock()
+                MinHashIndex.getMatchesCross(index, [1, 2], sample_group_only=sample_group_only, preset="identification")
+                kwargs = getattr(index, child).call_args.kwargs
+                self.assertEqual("identification", kwargs["preset"])
+                self.assertEqual(None if sample_group_only else 0, kwargs.get("shortlist_size"))
+        # and the child, applying it, keeps that explicit 0
+        self.assertEqual({"band_matches_required": 1, "shortlist_size": 0}, applyMatchingPreset({"shortlist_size": 0}, "identification"))
+
+    def test_every_matching_route_refuses_an_unknown_preset_and_applies_a_known_one(self):
+        index = MagicMock()
+        index.config = configured(shortlist_size=10)
+        index.isSampleId.return_value = True
+        app = falcon.App()
+        match_resource, query_resource = MatchResource(index), QueryResource(index)
+        app.add_route("/matches/sample/{sample_id:int}", match_resource, suffix="sample")
+        app.add_route("/matches/sample/{sample_id:int}/{sample_id_b:int}", match_resource, suffix="sample_vs")
+        app.add_route("/matches/sample/cross/{sample_ids}", match_resource, suffix="sample_cross")
+        app.add_route("/query", query_resource, suffix="query_smda")
+        app.add_route("/query/function", query_resource, suffix="query_smda_function")
+        client = falcon.testing.TestClient(app)
+        requests = {
+            "getMatchesForSample": (lambda query: client.simulate_get("/matches/sample/1", query_string=query), True),
+            "getMatchesForSampleVs": (lambda query: client.simulate_get("/matches/sample/1/2", query_string=query), False),
+            "getMatchesCross": (lambda query: client.simulate_get("/matches/sample/cross/1,2", query_string=query), False),
+            "getMatchesForSmdaReport": (lambda query: client.simulate_post("/query", query_string=query, json={}), True),
+            "getMatchesForSmdaFunction": (lambda query: client.simulate_post("/query/function", query_string=query, json={}), True),
+        }
+        for method, (request, takes_shortlist) in requests.items():
+            with self.subTest(method):
+                response = request("preset=fast")
+                self.assertEqual(400, response.status_code)
+                self.assertIn("preset must be one of", response.json["data"]["message"])
+                getattr(index, method).assert_not_called()
+                request("preset=identification")
+                kwargs = getattr(index, method).call_args.kwargs
+                self.assertNotIn("preset", kwargs)
+                self.assertEqual(1, kwargs["band_matches_required"])
+                self.assertEqual(10 if takes_shortlist else None, kwargs.get("shortlist_size"))
+
+    def test_the_client_sends_it_only_when_given(self):
+        client = McritClient("http://mcrit.test")
+        with patch("mcrit.client.McritClient.requests.get") as get:
+            get.return_value.status_code = 200
+            get.return_value.json.return_value = {"status": "successful", "data": "0123456789abcdef01234567"}
+            for call in (
+                lambda preset: client.requestMatchesForSample(7, preset=preset),
+                lambda preset: client.requestMatchesForSampleVs(7, 8, preset=preset),
+                lambda preset: client.requestMatchesCross([7, 8], preset=preset),
+            ):
+                call("identification")
+                self.assertEqual("identification", get.call_args.kwargs["params"]["preset"])
+                call(None)
+                self.assertNotIn("preset", get.call_args.kwargs["params"])
+        with patch("mcrit.client.McritClient.requests.post") as post:
+            post.return_value.status_code = 200
+            post.return_value.json.return_value = {"status": "successful", "data": "0123456789abcdef01234567"}
+            client.requestMatchesForSmdaReport(MagicMock(toDict=MagicMock(return_value={})), preset="hunt")
+            self.assertEqual("hunt", post.call_args.kwargs["params"]["preset"])
+            client.getMatchesForSmdaFunction(MagicMock(toDict=MagicMock(return_value={})), preset="hunt")
+            self.assertEqual("hunt", post.call_args.kwargs["params"]["preset"])
+            client.requestMatchesForUnmappedBinary(b"MZ", disassemble_locally=False, preset="hunt")
+            self.assertEqual("hunt", post.call_args.kwargs["params"]["preset"])
+            client.requestMatchesForMappedBinary(b"MZ", 0x1000, disassemble_locally=False, preset="hunt")
+            self.assertEqual("hunt", post.call_args.kwargs["params"]["preset"])
+        # disassembled locally, both hand it on to the report query
+        with patch.object(McritClient, "requestMatchesForSmdaReport") as report_query, patch("mcrit.client.McritClient.Disassembler") as disassembler:
+            disassembler.return_value.disassembleBuffer.return_value.status = "ok"
+            disassembler.return_value.disassembleUnmappedBuffer.return_value.status = "ok"
+            client.requestMatchesForMappedBinary(b"MZ", 0x1000, preset="identification")
+            self.assertEqual("identification", report_query.call_args.kwargs["preset"])
+            client.requestMatchesForUnmappedBinary(b"MZ", preset="identification")
+            self.assertEqual("identification", report_query.call_args.kwargs["preset"])
 
 
 if __name__ == "__main__":
