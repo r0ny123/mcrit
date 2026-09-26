@@ -23,6 +23,19 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `escaper_fingerprint` in `/status`, are unchanged; an import compares only the architectures the
   export holds samples of. An export made before carries the Intel fingerprint alone: it is compared
   as before when it holds Intel samples, and otherwise logs that it has nothing to compare.
+- **`recalculatePicHashes` also redoes the block hashes of non-Intel samples that a picblocks
+  before 2.1.0 computed**, which escaped every block as Intel code, and `/status` counts them as
+  `num_samples_with_stale_picblockhashes` ([#240]). Samples stored from now on record the
+  picblocks their block hashes came from (`picblockhash_version`); a non-Intel sample without that
+  record (every one stored or imported before), or with an older one, is rehashed and then
+  recorded. Intel samples are left to the existing SMDA version check, since their block hashes did
+  not change. NOTE that a sample with a function whose disassembly is gone (e.g. dropped with
+  `STORAGE_DROP_DISASSEMBLY`) cannot be rehashed completely, so it stays counted until it is
+  deleted and submitted again; that rewritten block hashes mark the picblockhash index incomplete
+  until `rebuildPicBlockHashIndex` runs, as any recalculation that changes block hashes does; and
+  that unique-blocks results computed before stay in the job cache until requested with
+  `force_recalculation`. MongoDB storage only; the in-memory storage has no recalculation and leaves
+  the count out of `/status`.
 
 ### Fixed
 
@@ -43,9 +56,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   picblocks 2.1.0, which escaped every block as Intel code before ([#93]). picblocks was unpinned
   above 1.1.2, so installations set up since its 2.1.0 release on 2026-09-13 compute the new hashes
   already; this makes it the floor. Intel block hashes are unchanged. Non-Intel samples indexed
-  before keep the block hashes they were stored with, and `recalculatePicHashes` only revisits
-  samples of old SMDA versions, so their unique blocks compare correctly only with samples indexed
-  before; submitting such samples again gives them the new hashes.
+  before keep the block hashes they were stored with, so their unique blocks compare correctly only
+  with samples indexed before, until `recalculatePicHashes` redoes them ([#240]).
 
 ## [1.12.0] - 2026-09-25
 
@@ -619,3 +631,4 @@ date, the version, and what changed.
 [#207]: https://github.com/danielplohmann/mcrit/issues/207
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
 [#93]: https://github.com/danielplohmann/mcrit/issues/93
+[#240]: https://github.com/danielplohmann/mcrit/issues/240
