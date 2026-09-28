@@ -3,7 +3,7 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from smda.common.SmdaReport import SmdaReport
 from smda.SmdaConfig import SmdaConfig
@@ -13,6 +13,7 @@ from mcrit.config.McritConfig import McritConfig
 from mcrit.config.MinHashConfig import MinHashConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
+from mcrit.index.MatchingParameters import applyMatchingPreset, resolveMatchingParams
 from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor
 from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.libs.utility import compress_encode, decompress_decode
@@ -390,8 +391,122 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         report = SmdaReport.fromDict(report_json)
         return self.addReport(report, calculate_hashes=calculate_hashes, calculate_matches=calculate_matches)
 
+    def modifyFunction(self, function_id: int, update_information: dict, username: Optional[str] = None) -> bool:
+        # unlike modifySample/modifyFamily this touches one document and no statistics, so it
+        # is answered synchronously instead of as a job (fkie-cad/mcritweb#72)
+        return self.getStorage().modifyFunction(function_id, update_information, username=username)
+
+    #### MATCHING JOBS ####
+    # Each submits its job with every matching knob resolved to the value the job runs with, so
+    # the job's arguments - its cache key - hold those values rather than the absence of the ones
+    # a caller left out (#217). The server resolves them as well; resolving again is a no-op.
+
+    def _submitMatchingJob(self, method_name, job_args, knobs, job_options, with_shortlist=True):
+        # None is "not set", as everywhere else, and passes
+        if not with_shortlist and any(job_options.get(name) is not None for name in ("shortlist_size", "shortlist_unavailable")):
+            # refused here rather than stored as an argument the worker method does not take,
+            # which would fail the job on every attempt
+            raise TypeError(f"{method_name} takes no shortlist: it is restricted to the samples it names.")
+        if not with_shortlist:
+            job_options = {name: value for name, value in job_options.items() if name not in ("shortlist_size", "shortlist_unavailable")}
+        # a preset is expanded into knob values, never stored: the job is keyed on what it runs with
+        preset = job_options.pop("preset", None)
+        if preset is not None:
+            knobs = applyMatchingPreset(knobs, preset, with_shortlist=with_shortlist, config=self.config)
+        resolved = resolveMatchingParams(knobs, self.config, storage=self._storage, with_shortlist=with_shortlist)
+        return getattr(super(), method_name)(*job_args, **resolved, **job_options)
+
+    def getMatchesForSample(
+        self, sample_id, minhash_threshold=None, pichash_size=None, band_matches_required=None, shortlist_size=None, band_df_cutoff=None, shortlist_unavailable=None, **job_options
+    ):
+        knobs = dict(
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
+            band_matches_required=band_matches_required,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
+        )
+        return self._submitMatchingJob("getMatchesForSample", (sample_id,), knobs, job_options)
+
+    def getMatchesForSmdaReport(
+        self,
+        report_json,
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        shortlist_size=None,
+        band_df_cutoff=None,
+        shortlist_unavailable=None,
+        **job_options,
+    ):
+        knobs = dict(
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
+            band_matches_required=band_matches_required,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
+        )
+        return self._submitMatchingJob("getMatchesForSmdaReport", (report_json,), knobs, job_options)
+
+    def getMatchesForMappedBinary(
+        self,
+        binary,
+        base_address,
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        shortlist_size=None,
+        band_df_cutoff=None,
+        shortlist_unavailable=None,
+        **job_options,
+    ):
+        knobs = dict(
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
+            band_matches_required=band_matches_required,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
+        )
+        return self._submitMatchingJob("getMatchesForMappedBinary", (binary, base_address), knobs, job_options)
+
+    def getMatchesForUnmappedBinary(
+        self, binary, minhash_threshold=None, pichash_size=None, band_matches_required=None, shortlist_size=None, band_df_cutoff=None, shortlist_unavailable=None, **job_options
+    ):
+        knobs = dict(
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
+            band_matches_required=band_matches_required,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
+        )
+        return self._submitMatchingJob("getMatchesForUnmappedBinary", (binary,), knobs, job_options)
+
+    def getMatchesForSampleVs(self, sample_id, other_sample_id, minhash_threshold=None, pichash_size=None, band_matches_required=None, band_df_cutoff=None, **job_options):
+        # restricted to the sample it names: no shortlist
+        knobs = dict(minhash_threshold=minhash_threshold, pichash_size=pichash_size, band_matches_required=band_matches_required, band_df_cutoff=band_df_cutoff)
+        return self._submitMatchingJob("getMatchesForSampleVs", (sample_id, other_sample_id), knobs, job_options, with_shortlist=False)
+
+    def getMatchesForSampleVsGroup(self, sample_id, other_sample_ids, minhash_threshold=None, pichash_size=None, band_matches_required=None, band_df_cutoff=None, **job_options):
+        # restricted to the samples it names: no shortlist
+        knobs = dict(minhash_threshold=minhash_threshold, pichash_size=pichash_size, band_matches_required=band_matches_required, band_df_cutoff=band_df_cutoff)
+        return self._submitMatchingJob("getMatchesForSampleVsGroup", (sample_id, other_sample_ids), knobs, job_options, with_shortlist=False)
+
     def getMatchesCross(self, sample_ids: List[int], sample_group_only=False, force_recalculation=False, username=None, **params):
         sample_to_job_id = {}
+        # a cross compare reads the named samples out of each child's report, so a shortlist -
+        # ranked over the whole corpus - could only drop some of them: vs-group children take
+        # none, and 1-vs-corpus children are asked for none rather than the configured one. One a
+        # caller asks for is refused, as on the vs routes, rather than quietly dropped
+        if params.get("shortlist_size") is not None:
+            raise TypeError("getMatchesCross takes no shortlist: it reads the samples it names out of each report.")
+        params.pop("shortlist_size", None)
+        params.pop("shortlist_unavailable", None)
+        if not sample_group_only:
+            params["shortlist_size"] = 0
         for id in sample_ids:
             if sample_group_only:
                 job_id = self.getMatchesForSampleVsGroup(id, [sid for sid in sample_ids if sid != id], force_recalculation=force_recalculation, username=username, **params)
@@ -400,7 +515,25 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             sample_to_job_id[id] = job_id
         return self.combineMatchesToCross(sample_to_job_id, await_jobs=[*sample_to_job_id.values()], force_recalculation=force_recalculation, username=username)
 
-    def getMatchesForSmdaFunction(self, smda_report_with_function: SmdaReport, minhash_threshold=None, pichash_size=None, band_matches_required=None, exclude_self_matches=False):
+    def getMatchesForSmdaFunction(
+        self,
+        smda_report_with_function: SmdaReport,
+        minhash_threshold=None,
+        pichash_size=None,
+        band_matches_required=None,
+        exclude_self_matches=False,
+        shortlist_size=None,
+        band_df_cutoff=None,
+        shortlist_unavailable=None,
+        force_recalculation=False,
+        preset=None,
+    ):
+        # force_recalculation is accepted for the query parameter's sake and has nothing to do:
+        # a function query runs in the request and is never cached
+        if preset is not None:
+            names = ("minhash_threshold", "pichash_size", "band_matches_required", "shortlist_size", "band_df_cutoff")
+            knobs = applyMatchingPreset(dict(zip(names, (minhash_threshold, pichash_size, band_matches_required, shortlist_size, band_df_cutoff))), preset, config=self.config)
+            minhash_threshold, pichash_size, band_matches_required, shortlist_size, band_df_cutoff = (knobs[name] for name in names)
         # convert function to FunctionEntry
         smda_report = SmdaReport.fromDict(smda_report_with_function)
         assert smda_report is not None and smda_report.xcfg is not None and smda_report.sha256 is not None
@@ -408,7 +541,16 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         if len(smda_report.xcfg) != 1:
             raise ValueError("SmdaReport has to contain exactly one function.")
         function_offset = int([k for k in smda_report.xcfg.keys()][0])
-        matcher = MatcherQueryFunction(self, minhash_threshold=None, pichash_size=None, band_matches_required=band_matches_required, exclude_self_matches=False)
+        matcher = MatcherQueryFunction(
+            self,
+            minhash_threshold=minhash_threshold,
+            pichash_size=pichash_size,
+            band_matches_required=band_matches_required,
+            exclude_self_matches=exclude_self_matches,
+            shortlist_size=shortlist_size,
+            band_df_cutoff=band_df_cutoff,
+            shortlist_unavailable=shortlist_unavailable,
+        )
         # run Matcher for a single function
         match_report = matcher.getMatchesForSmdaFunction(smda_report)
         function_identifier = f"{smda_report.sha256[:8]}@0x{function_offset:x}"
@@ -448,6 +590,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
     def getFamily(self, family_id):
         return self.getStorage().getFamily(family_id)
 
+    def getFamiliesByIds(self, family_ids: List[int]) -> Dict[int, FamilyEntry]:
+        return self.getStorage().getFamilyEntriesByIds(family_ids)
+
     def getFunctionsBySampleId(self, sample_id):
         return self.getStorage().getFunctionsBySampleId(sample_id)
 
@@ -468,6 +613,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
 
     def getSampleById(self, sample_id):
         return self.getStorage().getSampleById(sample_id)
+
+    def getSamplesByIds(self, sample_ids: List[int]) -> Dict[int, SampleEntry]:
+        return self.getStorage().getSampleEntriesByIds(sample_ids)
 
     def getSamples(self, start_index, limit):
         return self.getStorage().getSamples(start_index, limit)
@@ -583,7 +731,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             last_element_key = None
 
         forward_cursor_str = None
-        if last_element_key:
+        # `is not None`, not truthiness: the key is an id, and a page whose last entry is
+        # id 0 (function 0, sample 0, the unknown family 0) used to end the listing there
+        if last_element_key is not None:
             last_result = search_results_objects[last_element_key]
             forward_cursor = MinimalSearchCursor()
             forward_cursor.is_forward_search = True ^ is_backward_search  # switch for backward search, because of swap
@@ -619,9 +769,12 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 (standard_sort, is_ascending),
             ]
         else:
+            # the tie-break follows the direction of the sort field: the order stays total and
+            # deterministic, and a single compound index on (field, id) then serves the
+            # descending order as well, walked backwards (fkie-cad/mcritweb#59)
             sort_by_list = [
                 (sort_by, is_ascending),
-                (standard_sort, True),
+                (standard_sort, is_ascending),
             ]
         return sort_by_list
 

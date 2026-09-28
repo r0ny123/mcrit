@@ -34,12 +34,17 @@ class BaseRemoteCallerClass:
         LOGGER.debug("called getQueueStats()")
         return self.queue.getQueueStatistics(refresh=refresh)
 
-    def getQueueData(self, start_index: int, limit: int, method=None, state=None, filter=None, ascending=False) -> List[dict]:
-        LOGGER.debug(f"called getQueueData(start_index={start_index}, limit={method}, method={method}, state={state}, filter={filter}, ascending={ascending}):")
-        if filter is not None:
-            # TODO apply filter to more fields
-            return [job._data for job in self.queue.get_jobs(start_index, limit, method, state, ascending) if filter in job.parameters]
-        return [job._data for job in self.queue.get_jobs(start_index, limit, method, state, ascending)]
+    def getQueueData(self, start_index: int, limit: int, method=None, state=None, filter=None, ascending=False, username=None, sample_ids=None, job_ids=None) -> List[dict]:
+        LOGGER.debug(
+            f"called getQueueData(start_index={start_index}, limit={limit}, method={method}, state={state}, filter={filter}, ascending={ascending}, username={username}, sample_ids={sample_ids}, job_ids={job_ids}):"
+        )
+        # the filter is part of the query, so a page is a page of the matches (fkie-cad/mcritweb#57)
+        jobs = self.queue.get_jobs(start_index, limit, method=method, state=state, ascending=ascending, filter=filter, username=username, sample_ids=sample_ids, job_ids=job_ids)
+        return [job._data for job in jobs]
+
+    def getQueueCount(self, method=None, state=None, filter=None, username=None, sample_ids=None, job_ids=None) -> int:
+        LOGGER.debug(f"called getQueueCount(method={method}, state={state}, filter={filter}, username={username}, sample_ids={sample_ids}, job_ids={job_ids}):")
+        return self.queue.get_job_count(method=method, state=state, filter=filter, username=username, sample_ids=sample_ids, job_ids=job_ids)
 
     def deleteQueueData(self, method=None, created_before=None, finished_before=None):
         LOGGER.debug(f"called getQueueData(filter={method}, filter={filter}, created_before={created_before}, finished_before={finished_before}):")
@@ -138,6 +143,16 @@ def QueueRemoteCaller(clsCallee):
 
 
 ########### END Class Metaprogramming
+
+
+class UncacheableResult(dict):
+    """A job result that is right for the run that produced it but must not answer a later request.
+
+    A job is reused for any later request with the same descriptor. A method returns its result
+    wrapped in this when the result depends on state its arguments do not capture - a matching job
+    whose shortlist fell back because the function range index went incomplete after the job was
+    submitted (#217) - and the worker then marks the job so the queue's cache lookup skips it.
+    """
 
 
 # Wrapper that creates a remote call proxy for a given method
@@ -266,7 +281,10 @@ def add_job_id_to_files(self, job_id, grid_params):
 def _createJobPayload(method_name, params, grid_params, descriptor):
     payload = {
         "method": method_name,
-        "params": json.dumps(params),
+        # not ASCII-escaped: the serialized parameters are what the job listing's text
+        # filter matches against, and a filter typed as "Müller" must find a job whose
+        # parameter reads "Müller" in the listing (fkie-cad/mcritweb#57)
+        "params": json.dumps(params, ensure_ascii=False),
         "file_params": json.dumps(grid_params),
         "descriptor": descriptor,
     }
@@ -361,6 +379,16 @@ class QueueRemoteCallee(BaseRemoteCallerClass):
             return self._executeJobProfiled(job)
         return self._executeJobImpl(job)
 
+    def _storeJobResult(self, job, result):
+        """Store a finished job's result and answer its id; every execution path goes through here.
+
+        A result returned as an UncacheableResult marks its job first, so that no identical request
+        is handed it between the job completing and being marked.
+        """
+        if isinstance(result, UncacheableResult):
+            job.mark_uncacheable()
+        return self.queue._dicts_to_grid(result, metadata={"result": True, "job": job.job_id})
+
     def _executeJobImpl(self, job):
         if time.time() - self.t_last_cleanup >= self.queue.clean_interval:
             try:
@@ -376,7 +404,7 @@ class QueueRemoteCallee(BaseRemoteCallerClass):
                 result = self._executeJobPayload(j["payload"], job)
                 LOGGER.debug("Remote Job Result: %s", result)
                 # ensure we always have a job_id for finished job payloads
-                job.result = self.queue._dicts_to_grid(result, metadata={"result": True, "job": job.job_id})
+                job.result = self._storeJobResult(job, result)
                 LOGGER.info("Finished Remote Job: %s", job)
         except Exception:
             # the failure may include the Job.__exit__ error() write itself (e.g. the

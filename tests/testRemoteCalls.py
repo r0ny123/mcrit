@@ -7,6 +7,7 @@ from unittest import TestCase
 
 import pymongo
 import pytest
+from bson import ObjectId
 from bson.json_util import dumps, loads
 
 from mcrit.config.QueueConfig import QueueConfig
@@ -216,6 +217,35 @@ class LocalQueueRemoteCallTest(TestCase):
                 self.assertNotEqual(job_id_1, job_id_2)
         self.queue.clear()
 
+    def _set_job_fields(self, job_id, **fields):
+        self.queue._jobs[job_id].update(fields)
+
+    def _unknown_job_id(self):
+        return "no-such-job"
+
+    def test_job_cache_prefers_finished_and_skips_failed(self):
+        # fkie-cad/mcritweb#47: the cache answers with the newest finished job, falls back to an unfinished one
+        # only when no finished job exists, and never answers with a failed or terminated job
+        kwparams = {"test_cache_preference": True}
+        job_id_1 = self.caller.test(**kwparams)
+        self.caller.awaitResult(job_id_1)
+        job_id_2 = self.caller.test(force_recalculation=True, **kwparams)
+        self.caller.awaitResult(job_id_2)
+        self.assertNotEqual(job_id_1, job_id_2)
+        self.assertEqual(job_id_2, self.caller.test(**kwparams))
+        # the newer job still running: the older finished one is the usable result
+        self._set_job_fields(job_id_2, finished_at=None)
+        self.assertEqual(job_id_1, self.caller.test(**kwparams))
+        # nothing usable left: a new job is created instead of pointing at a dead one
+        self._set_job_fields(job_id_1, attempts_left=0)
+        self._set_job_fields(job_id_2, terminated=True)
+        job_id_3 = self.caller.test(**kwparams)
+        self.assertNotIn(job_id_3, (job_id_1, job_id_2))
+        # a lookup of an unknown job must not break the cache afterwards
+        self.assertIsNone(self.queue.get_job(self._unknown_job_id()))
+        self.assertEqual(job_id_3, self.caller.test(**kwparams))
+        self.queue.clear()
+
     def test_function_access(self):
         params = {0: 1, 1: 2, 2: 3}
         payload1 = _createJobPayload("function_that_isnt_remote", params, {}, get_descriptor("function_that_isnt_remote", params, {}))
@@ -246,6 +276,42 @@ class LocalQueueRemoteCallTest(TestCase):
         self.assertEqual("bob", self.queue.get_job(forced_job_id).username)
         anonymous_job_id = self.caller.test(test_job_owner_anonymous=True)
         self.assertIsNone(self.queue.get_job(anonymous_job_id).username)
+
+    def test_queue_listing_filters_before_paging(self):
+        # fkie-cad/mcritweb#57: a text filter, a user and a state select the jobs first, and only then is the
+        # page cut; the count is the count of that same selection
+        for i in range(6):
+            self.caller.test(needle="apple", index=i, username="alice" if i % 2 else "bob")
+            self.caller.test(needle="pear", index=i, username="alice")
+        for job in self.queue.get_jobs(0, 0):
+            self.caller.awaitResult(str(job.job_id))
+        self.assertEqual(12, self.caller.getQueueCount())
+        self.assertEqual(6, self.caller.getQueueCount(filter="APPLE"))
+        self.assertEqual(9, self.caller.getQueueCount(username="alice"))
+        self.assertEqual(3, self.caller.getQueueCount(filter="apple", username="alice"))
+        self.assertEqual(0, self.caller.getQueueCount(filter="banana"))
+        self.assertEqual(12, self.caller.getQueueCount(state="finished"))
+        self.assertEqual(0, self.caller.getQueueCount(state="queued"))
+        self.assertEqual(0, self.caller.getQueueCount(state="no-such-state"))
+        page_1 = self.caller.getQueueData(0, 4, filter="apple")
+        page_2 = self.caller.getQueueData(4, 4, filter="apple")
+        self.assertEqual(4, len(page_1))
+        self.assertEqual(2, len(page_2))
+        self.assertTrue(all("apple" in job["payload"]["params"] for job in page_1 + page_2))
+        self.assertEqual(6, len({str(job["_id"]) for job in page_1 + page_2}))
+        # newest first by default, oldest first when ascending
+        numbers = [job["number"] for job in self.caller.getQueueData(0, 0, filter="apple")]
+        self.assertEqual(sorted(numbers, reverse=True), numbers)
+        numbers = [job["number"] for job in self.caller.getQueueData(0, 0, filter="apple", ascending=True)]
+        self.assertEqual(sorted(numbers), numbers)
+        self.assertEqual(3, len(self.caller.getQueueData(0, 0, filter="apple", username="alice")))
+        self.assertEqual(12, len(self.caller.getQueueData(0, 0, state="finished")))
+        # a parameter is matched as the listing shows it, not as an ASCII escape
+        umlaut_job = self.caller.test(needle="Müller", index=99)
+        self.caller.awaitResult(umlaut_job)
+        self.assertEqual(1, self.caller.getQueueCount(filter="müller"))
+        self.assertEqual(1, self.caller.getQueueCount(filter="Müller"))
+        self.assertEqual(0, self.caller.getQueueCount(filter="u00fc"))
         self.queue.clear()
 
     def test_file_access(self):
@@ -363,6 +429,14 @@ class MongoQueueRemoteCallTest(LocalQueueRemoteCallTest):
         self.worker_thread = Thread(target=self.worker.run)
         self.worker_thread.start()
 
+    def _set_job_fields(self, job_id, **fields):
+        queue = self.queue
+        assert isinstance(queue, MongoQueue)
+        queue._getCollection().update_one({"_id": ObjectId(job_id)}, {"$set": fields})
+
+    def _unknown_job_id(self):
+        return str(ObjectId())
+
     @pytest.mark.sleep
     def test_termination(self):
         id = self.caller.test_progress()
@@ -394,12 +468,12 @@ class MongoQueueRemoteCallTest(LocalQueueRemoteCallTest):
 
         self.worker.terminate()
         self.worker_thread.join()
+        # the forced job cannot run without a worker, so a plain request keeps being served
+        # by the finished job rather than by the one that is only queued (fkie-cad/mcritweb#47)
         job_id_4 = self.caller.test(*params, force_recalculation=True, **kwparams)
         job_id_5 = self.caller.test(*params, force_recalculation=False, **kwparams)
-        print(self.queue.get_job(job_id_4)._data)
-        print(self.queue.get_job(job_id_2)._data)
-        self.assertNotEqual(job_id_2, job_id_5)
-        self.assertEqual(job_id_4, job_id_5)
+        self.assertNotEqual(job_id_2, job_id_4)
+        self.assertEqual(job_id_2, job_id_5)
 
         self.worker_thread = Thread(target=self.worker.run)
         self.worker_thread.start()

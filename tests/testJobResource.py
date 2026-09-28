@@ -95,5 +95,82 @@ class StoredBytesAccessors(unittest.TestCase):
         self.assertIsNone(index.getResultBytesForJob("0123456789abcdef01234567"))
 
 
+class JobCollectionSelectorsTest(unittest.TestCase):
+    """GET /jobs?sample_ids=...&job_ids=...: parsing, the sample_ids-without-method 400, and
+    forwarding "present but empty" as an empty list rather than as no selector at all."""
+
+    @staticmethod
+    def _request(query_string=""):
+        return falcon.Request(falcon.testing.create_environ(path="/jobs", query_string=query_string))
+
+    def _resource(self):
+        index = MagicMock()
+        index.getQueueData.return_value = []
+        return index, JobResource(index)
+
+    def test_sample_ids_without_method_is_a_400_and_never_queries(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_get_collection(self._request("sample_ids=7,8,9"), resp)
+        self.assertEqual(falcon.HTTP_400, resp.status)
+        index.getQueueData.assert_not_called()
+
+    def test_sample_ids_parses_as_ints_and_ignores_invalid_entries(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_get_collection(self._request("method=getMatchesForSample&sample_ids=7,x,9,"), resp)
+        self.assertNotEqual(falcon.HTTP_400, resp.status)
+        kwargs = index.getQueueData.call_args.kwargs
+        self.assertEqual("getMatchesForSample", kwargs["method"])
+        self.assertEqual([7, 9], kwargs["sample_ids"])
+        self.assertIsNone(kwargs["job_ids"])
+
+    def test_sample_ids_present_but_all_invalid_is_forwarded_as_an_empty_list(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_get_collection(self._request("method=getMatchesForSample&sample_ids=x,y"), resp)
+        kwargs = index.getQueueData.call_args.kwargs
+        self.assertEqual([], kwargs["sample_ids"])
+
+    def test_job_ids_does_not_require_method(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_get_collection(self._request("job_ids=0123456789abcdef01234567,fedcba9876543210fedcba98"), resp)
+        self.assertNotEqual(falcon.HTTP_400, resp.status)
+        kwargs = index.getQueueData.call_args.kwargs
+        self.assertEqual(["0123456789abcdef01234567", "fedcba9876543210fedcba98"], kwargs["job_ids"])
+        self.assertIsNone(kwargs["sample_ids"])
+
+    def test_job_ids_present_but_empty_is_forwarded_as_an_empty_list(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_get_collection(self._request("job_ids=,,"), resp)
+        kwargs = index.getQueueData.call_args.kwargs
+        self.assertEqual([], kwargs["job_ids"])
+
+    def test_neither_parameter_forwards_none(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_get_collection(self._request(""), resp)
+        kwargs = index.getQueueData.call_args.kwargs
+        self.assertIsNone(kwargs["sample_ids"])
+        self.assertIsNone(kwargs["job_ids"])
+
+    def test_both_selectors_together_with_state_and_filter(self):
+        index, resource = self._resource()
+        resp = falcon.Response()
+        resource.on_get_collection(
+            self._request("method=getMatchesForSample&sample_ids=7,8&job_ids=0123456789abcdef01234567&state=finished&filter=x&start=5&limit=10"),
+            resp,
+        )
+        kwargs = index.getQueueData.call_args.kwargs
+        self.assertEqual([7, 8], kwargs["sample_ids"])
+        self.assertEqual(["0123456789abcdef01234567"], kwargs["job_ids"])
+        self.assertEqual("finished", kwargs["state"])
+        self.assertEqual("x", kwargs["filter"])
+        self.assertEqual(5, kwargs["start_index"])
+        self.assertEqual(10, kwargs["limit"])
+
+
 if __name__ == "__main__":
     unittest.main()

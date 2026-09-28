@@ -3,7 +3,7 @@ import re
 import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
-from mcrit.server.utils import db_log_msg, get_username, getMatchingParams, jsonify, timing
+from mcrit.server.utils import db_log_msg, get_username, jsonify, readMatchingParams, timing
 
 
 class QueryResource:
@@ -13,7 +13,10 @@ class QueryResource:
 
     @timing
     def on_post_query_smda(self, req, resp):
-        parameters = getMatchingParams(req.params)
+        """Schedule a matching job for an SMDA report (JSON body) that is not stored; matching parameters as for ``/matches/sample/{sample_id}``. Answers the job id."""
+        parameters = readMatchingParams(self.index, req, resp, "QueryResource.on_post_query_smda")
+        if parameters is None:
+            return
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -31,7 +34,10 @@ class QueryResource:
 
     @timing
     def on_post_query_binary(self, req, resp):
-        parameters = getMatchingParams(req.params)
+        """Schedule disassembly and matching of an unmapped binary (request body); matching parameters as for ``/matches/sample/{sample_id}``. Answers the job id."""
+        parameters = readMatchingParams(self.index, req, resp, "QueryResource.on_post_query_binary")
+        if parameters is None:
+            return
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -49,7 +55,10 @@ class QueryResource:
 
     @timing
     def on_post_query_binary_mapped(self, req, resp, base_address=None):
-        parameters = getMatchingParams(req.params)
+        """Schedule disassembly and matching of a memory dump (request body) mapped at ``base_address``; matching parameters as for ``/matches/sample/{sample_id}``. Answers the job id."""
+        parameters = readMatchingParams(self.index, req, resp, "QueryResource.on_post_query_binary_mapped")
+        if parameters is None:
+            return
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -69,7 +78,10 @@ class QueryResource:
 
     @timing
     def on_post_query_smda_function(self, req, resp):
-        parameters = getMatchingParams(req.params)
+        """Match a single function (an SMDA report with one function, JSON body) synchronously; ``exclude_self_matches=true`` drops matches with the same sample; the other matching parameters as for ``/matches/sample/{sample_id}``. Answers the matching result."""
+        parameters = readMatchingParams(self.index, req, resp, "QueryResource.on_post_query_smda_function")
+        if parameters is None:
+            return
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -81,12 +93,15 @@ class QueryResource:
             db_log_msg(self.index, req, "QueryResource.on_post_query_smda_function - failed - no POST body.")
             return
         smda_function = req.media
-        summary = self.index.getMatchesForSmdaFunction(smda_function, **parameters)
+        # McritClient.getMatchesForSmdaFunction sends it; only this route has a use for it
+        exclude_self_matches = str(req.params.get("exclude_self_matches", "")).lower() == "true"
+        summary = self.index.getMatchesForSmdaFunction(smda_function, exclude_self_matches=exclude_self_matches, **parameters)
         resp.data = jsonify({"status": "successful", "data": summary})
         db_log_msg(self.index, req, "QueryResource.on_post_query_smda_function - success.")
 
     @timing
     def on_get_query_pichash(self, req, resp, pichash):
+        """The functions with the given pichash (16 hex digits) as (family_id, sample_id, function_id) tuples. Malformed hashes answer 400."""
         pichash_pattern = "[a-fA-F0-9]{16}"
         match = re.match(pichash_pattern, pichash)
         if not match:
@@ -106,6 +121,7 @@ class QueryResource:
 
     @timing
     def on_get_query_pichash_summary(self, req, resp, pichash):
+        """Counts of families, samples and functions with the given pichash (16 hex digits)."""
         pichash_pattern = "[a-fA-F0-9]{16}"
         match = re.match(pichash_pattern, pichash)
         if not match:
@@ -130,6 +146,7 @@ class QueryResource:
 
     @timing
     def on_get_query_picblockhash(self, req, resp, picblockhash):
+        """The functions containing a basic block with the given picblockhash (16 hex digits) as (family_id, sample_id, function_id, offset) tuples."""
         pichash_pattern = "[a-fA-F0-9]{16}"
         match = re.match(pichash_pattern, picblockhash)
         if not match:
@@ -149,6 +166,7 @@ class QueryResource:
 
     @timing
     def on_get_query_picblockhash_summary(self, req, resp, picblockhash):
+        """Counts of families, samples and functions containing a basic block with the given picblockhash (16 hex digits)."""
         pichash_pattern = "[a-fA-F0-9]{16}"
         match = re.match(pichash_pattern, picblockhash)
         if not match:
