@@ -13,6 +13,7 @@ class SampleResource:
 
     @timing
     def on_get(self, req, resp, sample_id=None):
+        """One sample by id. Unknown ids answer 404."""
         if not self.index.isSampleId(sample_id):
             resp.data = jsonify(
                 {
@@ -28,6 +29,7 @@ class SampleResource:
 
     @timing
     def on_get_by_sha256(self, req, resp, sample_sha256):
+        """One sample by its sha256. Malformed hashes answer 400, unknown ones 404."""
         sha256_pattern = "[a-fA-F0-9]{64}"
         match = re.match(sha256_pattern, sample_sha256)
         if not match:
@@ -57,6 +59,7 @@ class SampleResource:
 
     @timing
     def on_post_by_ids(self, req, resp):
+        """The samples with the comma-separated ids in the body, keyed by sample id; negative ids resolve against query samples, and ids that are not found are left out."""
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -82,6 +85,7 @@ class SampleResource:
 
     @timing
     def on_delete(self, req, resp, sample_id=None):
+        """Delete a sample and its functions, minhashes and band entries; a family left without samples is removed as well."""
         successful = self.index.deleteSample(sample_id, force_recalculation=True, username=get_username(req))
         if successful:
             resp.data = jsonify({"status": "successful", "data": successful})
@@ -95,6 +99,7 @@ class SampleResource:
 
     @timing
     def on_put(self, req, resp, sample_id=None):
+        """Modify a sample; JSON body with ``family_name``, ``version``, ``component`` (1-64 printable chars) and/or ``is_library``. Answers 202 on success, 400 for a malformed body."""
         resp.status = falcon.HTTP_400
         if not req.content_length or not isinstance(req.media, dict):
             resp.data = jsonify({"status": "failed", "data": {"message": "PUT request without body can't be processed."}})
@@ -134,6 +139,7 @@ class SampleResource:
 
     @timing
     def on_post_collection(self, req, resp):
+        """Submit a disassembled SMDA report (JSON body) as a new sample. Answers the sample entry and, when hashing was scheduled, the ``job_id`` of the minhash job; an already known sha256 answers the existing entry with ``existed``."""
         # TODO 2019-05-07 verify integrity of SMDA report
         if not req.content_length:
             resp.data = jsonify(
@@ -156,6 +162,7 @@ class SampleResource:
 
     @timing
     def on_post_submit_binary(self, req, resp):
+        """Submit a raw binary (request body) for disassembly and insertion. Query parameters: ``filename``, ``family``, ``version``, ``is_dump``, ``base_addr`` (hex) and ``bitness`` (32/64) for memory dumps. Answers the job id of the disassembly job."""
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -194,6 +201,7 @@ class SampleResource:
 
     @timing
     def on_get_collection(self, req, resp):
+        """All samples keyed by id; optional ``start`` (first sample id) and ``limit``."""
         # parse optional request parameters
         start_index = 0
         if "start" in req.params:
@@ -216,6 +224,7 @@ class SampleResource:
 
     @timing
     def on_get_function(self, req, resp, sample_id=None, function_id=None):
+        """One function of a sample by ids. Unknown ids answer 404."""
         if not self.index.isSampleId(sample_id):
             resp.data = jsonify({"status": "failed", "data": {"message": "We don't have a sample with that id."}})
             resp.status = falcon.HTTP_404
@@ -237,7 +246,42 @@ class SampleResource:
         db_log_msg(self.index, req, "SampleResource.on_get_function - success.")
 
     @timing
+    def on_get_binary(self, req, resp, sample_id=None):
+        """The raw binary the sample was submitted as, when STORAGE_KEEP_SUBMITTED_BINARIES kept it
+        and STORAGE_SERVE_SUBMITTED_BINARIES allows handing it out (#95)."""
+        # checked first, and answered the same for every sample: with serving off, the route does
+        # not even tell which samples exist or have a binary kept
+        if not self.index.isServingSampleBinaries():
+            resp.data = jsonify({"status": "failed", "data": {"message": "Serving stored binaries is disabled on this instance (STORAGE_SERVE_SUBMITTED_BINARIES)."}})
+            resp.status = falcon.HTTP_403
+            db_log_msg(self.index, req, "SampleResource.on_get_binary - failed - serving binaries is disabled.")
+            return
+        if not self.index.isSampleId(sample_id):
+            resp.data = jsonify({"status": "failed", "data": {"message": "We don't have a sample with that id."}})
+            resp.status = falcon.HTTP_404
+            db_log_msg(self.index, req, f"SampleResource.on_get_binary - failed - unknown sample_id {sample_id}.")
+            return
+        binary = self.index.openSampleBinary(sample_id)
+        if binary is None:
+            resp.data = jsonify({"status": "failed", "data": {"message": "No binary is stored for that sample."}})
+            resp.status = falcon.HTTP_404
+            db_log_msg(self.index, req, f"SampleResource.on_get_binary - failed - no binary for sample_id {sample_id}.")
+            return
+        resp.content_type = "application/octet-stream"
+        # streamed rather than read into resp.data: peak allocation while serving is then
+        # bounded by the driver's cursor batch instead of the sample size - measured flat at
+        # ~34 MiB for 32, 128 and 256 MiB samples, where getSampleBinary() costs twice the
+        # file (64, 256 and 512 MiB, since GridOut.read() joins the chunks it has collected).
+        # falcon closes the stream once the response is done.
+        resp.stream = binary
+        length = getattr(binary, "length", None)
+        if isinstance(length, int):
+            resp.content_length = length
+        db_log_msg(self.index, req, "SampleResource.on_get_binary - success.")
+
+    @timing
     def on_get_functions(self, req, resp, sample_id=None):
+        """All functions of a sample keyed by function id. Unknown sample ids answer 404."""
         if not self.index.isSampleId(sample_id):
             resp.data = jsonify(
                 {
