@@ -1,6 +1,6 @@
 import datetime
 import json
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from mcrit.libs.utility import decode_two_complement, encode_two_complement
 
@@ -27,11 +27,14 @@ class SampleEntry:
     summary: Optional[str]
     statistics: Dict[str, int]
     timestamp: Optional[datetime.datetime]
+    # free labels an analyst attached, normalised by mcrit.libs.tags (#53)
+    tags: List[str]
 
     # TODO -> rename to fromSmdaReport
     def __init__(self, smda_report: Optional["SmdaReport"], sample_id=-1, family_id=0):
         self.sample_id = sample_id
         self.family_id = family_id
+        self.tags = []
         if smda_report:
             self.architecture = smda_report.architecture or ""
             self.base_addr = smda_report.base_addr or 0
@@ -134,6 +137,7 @@ class SampleEntry:
             "sha256": self.sha256,
             "smda_version": self.smda_version,
             "statistics": self.statistics,
+            "tags": list(self.tags),
             "timestamp": self.timestamp.strftime("%Y-%m-%dT%H-%M-%S") if self.timestamp is not None else None,
             "version": self.version,
         }
@@ -158,6 +162,8 @@ class SampleEntry:
         sample_entry.smda_version = entry_dict["smda_version"]
         sample_entry.statistics = entry_dict["statistics"]
         sample_entry.timestamp = datetime.datetime.strptime(entry_dict["timestamp"], "%Y-%m-%dT%H-%M-%S")
+        # samples stored before #53 carry no tags
+        sample_entry.tags = list(entry_dict.get("tags") or [])
         return sample_entry
 
     def __str__(self):
