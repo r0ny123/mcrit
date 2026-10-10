@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import logging
 import re
@@ -13,8 +14,11 @@ from itertools import zip_longest
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
+import gridfs
 import numpy as np
+from bson import ObjectId
 from bson import encode as bson_encode
+from gridfs.errors import FileExists
 from packaging import version
 from picblocks.blockhasher import BlockHasher
 from pymongo import MongoClient, UpdateMany, UpdateOne
@@ -39,11 +43,11 @@ from mcrit.libs.utility import decode_two_complement, encode_two_complement
 from mcrit.minhash.MinHash import MinHash
 from mcrit.minhash.MinHasher import MINHASH_SHINGLER_REVISION, SHINGLER_REVISION_SINCE
 from mcrit.storage.FamilyEntry import FamilyEntry
-from mcrit.storage.FunctionEntry import FunctionEntry
+from mcrit.storage.FunctionEntry import FunctionEntry, smdaFunctionFromXcfg
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache
 from mcrit.storage.SampleEntry import SampleEntry
-from mcrit.storage.StorageInterface import StorageInterface
+from mcrit.storage.StorageInterface import BinaryStream, StorageInterface
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +69,24 @@ if TYPE_CHECKING:  # pragma: no cover
     from smda.common.SmdaReport import SmdaReport
 
     from mcrit.config.McritConfig import McritConfig
+
+
+# pichashes and picblockhashes are 64 bit values stored as hex strings. Written zero-padded to
+# 16 digits, their string order is their numeric order, which is what range conditions and
+# cursor paging by pichash need (#145). Instances created before this carry variable-width
+# values ("0x4d2") until migrate_pichash_padding has run; the settings flag "pichash_padded"
+# says which shape an instance holds, and every reader below honours both until it is set.
+PICHASH_HEX_DIGITS = 16
+PICHASH_MAX_VALUE = (1 << (4 * PICHASH_HEX_DIGITS)) - 1
+
+
+def encode_pichash_value(value: int, padded: bool) -> str:
+    return "0x%0*x" % (PICHASH_HEX_DIGITS, value) if padded else hex(value)
+
+
+def pichash_value_variants(value: int) -> List[str]:
+    """Both encodings a value may be stored under while an instance is not (yet) padded."""
+    return sorted({hex(value), encode_pichash_value(value, padded=True)})
 
 
 class MongoSearchTranspiler(BaseVisitor):
@@ -103,9 +125,12 @@ class MongoSearchTranspiler(BaseVisitor):
         visited_children = [self.visit(child) for child in node.children]
         return self._or_query(*visited_children)
 
-    def __init__(self, known_values: Optional[Dict[str, List[Any]]] = None) -> None:
+    def __init__(self, known_values: Optional[Dict[str, List[Any]]] = None, pichash_padded: bool = False) -> None:
         super().__init__()
         self.known_values = known_values or {}
+        # whether the instance stores pichashes zero-padded (#145), which decides how a pichash
+        # condition is encoded and whether range operators on it are allowed
+        self.pichash_padded = pichash_padded
 
     def _substring_condition_from_known_values(self, node: SearchConditionNode) -> Optional[Dict[str, Any]]:
         # an empty search term matches everything, so the regex is left alone there
@@ -142,8 +167,12 @@ class MongoSearchTranspiler(BaseVisitor):
                 pass
         mongo_operator = operator_to_mongo[node.operator]
         if node.field == "pichash" and mongo_operator in ("$lt", "$lte", "$gt", "$gte"):
-            # pichashes are stored as hex strings, on which range comparisons are not meaningful
-            raise ValueError("Range operators are not supported for the field 'pichash'.")
+            if not self.pichash_padded:
+                # on variable-width hex strings a range comparison answers a plausible but wrong set
+                raise ValueError("Range operators on the field 'pichash' need zero-padded pichashes; run migrate_pichash_padding first.")
+            if not isinstance(value, int) or not 0 <= value <= PICHASH_MAX_VALUE:
+                # a bound outside the 64 bit domain formats wider than 16 digits and would not compare
+                raise ValueError("A pichash bound must be an integer between 0 and 0xffffffffffffffff.")
         if mongo_operator is None:
             condition = {node.field: value}
         else:
@@ -153,8 +182,13 @@ class MongoSearchTranspiler(BaseVisitor):
                 # a substring search is a regex, which cannot be hex-encoded - it is matched against
                 # the stored representation instead, so only the field has to be renamed
                 condition = {"_pichash": condition.pop("pichash")}
+            elif self.pichash_padded or not isinstance(value, int):
+                MongoDbStorage._encodePichash(condition, padded=self.pichash_padded)
+            elif mongo_operator is None:
+                # an instance that is not padded may hold either width (a migration in flight)
+                condition = {"_pichash": {"$in": pichash_value_variants(value)}}
             else:
-                MongoDbStorage._encodePichash(condition)
+                condition = {"_pichash": {"$nin": pichash_value_variants(value)}}
         return condition
 
 
@@ -241,6 +275,7 @@ class MongoDbStorage(StorageInterface):
             raise ValueError(f"STORAGE_BAND_DF_CUTOFF ({df_cutoff}) must not exceed STORAGE_BAND_BUCKET_SIZE ({bucket_size}).")
         self.blockhasher = BlockHasher()
         self._database = None
+        self._pichash_padded: Optional[bool] = None
         # guards the lazy initialisation in _getDb(); a threading.Lock is per-process, which is
         # what we want: forking servers (gunicorn) fork before the first request, so every child
         # inherits an unlocked copy and synchronises its own threads independently
@@ -309,7 +344,9 @@ class MongoDbStorage(StorageInterface):
 
     def _ensureIndexAndUnknownFamily(self) -> None:
         if "settings" not in self._getDb().list_collection_names():
-            self._getDb()["settings"].insert_one({"mcrit_db_id": str(uuid.uuid4()), "db_state": 0})
+            # a fresh instance stores pichashes zero-padded from the start (#145)
+            self._getDb()["settings"].insert_one({"mcrit_db_id": str(uuid.uuid4()), "db_state": 0, "pichash_padded": True})
+            self._pichash_padded = None
         # A database holding no functions has a trivially complete picblockhash index, so a fresh
         # instance - or one just cleared - maintains it from the first submit and never needs a
         # rebuild. An existing database carrying functions does *not* get the flag when it upgrades
@@ -341,6 +378,13 @@ class MongoDbStorage(StorageInterface):
         self._getDb()["samples"].create_index([("architecture", 1), ("picblockhash_version", 1)])
         # and over these two for its shingler revision clause (#238)
         self._getDb()["samples"].create_index([("architecture", 1), ("minhash_shingler_revision", 1)])
+        # and the stale-pichash count over these two, the report's version standing in where no stamp exists (#249)
+        self._getDb()["samples"].create_index([("pichash_smda_version", 1), ("smda_version", 1)])
+        # and the distinct over the reports' versions it builds that count from
+        self._getDb()["samples"].create_index("smda_version")
+        # and the count of samples the running smda found impossible to rehash; sparse, as few are, and
+        # so the planner cannot pick it for the $ne both stale queries carry, which would read it whole
+        self._getDb()["samples"].create_index("pichash_unrehashable_smda_version", sparse=True)
         self._getDb()["families"].create_index("family_id")
         self._getDb()["families"].create_index("family_name")
         self._getDb()["functions"].create_index("function_id")
@@ -365,6 +409,10 @@ class MongoDbStorage(StorageInterface):
         self._getDb()["query_samples"].create_index("sha256")
         self._getDb()["query_functions"].create_index("function_id")
         self._getDb()["query_functions"].create_index("sample_id")
+        # stored binaries are keyed by content: one file per sha256, naming every sample it belongs to (#95).
+        # Partial, so that a file retired for deletion (its sha256 cleared) does not hold the key.
+        self._getDb()[self._BINARIES_BUCKET + ".files"].create_index("metadata.sha256", unique=True, partialFilterExpression={"metadata.sha256": {"$type": "string"}})
+        self._getDb()[self._BINARIES_BUCKET + ".files"].create_index("metadata.sample_ids")
         # ensure that their counters are at least 1, so that they never contain items with sample_id/function_id 0
         # the name-only filter with $max is idempotent: it matches an existing counter instead of upserting a duplicate (#105)
         self._getDb().counters.update_one({"name": "query_samples"}, {"$max": {"value": 1}}, upsert=True)
@@ -705,21 +753,21 @@ class MongoDbStorage(StorageInterface):
                 self._getDb()[collection].delete_many({"_id": {"$in": ids}})
 
     @staticmethod
-    def _encodePichash(function_dict: Dict, delete_old: bool = True) -> None:
+    def _encodePichash(function_dict: Dict, delete_old: bool = True, padded: bool = False) -> None:
         if "pichash" in function_dict:
             value = function_dict["pichash"]
             # search conditions wrap the value in an operator dict, e.g. {"$ne": 0x1234}
             if isinstance(value, dict):
-                function_dict["_pichash"] = {k: hex(v) if isinstance(v, int) else v for k, v in value.items()}
+                function_dict["_pichash"] = {k: encode_pichash_value(v, padded) if isinstance(v, int) else v for k, v in value.items()}
             else:
-                function_dict["_pichash"] = hex(value)
+                function_dict["_pichash"] = encode_pichash_value(value, padded)
             if delete_old:
                 del function_dict["pichash"]
         if "picblockhashes" in function_dict:
             converted_entries = []
             for entry in function_dict["picblockhashes"]:
                 converted_entry = dict(**entry)
-                converted_entry["hash"] = hex(converted_entry["hash"])
+                converted_entry["hash"] = encode_pichash_value(converted_entry["hash"], padded)
                 # use two-complement to convert unit64 to int64 and vice versa
                 converted_entry["offset"] = encode_two_complement(converted_entry["offset"])
                 converted_entries.append(converted_entry)
@@ -749,10 +797,21 @@ class MongoDbStorage(StorageInterface):
             if delete_old:
                 del function_dict["_picblockhashes"]
 
-    @staticmethod
-    def _encodeFunction(function_dict: Dict, delete_old: bool = True) -> None:
-        MongoDbStorage._encodePichash(function_dict, delete_old=delete_old)
+    def _encodeFunction(self, function_dict: Dict, delete_old: bool = True) -> None:
+        MongoDbStorage._encodePichash(function_dict, delete_old=delete_old, padded=self.isPichashPadded())
         MongoDbStorage._encodeXcfg(function_dict, delete_old=delete_old)
+
+    def isPichashPadded(self) -> bool:
+        """Whether this instance stores pichashes zero-padded (#145); read once per process."""
+        if self._pichash_padded is None:
+            settings = self._getDb().settings.find_one({}, {"pichash_padded": 1, "_id": 0}) or {}
+            self._pichash_padded = bool(settings.get("pichash_padded", False))
+        return self._pichash_padded
+
+    def _pichashLookupCondition(self, field: str, value: int) -> Dict[str, Any]:
+        if self.isPichashPadded():
+            return {field: encode_pichash_value(value, padded=True)}
+        return {field: {"$in": pichash_value_variants(value)}}
 
     @staticmethod
     def _decodeFunction(function_dict: Dict, delete_old: bool = True) -> None:
@@ -827,6 +886,8 @@ class MongoDbStorage(StorageInterface):
         num_functions_deleted = self._getDb().functions.delete_many({"sample_id": sample_id}).deleted_count
         # remove sample
         num_samples_deleted = self._getDb().samples.delete_one({"sample_id": sample_id}).deleted_count
+        # the raw submission goes with the sample it belongs to (#95)
+        self.deleteSampleBinary(sample_id)
         # update family stats by what was actually removed, not by what the sample claimed (#151)
         self._updateFamilyStats(sample_entry.family_id, -num_samples_deleted, -num_functions_deleted, -int(sample_entry.is_library and num_samples_deleted))
         self._deleteFamilyIfEmpty(sample_entry.family_id)
@@ -914,10 +975,52 @@ class MongoDbStorage(StorageInterface):
         return {
             "architecture": {"$nin": ["intel", ""]},
             "$or": [{"picblockhash_version": {"$exists": False}}, {"picblockhash_version": {"$in": stale_values}}],
+            **self._notUnrehashableQuery(),
         }
+
+    @staticmethod
+    def _notUnrehashableQuery() -> Dict[str, Any]:
+        """Leaves out samples the running smda already found missing disassembly, which a rerun
+        cannot rehash either; a marker of an older smda is retried once (#249)."""
+        return {"pichash_unrehashable_smda_version": {"$ne": SmdaConfig().VERSION}}
+
+    def countSamplesWithUnrehashablePicHashes(self) -> Optional[int]:
+        return self._getDb().samples.count_documents({"pichash_unrehashable_smda_version": SmdaConfig().VERSION})
 
     def countSamplesWithStalePicBlockHashes(self) -> Optional[int]:
         return self._getDb().samples.count_documents(self._stalePicBlockHashQuery())
+
+    def _stalePicHashQuery(self, threshold_version: str) -> Dict[str, Any]:
+        """Samples whose PicHashes an smda older than the threshold escaped, as recorded by
+        recalculateAllPicHashes, or - where it never stamped one - as the report's smda says (#249).
+        Like the minhash query, this compares the few distinct recorded values, not every document."""
+        threshold = version.parse(threshold_version)
+        stamped = self._getDb().samples.distinct("pichash_smda_version")
+        # distinct answers null for unstamped (or null-stamped) documents, which the other clauses decide
+        stale_stamps = [value for value in stamped if value is not None and self._isStaleMinHashVersion(value, threshold)]
+        reported = self._getDb().samples.distinct("smda_version")
+        stale_reports = [value for value in reported if self._isStaleMinHashVersion(self._stripReportVersionPrefix(value), threshold)]
+        return {
+            "$or": [
+                {"pichash_smda_version": {"$in": stale_stamps}},
+                {"pichash_smda_version": None, "smda_version": {"$in": stale_reports}},
+                # a report without any smda version, which distinct need not answer as null
+                {"pichash_smda_version": None, "smda_version": None},
+            ],
+            **self._notUnrehashableQuery(),
+        }
+
+    def countSamplesWithStalePicHashes(self) -> Optional[int]:
+        return self._getDb().samples.count_documents(self._stalePicHashQuery(self._getPicHashCompatibilityThreshold()))
+
+    @staticmethod
+    def _getPicHashCompatibilityThreshold() -> str:
+        smda_config = SmdaConfig()
+        smda_downward_compatibility = getattr(smda_config, "ESCAPER_DOWNWARD_COMPATIBILITY", None)
+        if smda_downward_compatibility is None:
+            LOGGER.warning("SMDA downward compatibility version unknown, using current SMDA version as threshold...")
+            smda_downward_compatibility = smda_config.VERSION
+        return smda_downward_compatibility
 
     def _updateFamilyStats(self, family_id, num_samples_inc, num_functions_inc, num_library_samples_inc):
         result = self._getDb().families.update_one(
@@ -992,6 +1095,8 @@ class MongoDbStorage(StorageInterface):
             return False
         old_family_info = self.getFamily(family_id)
         assert old_family_info is not None
+        if "actors" in update_information:
+            self._getDb().families.update_one({"family_id": family_id}, {"$set": {"actors": FamilyEntry.normalizeActors(update_information["actors"])}})
         if "is_library" in update_information:
             self._getDb().samples.update_many({"family_id": family_id}, {"$set": {"is_library": update_information["is_library"]}})
             updated_count = old_family_info.num_samples if update_information["is_library"] else 0
@@ -1015,14 +1120,261 @@ class MongoDbStorage(StorageInterface):
                 self._getDb().families.update_one({"family_id": 0}, {"$set": {"num_samples": 0, "num_functions": 0, "num_library_samples": 0}})
             else:
                 self._getDb().families.delete_one({"family_id": family_id})
+            # the attribution moves with the samples: a rename onto an existing family merges
+            # both actor lists (a review of #57 caught the rename dropping them)
+            merged_actors = FamilyEntry.normalizeActors(list(new_family_info.actors or []) + list(old_family_info.actors or []))
             self._getDb().families.update_one(
-                {"family_id": new_family_id}, {"$set": {"num_samples": new_num_samples, "num_functions": new_num_functions, "num_library_samples": new_num_lib_samples}}
+                {"family_id": new_family_id},
+                {"$set": {"num_samples": new_num_samples, "num_functions": new_num_functions, "num_library_samples": new_num_lib_samples, "actors": merged_actors}},
             )
             # update sample_entry and function_entries with new family information
             self._getDb().samples.update_many({"family_id": family_id}, {"$set": {"family_id": new_family_id, "family": family_name}})
             self._getDb().functions.update_many({"family_id": family_id}, {"$set": {"family_id": new_family_id}})
             self._updateDbState()
         return True
+
+    # query ids are handed out from a counter and stored negated, so a smaller id is a newer
+    # record; deletes and the $in/$nin arguments are kept to this many ids per command
+    _ORPHAN_BATCH_SIZE = 5000
+
+    def deleteOrphanedQueryData(self) -> Dict[str, int]:
+        """Delete the query functions no query sample refers to and the query disassembly no
+        query function refers to. Both are left behind when a deletion or an insert is
+        interrupted halfway, and a query job can be deleted without its sample (#68).
+
+        Safe next to a query being inserted on another worker. A query is inserted as its
+        sample, then the disassembly of every function, then the functions. Each boundary is
+        taken first, and only records older than it (a larger, i.e. less negative, id) are
+        judged: a query whose ids are handed out afterwards is never looked at. For the
+        functions that is enough, as their sample is written before them. The disassembly is
+        written before its function, so it is judged only once no query sample is still short
+        of its functions - see _aQueryInsertMayBeInFlight.
+
+        No single command carries the whole collection. The sample ids come from an
+        aggregation cursor rather than distinct(), which answers with one document and fails
+        past MongoDB's 16 MiB limit, and every `$in` below is one batch wide.
+        """
+        db = self._getDb()
+        # both boundaries before anything is judged
+        newest_function = db.query_functions.find_one({}, {"function_id": 1, "_id": 0}, sort=[("function_id", 1)])
+        newest_xcfg = db.query_xcfg.find_one({}, {"_id": 1}, sort=[("_id", 1)])
+        num_functions_deleted = 0
+        if newest_function is not None:
+            num_functions_deleted = self._deleteQueryFunctionsWithoutASample(newest_function["function_id"])
+        num_xcfg_deleted = 0
+        if newest_xcfg is not None:
+            num_xcfg_deleted = self._deleteQueryXcfgWithoutAFunction(newest_xcfg["_id"])
+        return {"query_functions": num_functions_deleted, "query_xcfg": num_xcfg_deleted}
+
+    def _judgedQuerySampleIds(self, function_boundary: int) -> Iterable[List[int]]:
+        """The distinct sample ids of the query functions old enough to judge, one batch at a
+        time. $group over a cursor, because distinct() would answer with a single document."""
+        batch: List[int] = []
+        for group in self._getDb().query_functions.aggregate(
+            [{"$match": {"function_id": {"$gte": function_boundary}}}, {"$group": {"_id": "$sample_id"}}],
+            allowDiskUse=True,
+        ):
+            batch.append(group["_id"])
+            if len(batch) >= self._ORPHAN_BATCH_SIZE:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    def _deleteQueryFunctionsWithoutASample(self, function_boundary: int) -> int:
+        """The samples are looked up per batch rather than snapshotted up front. A query
+        sample is written before its functions, so a sample read after the boundary is at
+        worst newer than the function referring to it - reading later can only find more
+        samples, never fewer, and a sample deleted meanwhile takes its functions with it."""
+        db = self._getDb()
+        deleted = 0
+        for sample_ids in self._judgedQuerySampleIds(function_boundary):
+            known = {document["sample_id"] for document in db.query_samples.find({"sample_id": {"$in": sample_ids}}, {"sample_id": 1, "_id": 0})}
+            orphans = [sample_id for sample_id in sample_ids if sample_id not in known]
+            if orphans:
+                deleted += db.query_functions.delete_many({"sample_id": {"$in": orphans}, "function_id": {"$gte": function_boundary}}).deleted_count
+        return deleted
+
+    def _aQueryInsertMayBeInFlight(self) -> bool:
+        """Whether some query sample does not have all of its functions yet.
+
+        Such a sample is an insert still running, or one that died between its disassembly and
+        its functions. Either way the disassembly of its missing functions is not an orphan
+        while the sample exists: the first will still write the functions, and the second's is
+        collected in the run that deletes the sample. A disassembly document does not name its
+        sample, so while any sample is short, none is judged.
+
+        addSmdaReport records on the query sample how many functions it is going to write. A
+        query sample written before that has no count and is taken as possibly in flight, which
+        holds the judgment back until the last of them has expired.
+
+        Checked after the boundary is taken: a disassembly old enough to judge had its sample
+        written before that, so the sample is seen here, unless it was deleted - and then its
+        disassembly is an orphan."""
+        db = self._getDb()
+        batch: List[Dict[str, Any]] = []
+
+        def batch_is_short(samples: List[Dict[str, Any]]) -> bool:
+            if any(not isinstance(sample.get("num_query_functions"), int) for sample in samples):
+                return True
+            counts = {
+                group["_id"]: group["n"]
+                for group in db.query_functions.aggregate(
+                    [{"$match": {"sample_id": {"$in": [sample["sample_id"] for sample in samples]}}}, {"$group": {"_id": "$sample_id", "n": {"$sum": 1}}}]
+                )
+            }
+            return any(counts.get(sample["sample_id"], 0) < sample["num_query_functions"] for sample in samples)
+
+        for sample in db.query_samples.find({}, {"sample_id": 1, "num_query_functions": 1, "_id": 0}).batch_size(self._ORPHAN_BATCH_SIZE):
+            batch.append(sample)
+            if len(batch) >= self._ORPHAN_BATCH_SIZE:
+                if batch_is_short(batch):
+                    return True
+                batch = []
+        return bool(batch) and batch_is_short(batch)
+
+    def _deleteQueryXcfgWithoutAFunction(self, xcfg_boundary: int) -> int:
+        """The boundary is the newest disassembly document, which also covers the case where no
+        query function exists at all - an insert interrupted before its first function leaves
+        exactly that, and once the queries around it are deleted query_functions is empty."""
+        if self._aQueryInsertMayBeInFlight():
+            LOGGER.info("A query sample is still short of its functions; the query disassembly is judged in a later cleanup.")
+            return 0
+        db = self._getDb()
+        deleted = 0
+        last_id = None
+        while True:
+            query = {"_id": {"$gte": xcfg_boundary}} if last_id is None else {"_id": {"$gt": last_id}}
+            batch = [document["_id"] for document in db.query_xcfg.find(query, {"_id": 1}).sort("_id", 1).limit(self._ORPHAN_BATCH_SIZE)]
+            if not batch:
+                break
+            referenced = set(db.query_functions.distinct("function_id", {"function_id": {"$in": batch}}))
+            orphans = [function_id for function_id in batch if function_id not in referenced]
+            if orphans:
+                deleted += db.query_xcfg.delete_many({"_id": {"$in": orphans}}).deleted_count
+            last_id = batch[-1]
+        return deleted
+
+    # the collections the query cleanup deletes from, and so the ones compactQueryCollections reclaims
+    QUERY_COLLECTIONS = ("query_samples", "query_functions", "query_xcfg")
+    # where the job queue keeps the results of the query jobs the cleanup deletes
+    QUEUE_GRIDFS_COLLECTIONS = ("fs.files", "fs.chunks")
+
+    def _sharesDatabaseWithQueue(self) -> bool:
+        """Whether the job queue's GridFS lives in this database - as it does when both keep the
+        default server, port and database name."""
+        queue_config = getattr(self._config, "QUEUE_CONFIG", None)
+        if queue_config is None or getattr(queue_config, "QUEUE_METHOD", None) != "mongodb":
+            return False
+        return (str(queue_config.QUEUE_SERVER), str(queue_config.QUEUE_PORT), queue_config.QUEUE_MONGODB_DBNAME) == (
+            str(self._storage_config.STORAGE_SERVER),
+            str(self._storage_config.STORAGE_PORT),
+            self._storage_config.STORAGE_MONGODB_DBNAME,
+        )
+
+    def compactQueryCollections(self) -> Dict[str, Any]:
+        """Run MongoDB's compact on the collections the query cleanup deletes from.
+
+        The cleanup deletes query jobs too, and with them their results in the queue's GridFS. When
+        the queue shares this database, fs.files and fs.chunks are compacted as well; when it keeps
+        its own, this handle cannot reach them and leaves them alone.
+
+        compact needs the compact privilege on the database; a refusal is reported per
+        collection rather than raised, since the cleanup itself has already succeeded."""
+        db = self._getDb()
+        outcome: Dict[str, Any] = {}
+        collections = self.QUERY_COLLECTIONS + (self.QUEUE_GRIDFS_COLLECTIONS if self._sharesDatabaseWithQueue() else ())
+        for collection in collections:
+            try:
+                result = db.command("compact", collection)
+                outcome[collection] = {"ok": result.get("ok"), "bytesFreed": result.get("bytesFreed")}
+            except Exception as error:
+                LOGGER.warning("compact of %s was refused: %s", collection, error)
+                outcome[collection] = {"ok": 0, "error": str(error)}
+        return outcome
+
+    # raw submitted binaries live in their own GridFS bucket (#95), one file per distinct content:
+    # metadata.sha256 is the key and metadata.sample_ids lists the samples the binary belongs to.
+    # Keyed by content rather than by sample, so that anything else holding the same bytes - the
+    # file parameters of queue jobs, say - can refer to the same file without a data migration.
+    _BINARIES_BUCKET = "sample_binaries"
+
+    def _getBinaries(self) -> "gridfs.GridFS":
+        return gridfs.GridFS(self._getDb(), collection=self._BINARIES_BUCKET)
+
+    def _getBinaryFiles(self):
+        return self._getDb()[f"{self._BINARIES_BUCKET}.files"]
+
+    def storeSampleBinary(self, sample_id: int, binary: bytes) -> bool:
+        if not self.isSampleId(sample_id):
+            return False
+        binary = bytes(binary)
+        sha256 = hashlib.sha256(binary).hexdigest()
+        # a sample has one binary: let go of any other content it was linked to before
+        for stored in self._getBinaryFiles().find({"metadata.sample_ids": sample_id, "metadata.sha256": {"$ne": sha256}}, {"_id": 1}):
+            self._releaseBinaryFile(stored["_id"], sample_id)
+        while not self._linkBinaryFile(sha256, sample_id):
+            file_id = ObjectId()
+            try:
+                self._getBinaries().put(binary, _id=file_id, metadata={"sha256": sha256, "sample_ids": [sample_id], "size": len(binary)})
+                break
+            except FileExists:
+                # another submission of the same bytes stored them first (the unique index on
+                # metadata.sha256 refused this copy); GridFS leaves the chunks it had already
+                # written behind, so they go here, and the loop links to the file that won
+                self._getDb()[f"{self._BINARIES_BUCKET}.chunks"].delete_many({"files_id": file_id})
+        # a sample deleted meanwhile would otherwise leave its id on the file for good: deleteSample
+        # removes the sample before its binaries, so whichever of the two runs second cleans up
+        if not self.isSampleId(sample_id):
+            self.deleteSampleBinary(sample_id)
+            return False
+        return True
+
+    def _linkBinaryFile(self, sha256: str, sample_id: int) -> bool:
+        """Add the sample to the file already holding these bytes; False when no file holds them."""
+        return self._getBinaryFiles().update_one({"metadata.sha256": sha256}, {"$addToSet": {"metadata.sample_ids": sample_id}}).matched_count > 0
+
+    def _releaseBinaryFile(self, file_id, sample_id: int) -> bool:
+        """Take the sample off the file, and delete the file once no sample is left on it.
+
+        The file is retired first - its sha256 cleared in the same update that checks no sample is
+        left - so a submission of the same bytes arriving in between cannot link to it: it finds no
+        file under that hash and stores a fresh one instead of losing its binary to this deletion."""
+        self._getBinaryFiles().update_one({"_id": file_id}, {"$pull": {"metadata.sample_ids": sample_id}})
+        # only a file still carrying its hash is retired, so of two releasers exactly one deletes it
+        retired = self._getBinaryFiles().find_one_and_update(
+            {"_id": file_id, "metadata.sample_ids": [], "metadata.sha256": {"$type": "string"}}, {"$set": {"metadata.sha256": None}}
+        )
+        if retired is None:
+            return False
+        # through GridFS, which takes the chunks along with the file document
+        self._getBinaries().delete(file_id)
+        return True
+
+    def getSampleBinary(self, sample_id: int) -> Optional[bytes]:
+        stored = self._getBinaries().find_one({"metadata.sample_ids": sample_id})
+        return stored.read() if stored is not None else None
+
+    def hasSampleBinary(self, sample_id: int) -> bool:
+        """Whether a binary is stored, without fetching a single chunk of it. GridFS keeps the
+        file's metadata in `.files` and its bytes in `.chunks`, so this reads one small
+        document where getSampleBinary() would stream the whole file to answer the same
+        question - which is what the resubmission path in Worker.addBinarySample was doing."""
+        return self._getBinaryFiles().find_one({"metadata.sample_ids": sample_id}, {"_id": 1}) is not None
+
+    def openSampleBinary(self, sample_id: int) -> Optional[BinaryStream]:
+        """The stored binary as a GridOut, which reads chunk by chunk, so serving it never
+        holds the whole file in memory."""
+        return self._getBinaries().find_one({"metadata.sample_ids": sample_id})
+
+    def deleteSampleBinary(self, sample_id: int) -> bool:
+        """Take the sample off its binary; the binary itself is deleted only when no other sample
+        still refers to it. True when the sample had one."""
+        had_binary = False
+        for stored in self._getBinaryFiles().find({"metadata.sample_ids": sample_id}, {"_id": 1}):
+            self._releaseBinaryFile(stored["_id"], sample_id)
+            had_binary = True
+        return had_binary
 
     def recomputeFamilyStats(self, progress_reporter=None) -> Dict[str, Any]:
         """Set every family's counters from the samples and functions that exist (#151).
@@ -1148,7 +1500,22 @@ class MongoDbStorage(StorageInterface):
         # leaving them behind while the counters reset would collide on _id at the next insert
         # "picblockhashes" is the inverted block-hash index; leaving it behind would keep asserting
         # that hashes are held by samples that no longer exist, and getUniqueBlocks would believe it
-        collections = ["samples", "families", "functions", "matches", "candidates", "counters", "query_samples", "query_functions", "xcfg", "query_xcfg", "picblockhashes"]
+        # the "sample_binaries" GridFS bucket holds the raw submissions (#95)
+        collections = [
+            "samples",
+            "families",
+            "functions",
+            "matches",
+            "candidates",
+            "counters",
+            "query_samples",
+            "query_functions",
+            "xcfg",
+            "query_xcfg",
+            "picblockhashes",
+            "sample_binaries.files",
+            "sample_binaries.chunks",
+        ]
         for band_id in range(self._storage_config.STORAGE_NUM_BANDS):
             collections.append("band_%d" % band_id)
         for c in collections:
@@ -1205,7 +1572,12 @@ class MongoDbStorage(StorageInterface):
         sample_entry = None
         if isQuery:
             sample_entry = SampleEntry(smda_report, sample_id=-1 * self._useCounter("query_samples"), family_id=0)
-            self._dbInsert("query_samples", sample_entry.toDict())
+            sample_document = sample_entry.toDict()
+            # how many functions this insert is about to write, so that deleteOrphanedQueryData
+            # can tell an insert still in flight - whose disassembly precedes its functions -
+            # from a finished one (#68)
+            sample_document["num_query_functions"] = smda_report.num_functions
+            self._dbInsert("query_samples", sample_document)
             function_ids = self._useCounterBulk("query_functions", smda_report.num_functions)
             function_dicts = []
             for function_id, smda_function in zip(function_ids, smda_report.getFunctions()):
@@ -1216,7 +1588,8 @@ class MongoDbStorage(StorageInterface):
             if not self.getSampleBySha256(smda_report.sha256):
                 family_id = self.addFamily(smda_report.family or "")
                 sample_entry = SampleEntry(smda_report, sample_id=self._useCounter("samples"), family_id=family_id)
-                self._dbInsert("samples", {**sample_entry.toDict(), "picblockhash_version": PICBLOCKS_VERSION})
+                # its hashes are computed right here, by the running smda and picblocks
+                self._dbInsert("samples", {**sample_entry.toDict(), "pichash_smda_version": SmdaConfig().VERSION, "picblockhash_version": PICBLOCKS_VERSION})
                 function_ids = self._useCounterBulk("functions", smda_report.num_functions)
                 function_dicts = []
                 for function_id, smda_function in zip(function_ids, smda_report.getFunctions()):
@@ -1355,7 +1728,6 @@ class MongoDbStorage(StorageInterface):
         if query_result is None or "_pichash" not in query_result:
             return None
         self._decodePichash(query_result, delete_old=False)
-        encoded_pichash = query_result["_pichash"]
         decoded_pichash = query_result["pichash"]
         if decoded_pichash is None:
             return None
@@ -1363,7 +1735,7 @@ class MongoDbStorage(StorageInterface):
         sample_and_function_ids = set(
             map(
                 lambda x: (x["family_id"], x["sample_id"], x["function_id"]),
-                list(self._getDb().functions.find({"_pichash": encoded_pichash}, {"family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0})),
+                list(self._getDb().functions.find(self._pichashLookupCondition("_pichash", decoded_pichash), {"family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0})),
             )
         )
 
@@ -1387,7 +1759,14 @@ class MongoDbStorage(StorageInterface):
         # one $in over all distinct pichashes instead of one query per pichash (N+1, #111);
         # grouping client-side by the returned _pichash reproduces the per-query sets exactly
         if encoded_to_decoded:
-            wanted = self._filterPicHashesByMatchCount(list(encoded_to_decoded))
+            # while the instance is not padded, either spelling of a value may be stored (#145)
+            lookup = set(encoded_to_decoded)
+            if not self.isPichashPadded():
+                for decoded_pichash in list(encoded_to_decoded.values()):
+                    for variant in pichash_value_variants(decoded_pichash):
+                        encoded_to_decoded[variant] = decoded_pichash
+                        lookup.add(variant)
+            wanted = self._filterPicHashesByMatchCount(sorted(lookup))
             fields_to_fetch = {"_pichash": 1, "family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0}
             for hit in self._getDb().functions.find({"_pichash": {"$in": wanted}}, fields_to_fetch):
                 decoded_pichash = encoded_to_decoded[hit.get("_pichash")]
@@ -1407,19 +1786,28 @@ class MongoDbStorage(StorageInterface):
             return encoded_pichashes
         if self.isPicHashCountIndexComplete():
             # one indexed probe per queried hash, instead of one index entry per holder
-            kept = [
-                document["_pichash"]
-                for document in self._getDb()[self._PICHASH_COUNT_COLLECTION].find({"_pichash": {"$in": encoded_pichashes}, "df": {"$lte": cutoff}}, {"_pichash": 1, "_id": 0})
-            ]
+            counts = {
+                document["_pichash"]: document["df"]
+                for document in self._getDb()[self._PICHASH_COUNT_COLLECTION].find({"_pichash": {"$in": encoded_pichashes}}, {"_pichash": 1, "df": 1, "_id": 0})
+            }
         else:
             # no counts stored yet: fall back to counting, which is correct but pays the very
             # cost the cutoff is meant to avoid
+            LOGGER.warning("PicHash count index incomplete, counting holders instead; run MongoDbStorage.rebuildPicHashCountIndex() to restore the fast path.")
             pipeline = [
                 {"$match": {"_pichash": {"$in": encoded_pichashes}}},
                 {"$group": {"_id": "$_pichash", "num_holders": {"$sum": 1}}},
-                {"$match": {"num_holders": {"$lte": cutoff}}},
             ]
-            kept = [group["_id"] for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True)]
+            counts = {group["_id"]: group["num_holders"] for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True)}
+        # Until migrate_pichash_padding has run, one value may be stored in both spellings
+        # ("0x4d2" and its zero-padded form), each counted separately (#145). Sum over the
+        # spellings of a value and keep or drop them together, so that a value over the cutoff
+        # cannot pass by being split. A spelling nobody holds counts 0.
+        totals: Dict[int, int] = {}
+        for encoded_pichash in set(encoded_pichashes):
+            value = int(encoded_pichash, 16)
+            totals[value] = totals.get(value, 0) + counts.get(encoded_pichash, 0)
+        kept = [encoded_pichash for encoded_pichash in encoded_pichashes if totals[int(encoded_pichash, 16)] <= cutoff]
         if len(kept) != len(encoded_pichashes):
             LOGGER.info("PicHash cutoff %d dropped %d of %d hashes as too common", cutoff, len(encoded_pichashes) - len(kept), len(encoded_pichashes))
         return kept
@@ -1658,7 +2046,11 @@ class MongoDbStorage(StorageInterface):
         # whose bucket 0 is missing (e.g. removed before this was fixed) would otherwise stay
         # invisible to the cutoff and restart placement at bucket 0 on the next push
         updates = [
-            UpdateOne({"band_hash": band_hash, "bucket": 0}, {"$set": {"df": df, "tail": tail, "tail_n": tail_n}}, upsert=df > 0)
+            UpdateOne(
+                {"band_hash": band_hash, "bucket": 0},
+                {"$set": {"df": df, "tail": tail, "tail_n": tail_n}, "$setOnInsert": {"function_ids": []}},
+                upsert=df > 0,
+            )
             for band_hash, (df, tail, tail_n) in totals.items()
         ]
         collection.bulk_write(updates, ordered=False)
@@ -1701,22 +2093,28 @@ class MongoDbStorage(StorageInterface):
             raise ValueError(f"band_df_cutoff ({band_df_cutoff}) must not exceed STORAGE_BAND_BUCKET_SIZE ({bucket_size}).")
         return band_df_cutoff
 
-    def _bandLookupPipeline(self, band_hashes: List[int], band_df_cutoff: Optional[int] = None) -> List[Dict[str, Any]]:
+    def _bandLookupPipeline(self, band_hashes: List[int], band_df_cutoff: Optional[int] = None, df_index_complete: Optional[bool] = None) -> List[Dict[str, Any]]:
         """Aggregation returning the wanted band documents, dropping over-long posting lists.
 
         The cutoff is applied server-side rather than after the fetch on purpose: the cost of a
         stopword band hash is dominated by shipping and BSON-decoding a posting list with
         millions of entries, so a client-side check would pay almost the whole price before
-        discarding it.
+        discarding it. `df_index_complete` passes in the flag a caller already read, so a lookup
+        over all bands reads the settings document once rather than once per band.
         """
         cutoff = self._bandDfCutoff(band_df_cutoff)
         if cutoff <= 0:
             return [{"$match": {"band_hash": {"$in": band_hashes}}}]
-        if self.isBandDfIndexComplete():
+        if df_index_complete is None:
+            df_index_complete = self.isBandDfIndexComplete()
+        if df_index_complete:
             # the whole point of storing df: with a (band_hash, df) index mongod decides from
             # the index entry alone, so an over-long posting list is never read. Filtering on
             # $size instead still reads every document to measure it, which measured no faster
             # than not filtering at all.
+            # no bucket predicate here: with one, mongod prefers the (band_hash, bucket) index and
+            # reads every over-cutoff bucket 0 before discarding it. _bandLookupHits drops the stray
+            # upper bucket a df could admit instead.
             return [{"$match": {"band_hash": {"$in": band_hashes}, "df": {"$lte": cutoff}}}]
         # no trustworthy df yet: fall back to measuring the list, which is correct but only
         # saves the transfer, not the read
@@ -1733,6 +2131,43 @@ class MongoDbStorage(StorageInterface):
             {"$match": {"$expr": {"$lte": [{"$size": {"$ifNull": ["$function_ids", []]}}, cutoff]}}},
         ]
 
+    def _bandLookupPlan(self, band_df_cutoff: Optional[int] = None) -> Tuple[int, bool, bool]:
+        """(cutoff, df index complete, lookup reads bucket 0 alone), decided once per lookup call.
+
+        The settings document is read once here rather than once per band. The lookup matches on
+        df, which only bucket 0 of a bucketed hash carries, when a cutoff is set and the df index
+        is trusted. The cutoff is the job's effective one, not the configured one: deciding from
+        the configured cutoff would fetch the upper buckets of a hash the job's pipeline already
+        returned whole, or skip them for one it matched on df alone.
+        """
+        cutoff = self._bandDfCutoff(band_df_cutoff)
+        df_index_complete = cutoff > 0 and self.isBandDfIndexComplete()
+        return cutoff, df_index_complete, bool(self._bandBucketSize()) and df_index_complete
+
+    def _bandLookupHits(self, band_number: int, band_hashes: List[int], plan: Tuple[int, bool, bool]):
+        """The band documents a candidate lookup reads: every posting of every hash the cutoff admits.
+
+        The df-indexed pipeline matches bucket 0 alone. For a hash that never spilled that is all
+        of it, and a hash that spilled has a df the cutoff rejects - unless pulls shrank it back
+        under the cutoff while its surviving postings sit in buckets above 0. Its bucket 0 then
+        names a tail above 0, and those buckets are fetched as well; otherwise the lookup would
+        quietly treat the hash as one without candidates. Only deletions produce such a hash, so
+        the extra, indexed query is normally never made.
+        """
+        cutoff, df_index_complete, bucket_zero_only = plan
+        collection = self._getDb()["band_%d" % band_number]
+        shrunk = []
+        for hit in collection.aggregate(self._bandLookupPipeline(band_hashes, cutoff, df_index_complete)):
+            if bucket_zero_only and (hit.get("bucket") or 0) != 0:
+                # df belongs on bucket 0 alone; one found on a bucket above it - only switching
+                # bucketing back off, which is unsupported, stamps one - must not admit that bucket
+                continue
+            yield hit
+            if bucket_zero_only and (hit.get("tail") or 0) > 0:
+                shrunk.append(hit["band_hash"])
+        if shrunk:
+            yield from collection.find({"band_hash": {"$in": shrunk}, "bucket": {"$gt": 0}}, {"_id": 0, "band_hash": 1, "function_ids": 1})
+
     def _getCandidatesForMinHashesNumpy(self, function_id_to_minhash: Dict[int, "MinHash"], band_matches_required=1, as_arrays=False, band_df_cutoff=None):
         """Variant C: accumulate band hits as int64 arrays instead of dict[qid][cid] -> count.
 
@@ -1744,14 +2179,14 @@ class MongoDbStorage(StorageInterface):
         """
         target_band_hashes_per_band, band_hash_to_function_ids = self._collectBandHashTargets(function_id_to_minhash)
         hit_chunks = {}
+        plan = self._bandLookupPlan(band_df_cutoff)
         for band_number, band_hashes in target_band_hashes_per_band.items():
-            cursor = self._getDb()["band_%d" % band_number].aggregate(self._bandLookupPipeline(list(band_hashes), band_df_cutoff))
-            for hit in cursor:
+            for hit in self._bandLookupHits(band_number, list(band_hashes), plan):
                 reference_function_ids = band_hash_to_function_ids[band_number][hit["band_hash"]]
                 # int64, not int32: function ids come from a counter that never reuses an id, so they
                 # pass 2**31 - 1 within a few million samples. numpy 2 then raises OverflowError, and
                 # numpy 1.x silently wraps the id onto a different function.
-                posting_list = np.array(hit["function_ids"], dtype=np.int64)
+                posting_list = np.array(hit.get("function_ids") or [], dtype=np.int64)
                 for function_id in reference_function_ids:
                     if function_id not in hit_chunks:
                         hit_chunks[function_id] = [posting_list]
@@ -1787,14 +2222,14 @@ class MongoDbStorage(StorageInterface):
             return self._getCandidatesForMinHashesNumpy(function_id_to_minhash, band_matches_required=band_matches_required, band_df_cutoff=band_df_cutoff)
         candidates = {}
         target_band_hashes_per_band, band_hash_to_function_ids = self._collectBandHashTargets(function_id_to_minhash)
+        plan = self._bandLookupPlan(band_df_cutoff)
         for band_number, band_hashes in target_band_hashes_per_band.items():
-            cursor = self._getDb()["band_%d" % band_number].aggregate(self._bandLookupPipeline(list(band_hashes), band_df_cutoff))
-            for hit in cursor:
+            for hit in self._bandLookupHits(band_number, list(band_hashes), plan):
                 reference_function_ids = band_hash_to_function_ids[band_number][hit["band_hash"]]
                 for function_id in reference_function_ids:
                     if function_id not in candidates:
                         candidates[function_id] = {}
-                    for hit_function_id in hit["function_ids"]:
+                    for hit_function_id in hit.get("function_ids") or []:
                         if hit_function_id not in candidates[function_id]:
                             candidates[function_id][hit_function_id] = 0
                         candidates[function_id][hit_function_id] += 1
@@ -1813,11 +2248,12 @@ class MongoDbStorage(StorageInterface):
             return set()
         candidates = {}
         band_hashes = self.getBandHashesForMinHash(minhash)
+        plan = self._bandLookupPlan(band_df_cutoff)
         for band_number, band_hash in sorted(band_hashes.items()):
-            band_documents = list(self._getDb()["band_%d" % band_number].aggregate(self._bandLookupPipeline([band_hash], band_df_cutoff)))
-            band_document = band_documents[0] if band_documents else None
-            if band_document:
-                for function_id in band_document["function_ids"]:
+            # every document, not the first: under bucketing a hash's postings span several
+            for band_document in self._bandLookupHits(band_number, [band_hash], plan):
+                # a bucket 0 recreated to hold a hash's bookkeeping can carry no posting list
+                for function_id in band_document.get("function_ids") or []:
                     if function_id not in candidates:
                         candidates[function_id] = 0
                     candidates[function_id] += 1
@@ -2012,6 +2448,85 @@ class MongoDbStorage(StorageInterface):
     def _setBandDfIndexComplete(self, is_complete: bool) -> None:
         self._getDb().settings.update_one({}, {"$set": {self._BAND_DF_SETTING: bool(is_complete)}})
 
+    # _bandLookupPipeline filters on df, so this backend's candidate lookup does skip what the
+    # coverage report counts
+    APPLIES_BAND_DF_CUTOFF = True
+
+    def _bandDfIndexName(self, band_number: int) -> Optional[str]:
+        """The name of the (band_hash, df) index on one band collection, or None if it has none."""
+        for name, info in self._getDb()["band_%d" % band_number].index_information().items():
+            if [tuple(key) for key in info.get("key", [])] == [("band_hash", 1), ("df", 1)]:
+                return name
+        return None
+
+    def _bandDfUnavailableReason(self) -> Optional[str]:
+        # Refused rather than measured by $size: without a trusted df the only way to count is to
+        # read every band document in full - on a 7,244-sample corpus that is 111.8M postings - which
+        # is the very read the (band_hash, df) index exists to avoid, and the rebuild that fixes it
+        # is the one the cutoff needs anyway to skip from the index.
+        reason = super()._bandDfUnavailableReason()
+        if reason is not None:
+            return reason
+        missing = [band_number for band_number in range(self._storage_config.STORAGE_NUM_BANDS) if self._bandDfIndexName(band_number) is None]
+        if missing:
+            return (
+                f"Band collections {missing} have no (band_hash, df) index, so what STORAGE_BAND_DF_CUTOFF skips cannot be "
+                "counted from the index alone. Run the band df rebuild (GET /rebuild_band_df_index), which creates it, "
+                "then request the coverage again."
+            )
+        return None
+
+    @staticmethod
+    def _bandDfCountPipeline(thresholds: List[int]) -> List[Dict[str, Any]]:
+        """The aggregation _countBandDf runs per band: one $group over df and nothing else.
+
+        Only bucket 0 of a hash carries df (the total across its buckets; the buckets above it carry
+        none), so a document with df > 0 is exactly one band hash and its df is that hash's whole
+        posting-list length. Counting those documents and summing their df therefore needs no
+        grouping by band_hash: one running total per band, whose memory does not grow with the
+        number of hashes and so never needs allowDiskUse. A document without df (a bucket above 0)
+        or with df 0 (an empty one) adds nothing to any of the counts.
+        """
+        with_df = {"$gt": ["$df", 0]}
+        over_accumulators: Dict[str, Any] = {}
+        for threshold in thresholds:
+            over = {"$gt": ["$df", threshold]}
+            over_accumulators["hashes_over_%d" % threshold] = {"$sum": {"$cond": [over, 1, 0]}}
+            over_accumulators["postings_over_%d" % threshold] = {"$sum": {"$cond": [over, "$df", 0]}}
+        return [
+            {
+                "$group": {
+                    "_id": None,
+                    "band_hashes": {"$sum": {"$cond": [with_df, 1, 0]}},
+                    "postings": {"$sum": {"$cond": [with_df, "$df", 0]}},
+                    "max_df": {"$max": "$df"},
+                    **over_accumulators,
+                }
+            },
+        ]
+
+    def _countBandDf(self, band_number: int, thresholds: List[int]) -> Dict[str, Any]:
+        """Count one band's posting lists from the (band_hash, df) index alone.
+
+        The pipeline only reads df, which the hinted index carries, so the plan is a covered index
+        scan: no band document - and no posting list - is fetched. On a 7,244-sample corpus
+        (MongoDB 7.0) a single $group of this shape took 39.3 s for all 20 bands, 1.1 to 2 s per
+        band.
+
+        Postings in buckets above 0 of a hash whose bucket 0 is missing carry no df and are not
+        counted; with the cutoff on they are never served either. rebuild_band_df_index recreates
+        the missing bucket 0 from the buckets that remain.
+        """
+        collection = self._getDb()["band_%d" % band_number]
+        rows = list(collection.aggregate(self._bandDfCountPipeline(thresholds), hint=self._bandDfIndexName(band_number)))
+        row = rows[0] if rows else {}
+        return {
+            "band_hashes": int(row.get("band_hashes") or 0),
+            "postings": int(row.get("postings") or 0),
+            "max_df": int(row.get("max_df") or 0),
+            "over": {threshold: [int(row.get("hashes_over_%d" % threshold) or 0), int(row.get("postings_over_%d" % threshold) or 0)] for threshold in thresholds},
+        }
+
     def rebuildBandDfIndex(self, progress_reporter=None) -> int:
         """Set df on every band document and index (band_hash, df); returns documents updated.
 
@@ -2043,7 +2558,8 @@ class MongoDbStorage(StorageInterface):
         upsert filter `{band_hash, bucket: 0}` would not match - it would insert a *second*
         document for the hash and split the posting list invisibly. Stamping `bucket: 0` here is
         what makes those documents addressable, so this has to run after enabling the knob and
-        before the next write.
+        before the next write. It also recreates a hash's bucket 0 where that is missing while
+        buckets above it survive, since bucket 0 holds the hash's only df.
 
         Writes in batches rather than one bulk_write over the whole collection, because the
         rebuild is the one operation whose cost does follow corpus size and a single batch of
@@ -2064,7 +2580,18 @@ class MongoDbStorage(StorageInterface):
                 if int(entry["bucket"] or 0) == tail:
                     tail_n = int(entry["n"])
                     break
-            pending.append(UpdateOne({"band_hash": row["_id"], "bucket": {"$in": [0, None]}}, {"$set": {"bucket": 0, "df": int(row["df"]), "tail": tail, "tail_n": tail_n}}))
+            # upsert while postings survive, as _recomputeBandBookkeeping does: a hash whose bucket 0
+            # is missing carries no df anywhere, so without it the cutoff never serves its postings
+            # and the coverage report does not count them. A recreated bucket 0 gets an empty posting
+            # list, since every lookup reads function_ids off each document it returns
+            df = int(row["df"])
+            pending.append(
+                UpdateOne(
+                    {"band_hash": row["_id"], "bucket": {"$in": [0, None]}},
+                    {"$set": {"bucket": 0, "df": df, "tail": tail, "tail_n": tail_n}, "$setOnInsert": {"function_ids": []}},
+                    upsert=df > 0,
+                )
+            )
             if len(pending) >= 5000:
                 collection.bulk_write(pending, ordered=False)
                 num_hashes += len(pending)
@@ -2169,8 +2696,10 @@ class MongoDbStorage(StorageInterface):
 
         This pages with `$gte`/`$gt`, which MongoDB brackets by BSON type, so it would silently
         stop at the end of the string bracket if a corpus held pichashes of another type.
-        `_encodePichash` only ever writes `hex()`, i.e. a string, and the caller verifies the
-        total against an independent count rather than trusting that.
+        `_encodePichash` only ever writes a hex string - zero-padded, or `hex()` on an instance
+        not yet migrated (#145), whose two spellings of a value are then separate runs, counted
+        separately and summed again by the cutoff - and the caller verifies the total against an
+        independent count rather than trusting that.
         """
         functions = self._getDb().functions
         condition: Dict[str, Any] = {"$ne": None}
@@ -2371,13 +2900,11 @@ class MongoDbStorage(StorageInterface):
         return None
 
     def isPicHash(self, pichash: int) -> bool:
-        query = {"pichash": pichash}
-        self._encodePichash(query)
-        return self._getDb().functions.find_one(query) is not None
+        query = self._pichashLookupCondition("_pichash", pichash)
+        return self._getDb().functions.find_one(query, {"_id": 1}) is not None
 
     def getMatchesForPicHash(self, pichash: int) -> Set[Tuple[int, int, int]]:
-        query = {"pichash": pichash}
-        self._encodePichash(query)
+        query = self._pichashLookupCondition("_pichash", pichash)
         return set(
             map(
                 lambda x: (x["family_id"], x["sample_id"], x["function_id"]),
@@ -2386,21 +2913,22 @@ class MongoDbStorage(StorageInterface):
         )
 
     def getMatchesForPicHashes(self, pichashes: List[int]) -> Dict[int, Set[Tuple[int, int, int]]]:
+        # padded on a padded instance; otherwise either spelling of a value may be stored (#145)
+        padded = self.isPichashPadded()
         encoded_to_decoded = {}
         for pichash in set(pichashes):
-            query = {"pichash": pichash}
-            self._encodePichash(query)
-            encoded_to_decoded[query["_pichash"]] = pichash
+            for encoded in [encode_pichash_value(pichash, padded=True)] if padded else pichash_value_variants(pichash):
+                encoded_to_decoded[encoded] = pichash
         matches: Dict[int, Set[Tuple[int, int, int]]] = {}
         if encoded_to_decoded:
-            wanted = self._filterPicHashesByMatchCount(list(encoded_to_decoded))
+            wanted = self._filterPicHashesByMatchCount(sorted(encoded_to_decoded))
             fields_to_fetch = {"_pichash": 1, "family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0}
             for hit in self._getDb().functions.find({"_pichash": {"$in": wanted}}, fields_to_fetch):
                 matches.setdefault(encoded_to_decoded[hit["_pichash"]], set()).add((hit["family_id"], hit["sample_id"], hit["function_id"]))
         return matches
 
     def getMatchesForPicBlockHash(self, picblockhash: int) -> Set[Tuple[int, int, int, int]]:
-        query = {"_picblockhashes.hash": hex(picblockhash)}
+        query = self._pichashLookupCondition("_picblockhashes.hash", picblockhash)
         result = self._getDb().functions.aggregate(
             [
                 {"$match": query},
@@ -2628,6 +3156,7 @@ class MongoDbStorage(StorageInterface):
             "num_functions": 0,
             "num_bands": self._storage_config.STORAGE_NUM_BANDS,
             "num_pichashes": num_unique_pichashes,
+            "pichash_padded": self.isPichashPadded(),
         }
         for family_document in self._getDb().families.find():
             stats["num_families"] += 1
@@ -2746,21 +3275,15 @@ class MongoDbStorage(StorageInterface):
 
     def recalculateAllPicHashes(self, progress_reporter=None):
         # get current SMDA version
-        smda_config = SmdaConfig()
-        smda_version = smda_config.VERSION
-        smda_downward_compatibility = getattr(smda_config, "ESCAPER_DOWNWARD_COMPATIBILITY", None)
-        if smda_downward_compatibility is None:
-            LOGGER.warning("SMDA downward compatibility version unknown, using current SMDA version as threshold...")
-            smda_downward_compatibility = smda_version
-        compatibility_threshold = version.parse(smda_downward_compatibility)
-        # get samples where recalculation is necessary
+        smda_version = SmdaConfig().VERSION
+        # get samples where recalculation is necessary: those not yet stamped as rehashed by a
+        # compatible smda, rather than those whose report is old, which every run would pick again (#249)
         samples_to_be_updated = {}
-        for sample_document in self._getDb().samples.find({}, {"sample_id": 1, "smda_version": 1, "architecture": 1, "base_addr": 1, "binary_size": 1, "bitness": 1, "_id": 0}):
-            report_version = sample_document["smda_version"]
-            if report_version.startswith("MCRIT4IDA"):
-                report_version = report_version.rsplit(" ", 1)[-1]
-            if version.parse(report_version) < compatibility_threshold:
-                samples_to_be_updated[sample_document["sample_id"]] = sample_document
+        for sample_document in self._getDb().samples.find(
+            self._stalePicHashQuery(self._getPicHashCompatibilityThreshold()),
+            {"sample_id": 1, "smda_version": 1, "architecture": 1, "base_addr": 1, "binary_size": 1, "bitness": 1, "_id": 0},
+        ):
+            samples_to_be_updated[sample_document["sample_id"]] = sample_document
         # and those whose block hashes a picblocks escaped as Intel code while they are not (#240)
         num_stale_picblockhash_samples = 0
         for sample_document in self._getDb().samples.find(
@@ -2778,6 +3301,7 @@ class MongoDbStorage(StorageInterface):
         picblockhashes_updatable = 0
         picblockhashes_updated = 0
         xcfg_missing = 0
+        samples_skipped = 0
         picblockhash_index_invalidated = False
         for sample_id, sample_info in samples_to_be_updated.items():
             pic_hash_updates = []
@@ -2802,6 +3326,14 @@ class MongoDbStorage(StorageInterface):
                     sample_xcfg_missing += 1
                     continue
                 smda_xcfg = json.loads(function_document["_xcfg"])
+                # rebuilt before anything is counted: a function stored as {} is skipped, and its
+                # old block hashes are not updatable
+                smda_function = smdaFunctionFromXcfg(smda_xcfg, binary_info)
+                if smda_function is None:
+                    # stored as {} - as unrehashable as a missing blob, so the sample must not be stamped
+                    xcfg_missing += 1
+                    sample_xcfg_missing += 1
+                    continue
                 old_pichash = int(function_document["_pichash"], 16)
                 old_blockhashes = []
                 if "_picblockhashes" in function_document:
@@ -2809,7 +3341,6 @@ class MongoDbStorage(StorageInterface):
                         blockhash["hash"] = int(blockhash["hash"], 16)
                         old_blockhashes.append(blockhash)
                     picblockhashes_updatable += len(old_blockhashes)
-                smda_function = SmdaFunction.fromDict(smda_xcfg, binary_info=binary_info)
                 new_pichash = smda_function.getPicHash(binary_info)
                 if old_pichash != new_pichash:
                     functions_updated += 1
@@ -2827,7 +3358,7 @@ class MongoDbStorage(StorageInterface):
                     update_document["picblockhashes"] = picblockhashes
                 # prepare single function entry update
                 if update_document:
-                    self._encodePichash(update_document)
+                    self._encodePichash(update_document, padded=self.isPichashPadded())
                     update_command = {"$set": update_document}
                     pic_hash_updates.append(UpdateOne({"function_id": function_document["function_id"]}, update_command, upsert=True))
             # batch insert updates for function_entries
@@ -2840,11 +3371,18 @@ class MongoDbStorage(StorageInterface):
                     # old against new hashes per function, which is what the rebuild does anyway.
                     self._setPicBlockHashIndexComplete(False)
                     picblockhash_index_invalidated = True
-                self._getDb().samples.update_one({"sample_id": sample_id}, {"$set": {"smda_version": smda_version}})
                 self._getDb().functions.bulk_write(pic_hash_updates, ordered=False)
-            # only a sample whose every function was rehashed holds block hashes of this picblocks
-            if not sample_xcfg_missing:
-                self._getDb().samples.update_one({"sample_id": sample_id}, {"$set": {"picblockhash_version": PICBLOCKS_VERSION}})
+            # only a sample whose every function was rehashed holds hashes of this smda and picblocks,
+            # whether or not any of them changed; smda_version keeps naming the smda of the report
+            # one that was not is marked, so neither selection picks it again until smda changes
+            if sample_xcfg_missing:
+                samples_skipped += 1
+                self._getDb().samples.update_one({"sample_id": sample_id}, {"$set": {"pichash_unrehashable_smda_version": smda_version}})
+            else:
+                self._getDb().samples.update_one(
+                    {"sample_id": sample_id},
+                    {"$set": {"pichash_smda_version": smda_version, "picblockhash_version": PICBLOCKS_VERSION}, "$unset": {"pichash_unrehashable_smda_version": ""}},
+                )
             if progress_reporter:
                 progress_reporter.step()
         self._getDb().command("reIndex", "functions")
@@ -2852,7 +3390,9 @@ class MongoDbStorage(StorageInterface):
             f"Found {total_samples} outdated samples, {functions_updated}/{functions_updatable} PicHashes and {picblockhashes_updated}/{picblockhashes_updatable} PicBlockHashes were updated."
         )
         if xcfg_missing:
-            LOGGER.warning(f"{xcfg_missing} functions could not be updated as there was not CFG available.")
+            LOGGER.warning(
+                f"{xcfg_missing} functions in {samples_skipped} samples could not be updated as no CFG was available for them, these samples are marked unrehashable until smda changes."
+            )
         if picblockhash_index_invalidated:
             LOGGER.warning("picblockhash index invalidated by the recalculation - run rebuildPicBlockHashIndex().")
         return {
@@ -2863,6 +3403,7 @@ class MongoDbStorage(StorageInterface):
             "picblockhashes_updatable": picblockhashes_updatable,
             "picblockhashes_updated": picblockhashes_updated,
             "xcfg_missing": xcfg_missing,
+            "samples_skipped_xcfg_missing": samples_skipped,
         }
 
     ##### picblockhash inverted index #####
@@ -2963,16 +3504,34 @@ class MongoDbStorage(StorageInterface):
         LOGGER.info("Rebuilt picblockhash index over %d distinct block hashes.", num_hashes)
         return num_hashes
 
+    @staticmethod
+    def _unpaddedBlockHash(stored_hash: str) -> str:
+        """The one spelling getUniqueBlocks keys a block hash by on an instance not (yet) padded.
+
+        Such an instance may hold a value in both spellings while migrate_pichash_padding is
+        underway (#145), and a candidate is dropped by looking its key up, so both have to land on
+        the same key. `hex()` is the one its values had before the migration started. Only a
+        padded value with a leading zero is spelled differently, and the scan fallback calls this
+        once per block entry of the corpus, so every other value is returned without parsing it.
+        """
+        if stored_hash[2:3] != "0":
+            return stored_hash
+        return hex(int(stored_hash, 16))
+
     def _reduceToUniqueBlocksUsingIndex(self, candidate_picblockhashes: Dict, sample_ids: List[int]) -> None:
         """Drop every candidate the index shows in a sample outside the request."""
         requested_sample_ids = set(sample_ids)
         collection = self._getDb()[self._PICBLOCKHASH_INDEX_COLLECTION]
+        padded = self.isPichashPadded()
         candidate_hashes = list(candidate_picblockhashes)
         for offset in range(0, len(candidate_hashes), self._PICBLOCKHASH_INDEX_QUERY_SLICE):
             hash_slice = candidate_hashes[offset : offset + self._PICBLOCKHASH_INDEX_QUERY_SLICE]
+            if not padded:
+                # the index is keyed on the stored spelling, which may be either width here
+                hash_slice = sorted({variant for block_hash in hash_slice for variant in pichash_value_variants(int(block_hash, 16))})
             for document in collection.find({"_id": {"$in": hash_slice}}, {"sample_ids": 1}):
                 if any(sample_id not in requested_sample_ids for sample_id in document["sample_ids"]):
-                    candidate_picblockhashes.pop(document["_id"], None)
+                    candidate_picblockhashes.pop(document["_id"] if padded else self._unpaddedBlockHash(document["_id"]), None)
 
     def _reduceToUniqueBlocksByScan(self, candidate_picblockhashes: Dict, sample_ids: List[int], progress_reporter=None) -> None:
         """The pre-index elimination: read every function that has block hashes.
@@ -2982,12 +3541,13 @@ class MongoDbStorage(StorageInterface):
         """
         if progress_reporter is not None:
             progress_reporter.set_total(self._getDb().functions.count_documents(filter={}))
+        padded = self.isPichashPadded()
         for entry in self._getDb().functions.find({"_picblockhashes": {"$exists": True, "$ne": []}}, {"sample_id": 1, "_picblockhashes": 1, "_id": 0}):
             if progress_reporter is not None:
                 progress_reporter.step()
             if entry["sample_id"] not in sample_ids:
                 for block_entry in entry["_picblockhashes"]:
-                    candidate_picblockhashes.pop(block_entry["hash"], None)
+                    candidate_picblockhashes.pop(block_entry["hash"] if padded else self._unpaddedBlockHash(block_entry["hash"]), None)
 
     def getUniqueBlocks(self, sample_ids: List[int], progress_reporter=None) -> Dict:
         # query once to get all blocks from the functions of our samples
@@ -2996,13 +3556,16 @@ class MongoDbStorage(StorageInterface):
             "unique_blocks_overall": 0,
             "num_samples": len(sample_ids),
         }
-        candidate_picblockhashes: Dict[int, Dict[str, Any]] = {}
+        candidate_picblockhashes: Dict[str, Dict[str, Any]] = {}
+        # keyed by the stored spelling, which on an instance not (yet) padded is normalised so
+        # that a value stored in both widths during a migration stays one block (#145)
+        padded = self.isPichashPadded()
         for entry in self._getDb().functions.find(
             {"sample_id": {"$in": sample_ids}, "_picblockhashes": {"$exists": True, "$ne": []}}, {"function_id": 1, "sample_id": 1, "_picblockhashes": 1, "_id": 0}
         ):
             sample_id = entry["sample_id"]
             for block_entry in entry["_picblockhashes"]:
-                block_hash = block_entry["hash"]
+                block_hash = block_entry["hash"] if padded else self._unpaddedBlockHash(block_entry["hash"])
                 if block_hash not in candidate_picblockhashes:
                     candidate_picblockhashes[block_hash] = {
                         "samples": set(),
@@ -3064,34 +3627,38 @@ class MongoDbStorage(StorageInterface):
             # inline `_xcfg` is the fallback for pre-migration documents (see _attachXcfgBlobs)
             entry["_xcfg"] = block_xcfg_blobs.get(function_id) or entry.get("_xcfg") or "{}"
             self._decodeXcfg(entry)
+            # a function whose disassembly was dropped (STORAGE_DROP_DISASSEMBLY, #42) decodes to {}:
+            # its blocks keep no instructions rather than failing the whole job, as in MemoryStorage
+            blocks = entry["xcfg"].get("blocks") or {}
             for block_offset, picblockhash in function_id_to_block_offsets[function_id]:
-                candidate_picblockhashes[picblockhash]["instructions"] = entry["xcfg"]["blocks"][str(block_offset)]
+                block_instructions = blocks.get(str(block_offset))
+                if block_instructions is None:
+                    continue
+                candidate_picblockhashes[picblockhash]["instructions"] = block_instructions
         LOGGER.info(f"Instructions for {len(candidate_picblockhashes)} blocks extracted.")
         return {"statistics": block_statistics, "unique_blocks": candidate_picblockhashes}
 
     ##### helpers for search ######
 
-    # pichashes are stored hex-encoded, in a differently named field ("_pichash") and with a
-    # variable width, so sorting on them would neither order numerically nor let the search cursor
-    # page - its tree compares the sort field with a range operator, which the transpiler rejects.
-    # Zero-padding the stored value would lift this and the range rejection alike (#145).
-    _UNSORTABLE_FIELDS = ("pichash",)
+    # pichashes are stored hex-encoded in a differently named field ("_pichash"). Sorting on them
+    # orders numerically only once the instance stores them zero-padded, and the search cursor
+    # pages by comparing the sort field with a range operator, which the transpiler only allows
+    # then (#145); an instance that has not been migrated keeps rejecting the sort by name.
+    _SORT_FIELD_TO_STORED = {"pichash": "_pichash"}
 
-    @staticmethod
-    def _assert_sortable_fields(full_cursor: Optional[FullSearchCursor]) -> None:
-        if full_cursor is None:
+    def _assert_sortable_fields(self, full_cursor: Optional[FullSearchCursor]) -> None:
+        if full_cursor is None or self.isPichashPadded():
             return
         for field in full_cursor.sort_fields:
-            if field in MongoDbStorage._UNSORTABLE_FIELDS:
-                raise ValueError(f"Sorting by the field '{field}' is not supported by the MongoDB backend.")
+            if field == "pichash":
+                raise ValueError("Sorting by the field 'pichash' needs zero-padded pichashes; run migrate_pichash_padding first.")
 
-    @staticmethod
-    def _get_sort_list_from_cursor(full_cursor: Optional[FullSearchCursor]):
-        MongoDbStorage._assert_sortable_fields(full_cursor)
+    def _get_sort_list_from_cursor(self, full_cursor: Optional[FullSearchCursor]):
+        self._assert_sortable_fields(full_cursor)
         if full_cursor is None:
             return None
         is_backward_search = not full_cursor.is_forward_search
-        sort_list = [(key, 1 if direction ^ is_backward_search else -1) for key, direction in full_cursor.sort_by_list]
+        sort_list = [(self._SORT_FIELD_TO_STORED.get(key, key), 1 if direction ^ is_backward_search else -1) for key, direction in full_cursor.sort_by_list]
         return sort_list
 
     def _getDistinctValues(self, collection: str, field: str) -> Optional[List[Any]]:
@@ -3146,7 +3713,7 @@ class MongoDbStorage(StorageInterface):
                 values = self._getDistinctValues(collection, field)
                 if values is not None:
                     known_values[field] = values
-        query = MongoSearchTranspiler(known_values).visit(full_tree)
+        query = MongoSearchTranspiler(known_values, pichash_padded=self.isPichashPadded()).visit(full_tree)
         return query
 
     ##### search ####
