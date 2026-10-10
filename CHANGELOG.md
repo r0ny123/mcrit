@@ -68,6 +68,21 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Changed
 
+- **Minhashes are stored as BSON binary instead of hex text**, half the bytes per signature. On
+  a 7,244-sample corpus with 64.8% of its functions hashed, that is 5.7% of `functions`
+  uncompressed, 342 MiB of its 6,018 MiB, and an estimated 12.9% on disk after snappy, about
+  299 MiB of its 2,318 MiB. Minhashes stored as hex before are still read, so nothing has to be
+  migrated. `python -m mcrit.migrations.migrate_minhash_binary --mode binary` converts
+  them, and `--mode count` says how many are left; MongoDB reuses the space this frees, and only
+  `compact` returns it to the filesystem. Exports and the REST API still carry hex.
+
+  NOTE that this changes the stored data shape. An MCRIT from before this release fails on a
+  binary minhash (`bytes.fromhex` refuses `bytes`), so upgrade the server and every worker
+  together, and run `--mode revert` with them stopped before going back to an older release.
+  Scripts that read `functions.minhash` directly get `bytes` for functions hashed after the
+  upgrade, hex for those hashed before it until the migration runs, and `""` for functions not
+  hashed yet.
+
 - `McritClient` sends all requests through one `requests.Session`, so consecutive calls reuse a
   connection instead of opening a new one, with a new TLS handshake on HTTPS, every time. Against
   mcrit.malpedia.io, 166 sequential block-hash queries took 46 s instead of 166 s. A session keeps
@@ -75,7 +90,41 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   pooled connection the server already closed, which surfaces as a connection error on that call.
   Tests patch `requests.Session` methods instead of the module-level `requests` functions. (#254)
 
+- **Pichashes and picblockhashes are stored zero-padded to 16 hex digits ([#145])**, so that
+  their string order is their numeric order: the MongoDB backend now answers range conditions on
+  `pichash` and sorts (and pages) function searches by it. A new instance is padded from the
+  start. An existing one keeps its variable-width values, and keeps rejecting both, until
+  `python -m mcrit.migrations.migrate_pichash_padding --mode pad` has rewritten them and set the
+  `pichash_padded` settings flag (`--mode verify` checks, `--mode unpad` rolls back); every other
+  reader accepts both widths meanwhile, and `/status` reports `pichash_padded`. Stop the server
+  and workers for the migration and restart them afterwards. It drops the two indexes keyed on the
+  stored spelling - `pichash_counts` and the inverted `picblockhashes` index - and marks them
+  incomplete, since left behind they would miss every lookup: the cutoff would drop every PicHash
+  match, and `getUniqueBlocks` would report every shared block with a leading zero as unique (15
+  blocks unique to a sample that has none, in the test data). Both fall back to reading the
+  functions collection, correctly but slowly, until `rebuildPicHashCountIndex()` and
+  `rebuildPicBlockHashIndex()` (`GET /rebuild_picblockhash_index`) have run. Unique-block results
+  and the YARA rules built from them name blocks by the stored hex, so on a padded instance those
+  names are 16 digits wide. A run that finds nothing to rewrite (a repeated `pad`, or `pad` on an
+  instance padded from the start) keeps both indexes. Until the migration is complete a value may
+  be stored in both spellings; the cutoff (`MINHASH_PICHASH_MAX_MATCHES`) sums the holders of both
+  and keeps or drops the value as a unit, and without its count index it counts them the slow way
+  and logs a warning, with the same results.
+
 ### Fixed
+
+- **Deleting a sample left it in the pichash counts and the function-range index** ([#261]).
+  `deleteSample` took the sample out of the bands and the picblockhash index but not out of
+  `pichash_counts` or `function_ranges`, which adding a sample fills, so a deleted sample stayed
+  counted and a deleted and re-added one was counted twice. Measured on a 7,244-sample corpus after
+  475 samples were deleted and added back: the counts summed to 9,050,959 for 8,657,357 functions,
+  306 of 5,000 sampled counts wrong. Only `MINHASH_PICHASH_MAX_MATCHES` reads the counts, so a
+  deployment that leaves it at 0, the default, saw nothing; one that sets it could lose exact
+  matches whose pichash an inflated count pushed over the cap. A corpus that deleted samples
+  before this release still carries the surplus. `MongoDbStorage.rebuildPicHashCountIndex()`
+  clears it, though no route or client method runs it yet; `rebuild_function_range_index`
+  (`McritClient.rebuildFunctionRangeIndex()`) drops the stale ranges, which are harmless since
+  function ids are never reused.
 
 - **`McritClient` raised a `JSONDecodeError` for a 2xx whose body is not JSON** ([#257]). A reverse
   proxy's error or login page, or an empty answer, with a 200 or 202 status went through
@@ -1212,6 +1261,7 @@ date, the version, and what changed.
 [1.9.0]: https://github.com/danielplohmann/mcrit/compare/v1.8.1...v1.9.0
 [#44]: https://github.com/danielplohmann/mcrit/issues/44
 [#142]: https://github.com/danielplohmann/mcrit/issues/142
+[#145]: https://github.com/danielplohmann/mcrit/issues/145
 [#147]: https://github.com/danielplohmann/mcrit/pull/147
 [#149]: https://github.com/danielplohmann/mcrit/issues/149
 [#150]: https://github.com/danielplohmann/mcrit/issues/150
@@ -1245,6 +1295,7 @@ date, the version, and what changed.
 [#202]: https://github.com/danielplohmann/mcrit/issues/202
 [#203]: https://github.com/danielplohmann/mcrit/issues/203
 [#215]: https://github.com/danielplohmann/mcrit/issues/215
+[#261]: https://github.com/danielplohmann/mcrit/issues/261
 [#257]: https://github.com/danielplohmann/mcrit/issues/257
 [#252]: https://github.com/danielplohmann/mcrit/issues/252
 [#249]: https://github.com/danielplohmann/mcrit/issues/249

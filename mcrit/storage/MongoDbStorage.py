@@ -71,6 +71,24 @@ if TYPE_CHECKING:  # pragma: no cover
     from mcrit.config.McritConfig import McritConfig
 
 
+# pichashes and picblockhashes are 64 bit values stored as hex strings. Written zero-padded to
+# 16 digits, their string order is their numeric order, which is what range conditions and
+# cursor paging by pichash need (#145). Instances created before this carry variable-width
+# values ("0x4d2") until migrate_pichash_padding has run; the settings flag "pichash_padded"
+# says which shape an instance holds, and every reader below honours both until it is set.
+PICHASH_HEX_DIGITS = 16
+PICHASH_MAX_VALUE = (1 << (4 * PICHASH_HEX_DIGITS)) - 1
+
+
+def encode_pichash_value(value: int, padded: bool) -> str:
+    return "0x%0*x" % (PICHASH_HEX_DIGITS, value) if padded else hex(value)
+
+
+def pichash_value_variants(value: int) -> List[str]:
+    """Both encodings a value may be stored under while an instance is not (yet) padded."""
+    return sorted({hex(value), encode_pichash_value(value, padded=True)})
+
+
 class MongoSearchTranspiler(BaseVisitor):
     """
     Converts a tree to a MongoDB query.
@@ -107,9 +125,12 @@ class MongoSearchTranspiler(BaseVisitor):
         visited_children = [self.visit(child) for child in node.children]
         return self._or_query(*visited_children)
 
-    def __init__(self, known_values: Optional[Dict[str, List[Any]]] = None) -> None:
+    def __init__(self, known_values: Optional[Dict[str, List[Any]]] = None, pichash_padded: bool = False) -> None:
         super().__init__()
         self.known_values = known_values or {}
+        # whether the instance stores pichashes zero-padded (#145), which decides how a pichash
+        # condition is encoded and whether range operators on it are allowed
+        self.pichash_padded = pichash_padded
 
     def _substring_condition_from_known_values(self, node: SearchConditionNode) -> Optional[Dict[str, Any]]:
         # an empty search term matches everything, so the regex is left alone there
@@ -146,8 +167,12 @@ class MongoSearchTranspiler(BaseVisitor):
                 pass
         mongo_operator = operator_to_mongo[node.operator]
         if node.field == "pichash" and mongo_operator in ("$lt", "$lte", "$gt", "$gte"):
-            # pichashes are stored as hex strings, on which range comparisons are not meaningful
-            raise ValueError("Range operators are not supported for the field 'pichash'.")
+            if not self.pichash_padded:
+                # on variable-width hex strings a range comparison answers a plausible but wrong set
+                raise ValueError("Range operators on the field 'pichash' need zero-padded pichashes; run migrate_pichash_padding first.")
+            if not isinstance(value, int) or not 0 <= value <= PICHASH_MAX_VALUE:
+                # a bound outside the 64 bit domain formats wider than 16 digits and would not compare
+                raise ValueError("A pichash bound must be an integer between 0 and 0xffffffffffffffff.")
         if mongo_operator is None:
             condition = {node.field: value}
         else:
@@ -157,8 +182,13 @@ class MongoSearchTranspiler(BaseVisitor):
                 # a substring search is a regex, which cannot be hex-encoded - it is matched against
                 # the stored representation instead, so only the field has to be renamed
                 condition = {"_pichash": condition.pop("pichash")}
+            elif self.pichash_padded or not isinstance(value, int):
+                MongoDbStorage._encodePichash(condition, padded=self.pichash_padded)
+            elif mongo_operator is None:
+                # an instance that is not padded may hold either width (a migration in flight)
+                condition = {"_pichash": {"$in": pichash_value_variants(value)}}
             else:
-                MongoDbStorage._encodePichash(condition)
+                condition = {"_pichash": {"$nin": pichash_value_variants(value)}}
         return condition
 
 
@@ -245,6 +275,7 @@ class MongoDbStorage(StorageInterface):
             raise ValueError(f"STORAGE_BAND_DF_CUTOFF ({df_cutoff}) must not exceed STORAGE_BAND_BUCKET_SIZE ({bucket_size}).")
         self.blockhasher = BlockHasher()
         self._database = None
+        self._pichash_padded: Optional[bool] = None
         # guards the lazy initialisation in _getDb(); a threading.Lock is per-process, which is
         # what we want: forking servers (gunicorn) fork before the first request, so every child
         # inherits an unlocked copy and synchronises its own threads independently
@@ -313,7 +344,9 @@ class MongoDbStorage(StorageInterface):
 
     def _ensureIndexAndUnknownFamily(self) -> None:
         if "settings" not in self._getDb().list_collection_names():
-            self._getDb()["settings"].insert_one({"mcrit_db_id": str(uuid.uuid4()), "db_state": 0})
+            # a fresh instance stores pichashes zero-padded from the start (#145)
+            self._getDb()["settings"].insert_one({"mcrit_db_id": str(uuid.uuid4()), "db_state": 0, "pichash_padded": True})
+            self._pichash_padded = None
         # A database holding no functions has a trivially complete picblockhash index, so a fresh
         # instance - or one just cleared - maintains it from the first submit and never needs a
         # rebuild. An existing database carrying functions does *not* get the flag when it upgrades
@@ -720,21 +753,21 @@ class MongoDbStorage(StorageInterface):
                 self._getDb()[collection].delete_many({"_id": {"$in": ids}})
 
     @staticmethod
-    def _encodePichash(function_dict: Dict, delete_old: bool = True) -> None:
+    def _encodePichash(function_dict: Dict, delete_old: bool = True, padded: bool = False) -> None:
         if "pichash" in function_dict:
             value = function_dict["pichash"]
             # search conditions wrap the value in an operator dict, e.g. {"$ne": 0x1234}
             if isinstance(value, dict):
-                function_dict["_pichash"] = {k: hex(v) if isinstance(v, int) else v for k, v in value.items()}
+                function_dict["_pichash"] = {k: encode_pichash_value(v, padded) if isinstance(v, int) else v for k, v in value.items()}
             else:
-                function_dict["_pichash"] = hex(value)
+                function_dict["_pichash"] = encode_pichash_value(value, padded)
             if delete_old:
                 del function_dict["pichash"]
         if "picblockhashes" in function_dict:
             converted_entries = []
             for entry in function_dict["picblockhashes"]:
                 converted_entry = dict(**entry)
-                converted_entry["hash"] = hex(converted_entry["hash"])
+                converted_entry["hash"] = encode_pichash_value(converted_entry["hash"], padded)
                 # use two-complement to convert unit64 to int64 and vice versa
                 converted_entry["offset"] = encode_two_complement(converted_entry["offset"])
                 converted_entries.append(converted_entry)
@@ -764,15 +797,58 @@ class MongoDbStorage(StorageInterface):
             if delete_old:
                 del function_dict["_picblockhashes"]
 
-    @staticmethod
-    def _encodeFunction(function_dict: Dict, delete_old: bool = True) -> None:
-        MongoDbStorage._encodePichash(function_dict, delete_old=delete_old)
+    def _encodeFunction(self, function_dict: Dict, delete_old: bool = True) -> None:
+        MongoDbStorage._encodePichash(function_dict, delete_old=delete_old, padded=self.isPichashPadded())
         MongoDbStorage._encodeXcfg(function_dict, delete_old=delete_old)
+        MongoDbStorage._encodeMinHash(function_dict)
+
+    def isPichashPadded(self) -> bool:
+        """Whether this instance stores pichashes zero-padded (#145); read once per process."""
+        if self._pichash_padded is None:
+            settings = self._getDb().settings.find_one({}, {"pichash_padded": 1, "_id": 0}) or {}
+            self._pichash_padded = bool(settings.get("pichash_padded", False))
+        return self._pichash_padded
+
+    def _pichashLookupCondition(self, field: str, value: int) -> Dict[str, Any]:
+        if self.isPichashPadded():
+            return {field: encode_pichash_value(value, padded=True)}
+        return {field: {"$in": pichash_value_variants(value)}}
 
     @staticmethod
     def _decodeFunction(function_dict: Dict, delete_old: bool = True) -> None:
         MongoDbStorage._decodePichash(function_dict, delete_old=delete_old)
         MongoDbStorage._decodeXcfg(function_dict, delete_old=delete_old)
+        MongoDbStorage._decodeMinHash(function_dict)
+
+    # A minhash is stored as BSON binary: half the bytes of the hex text it used to be stored as,
+    # which is 5.7% of `functions` uncompressed and an estimated 12.9% after snappy on a
+    # 7,244-sample corpus with 64.8% of its functions hashed.
+    # Hex written before is still read, and "" stays the marker of a function not hashed yet, so
+    # the queries for unhashed functions do not change. migrate_minhash_binary converts old data.
+
+    @staticmethod
+    def _minHashForStorage(minhash_bytes: bytes):
+        return bytes(minhash_bytes) if minhash_bytes else ""
+
+    @staticmethod
+    def _minHashFromStorage(stored_value) -> bytes:
+        if not stored_value:
+            return b""
+        if isinstance(stored_value, str):
+            return bytes.fromhex(stored_value)
+        return bytes(stored_value)
+
+    @staticmethod
+    def _encodeMinHash(function_dict: Dict) -> None:
+        # FunctionEntry.toDict carries hex, as exports and the REST API keep doing
+        if isinstance(function_dict.get("minhash"), str):
+            function_dict["minhash"] = MongoDbStorage._minHashForStorage(bytes.fromhex(function_dict["minhash"]))
+
+    @staticmethod
+    def _decodeMinHash(function_dict: Dict) -> None:
+        # back to the hex FunctionEntry.fromDict reads, whichever form the document holds
+        if "minhash" in function_dict and not isinstance(function_dict["minhash"], str):
+            function_dict["minhash"] = MongoDbStorage._minHashFromStorage(function_dict["minhash"]).hex()
 
     ###############################################################################
     # Interface
@@ -836,6 +912,17 @@ class MongoDbStorage(StorageInterface):
         self._pullBandEntries(function_minhashes)
         # drop this sample from the picblockhash index while its functions still exist to be read
         self._removeSampleFromPicBlockHashIndex(sample_id)
+        # and from the pichash counts and the function ranges, which addSmdaReport maintains as
+        # well; left in, a deleted and re-added sample was counted twice (#261). The counts are
+        # taken out at most once per sample: the queue runs a failed delete job again and two
+        # deletes of one sample can overlap, and a second decrement would leave other samples'
+        # hashes undercounted or without a count document, which drops their exact matches
+        # under MINHASH_PICHASH_MAX_MATCHES. A delete that dies after claiming leaves them
+        # overcounted instead, as before this fix, until rebuildPicHashCountIndex runs.
+        claim = self._getDb().samples.update_one({"sample_id": sample_id, "pichash_counts_removed": {"$ne": True}}, {"$set": {"pichash_counts_removed": True}})
+        if claim.modified_count:
+            self._removeSampleFromPicHashCounts(sample_id)
+        self._getDb()[self._FUNCTION_RANGE_COLLECTION].delete_many({"sample_id": sample_id})
 
         # remove functions
         self._deleteXcfgForFunctionIds([function_minhash["function_id"] for function_minhash in function_minhashes])
@@ -1626,12 +1713,12 @@ class MongoDbStorage(StorageInterface):
         return list(self._getDb().functions.find({"sample_id": sample_id}, field_selection))
 
     def _getMinHashFromStorage(self, function_document: Dict[str, Any]) -> Optional["MinHash"]:
-        minhash_hex = function_document.get("minhash")
-        if not minhash_hex:
+        minhash_bytes = self._minHashFromStorage(function_document.get("minhash"))
+        if not minhash_bytes:
             return None
         return MinHash(
             function_id=function_document["function_id"],
-            minhash_bytes=bytes.fromhex(minhash_hex),
+            minhash_bytes=minhash_bytes,
             minhash_bits=self._minhash_config.MINHASH_SIGNATURE_BITS,
         )
 
@@ -1684,7 +1771,6 @@ class MongoDbStorage(StorageInterface):
         if query_result is None or "_pichash" not in query_result:
             return None
         self._decodePichash(query_result, delete_old=False)
-        encoded_pichash = query_result["_pichash"]
         decoded_pichash = query_result["pichash"]
         if decoded_pichash is None:
             return None
@@ -1692,7 +1778,7 @@ class MongoDbStorage(StorageInterface):
         sample_and_function_ids = set(
             map(
                 lambda x: (x["family_id"], x["sample_id"], x["function_id"]),
-                list(self._getDb().functions.find({"_pichash": encoded_pichash}, {"family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0})),
+                list(self._getDb().functions.find(self._pichashLookupCondition("_pichash", decoded_pichash), {"family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0})),
             )
         )
 
@@ -1716,7 +1802,14 @@ class MongoDbStorage(StorageInterface):
         # one $in over all distinct pichashes instead of one query per pichash (N+1, #111);
         # grouping client-side by the returned _pichash reproduces the per-query sets exactly
         if encoded_to_decoded:
-            wanted = self._filterPicHashesByMatchCount(list(encoded_to_decoded))
+            # while the instance is not padded, either spelling of a value may be stored (#145)
+            lookup = set(encoded_to_decoded)
+            if not self.isPichashPadded():
+                for decoded_pichash in list(encoded_to_decoded.values()):
+                    for variant in pichash_value_variants(decoded_pichash):
+                        encoded_to_decoded[variant] = decoded_pichash
+                        lookup.add(variant)
+            wanted = self._filterPicHashesByMatchCount(sorted(lookup))
             fields_to_fetch = {"_pichash": 1, "family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0}
             for hit in self._getDb().functions.find({"_pichash": {"$in": wanted}}, fields_to_fetch):
                 decoded_pichash = encoded_to_decoded[hit.get("_pichash")]
@@ -1736,19 +1829,28 @@ class MongoDbStorage(StorageInterface):
             return encoded_pichashes
         if self.isPicHashCountIndexComplete():
             # one indexed probe per queried hash, instead of one index entry per holder
-            kept = [
-                document["_pichash"]
-                for document in self._getDb()[self._PICHASH_COUNT_COLLECTION].find({"_pichash": {"$in": encoded_pichashes}, "df": {"$lte": cutoff}}, {"_pichash": 1, "_id": 0})
-            ]
+            counts = {
+                document["_pichash"]: document["df"]
+                for document in self._getDb()[self._PICHASH_COUNT_COLLECTION].find({"_pichash": {"$in": encoded_pichashes}}, {"_pichash": 1, "df": 1, "_id": 0})
+            }
         else:
             # no counts stored yet: fall back to counting, which is correct but pays the very
             # cost the cutoff is meant to avoid
+            LOGGER.warning("PicHash count index incomplete, counting holders instead; run MongoDbStorage.rebuildPicHashCountIndex() to restore the fast path.")
             pipeline = [
                 {"$match": {"_pichash": {"$in": encoded_pichashes}}},
                 {"$group": {"_id": "$_pichash", "num_holders": {"$sum": 1}}},
-                {"$match": {"num_holders": {"$lte": cutoff}}},
             ]
-            kept = [group["_id"] for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True)]
+            counts = {group["_id"]: group["num_holders"] for group in self._getDb().functions.aggregate(pipeline, allowDiskUse=True)}
+        # Until migrate_pichash_padding has run, one value may be stored in both spellings
+        # ("0x4d2" and its zero-padded form), each counted separately (#145). Sum over the
+        # spellings of a value and keep or drop them together, so that a value over the cutoff
+        # cannot pass by being split. A spelling nobody holds counts 0.
+        totals: Dict[int, int] = {}
+        for encoded_pichash in set(encoded_pichashes):
+            value = int(encoded_pichash, 16)
+            totals[value] = totals.get(value, 0) + counts.get(encoded_pichash, 0)
+        kept = [encoded_pichash for encoded_pichash in encoded_pichashes if totals[int(encoded_pichash, 16)] <= cutoff]
         if len(kept) != len(encoded_pichashes):
             LOGGER.info("PicHash cutoff %d dropped %d of %d hashes as too common", cutoff, len(encoded_pichashes) - len(kept), len(encoded_pichashes))
         return kept
@@ -1769,7 +1871,7 @@ class MongoDbStorage(StorageInterface):
             return False
         is_query_function = minhash.function_id < 0
         collection = self._getDb().query_functions if is_query_function else self._getDb().functions
-        set_command = {"$set": {"minhash": minhash.getMinHash().hex(), "minhash_shingle_composition": minhash.getComposition()}}
+        set_command = {"$set": {"minhash": self._minHashForStorage(minhash.getMinHash()), "minhash_shingle_composition": minhash.getComposition()}}
         if collection.find_one_and_update({"function_id": minhash.function_id}, set_command) is None:
             LOGGER.warning("addMinHash() - no function with id %d, skipping its minhash.", minhash.function_id)
             return False
@@ -1794,7 +1896,7 @@ class MongoDbStorage(StorageInterface):
                 if minhash.function_id not in existing_ids:
                     LOGGER.warning("addMinHashes() - no function with id %d, skipping its minhash.", minhash.function_id)
                     continue
-                set_command = {"$set": {"minhash": minhash.getMinHash().hex(), "minhash_shingle_composition": minhash.getComposition()}}
+                set_command = {"$set": {"minhash": self._minHashForStorage(minhash.getMinHash()), "minhash_shingle_composition": minhash.getComposition()}}
                 function_updates.append(UpdateOne({"function_id": minhash.function_id}, set_command))
                 stored_minhashes.append(minhash)
             if function_updates:
@@ -2563,6 +2665,28 @@ class MongoDbStorage(StorageInterface):
         operations = [UpdateOne({"_pichash": encoded}, {"$inc": {"df": count}}, upsert=True) for encoded, count in increments.items()]
         self._getDb()[self._PICHASH_COUNT_COLLECTION].bulk_write(operations, ordered=False)
 
+    def _removeSampleFromPicHashCounts(self, sample_id: int) -> None:
+        """Take a sample's functions out of the pichash counts; runs before they are deleted.
+
+        The mirror of _addToPicHashCounts: one negative $inc per distinct hash. A hash that no
+        function holds any more loses its document, as a rebuild would never have written it. The
+        delete matches `df <= 0` per document, so a count raised again by a concurrent insert in
+        between is left alone.
+        """
+        if not self.isPicHashCountIndexComplete():
+            return
+        decrements: Dict[Any, int] = {}
+        for function_document in self._getDb().functions.find({"sample_id": sample_id, "_pichash": {"$ne": None}}, {"_pichash": 1, "_id": 0}):
+            encoded_pichash = function_document["_pichash"]
+            decrements[encoded_pichash] = decrements.get(encoded_pichash, 0) + 1
+        if not decrements:
+            return
+        collection = self._getDb()[self._PICHASH_COUNT_COLLECTION]
+        collection.bulk_write([UpdateOne({"_pichash": encoded}, {"$inc": {"df": -count}}) for encoded, count in decrements.items()], ordered=False)
+        encoded_pichashes = list(decrements)
+        for offset in range(0, len(encoded_pichashes), self._PICHASH_COUNT_WRITE_BATCH):
+            collection.delete_many({"_pichash": {"$in": encoded_pichashes[offset : offset + self._PICHASH_COUNT_WRITE_BATCH]}, "df": {"$lte": 0}})
+
     def rebuildPicHashCountIndex(self, progress_reporter=None) -> int:
         """Count holders per pichash from the functions collection; returns distinct hashes.
 
@@ -2637,8 +2761,10 @@ class MongoDbStorage(StorageInterface):
 
         This pages with `$gte`/`$gt`, which MongoDB brackets by BSON type, so it would silently
         stop at the end of the string bracket if a corpus held pichashes of another type.
-        `_encodePichash` only ever writes `hex()`, i.e. a string, and the caller verifies the
-        total against an independent count rather than trusting that.
+        `_encodePichash` only ever writes a hex string - zero-padded, or `hex()` on an instance
+        not yet migrated (#145), whose two spellings of a value are then separate runs, counted
+        separately and summed again by the cutoff - and the caller verifies the total against an
+        independent count rather than trusting that.
         """
         functions = self._getDb().functions
         condition: Dict[str, Any] = {"$ne": None}
@@ -2794,7 +2920,7 @@ class MongoDbStorage(StorageInterface):
         Malpedia samples, and the fitted Heaps' law puts that near 24x at a million - so
         decoding per function decodes the same signature over and over. Indexing into a table
         of the distinct ones is exactly equivalent (the decode is a pure function of the stored
-        hex string) and does the decode once per distinct signature instead of once per
+        value) and does the decode once per distinct signature instead of once per
         candidate function.
 
         The documents still have to be read one per function: the row also carries `sample_id`,
@@ -2806,17 +2932,19 @@ class MongoDbStorage(StorageInterface):
         """
         rows: List[Tuple[int, int, int]] = []
         signatures: List[bytes] = []
-        index_by_hex: Dict[str, int] = {}
+        index_by_stored: Dict[Any, int] = {}
         for function_document in self._getDb()[collection_name].find(
             {"function_id": {"$in": query_function_ids}},
             {"_id": 0, "sample_id": 1, "minhash": 1, "function_id": 1},
         ):
-            hex_minhash = function_document["minhash"]
-            signature_index = index_by_hex.get(hex_minhash)
+            # keyed by the stored value: during a migration one signature can be held as hex by one
+            # function and as binary by another, which only costs a duplicate row in the table
+            stored_minhash = function_document["minhash"]
+            signature_index = index_by_stored.get(stored_minhash)
             if signature_index is None:
                 signature_index = len(signatures)
-                index_by_hex[hex_minhash] = signature_index
-                signatures.append(bytes.fromhex(hex_minhash))
+                index_by_stored[stored_minhash] = signature_index
+                signatures.append(self._minHashFromStorage(stored_minhash))
             rows.append((function_document["function_id"], function_document["sample_id"], signature_index))
         return rows, signatures
 
@@ -2839,13 +2967,11 @@ class MongoDbStorage(StorageInterface):
         return None
 
     def isPicHash(self, pichash: int) -> bool:
-        query = {"pichash": pichash}
-        self._encodePichash(query)
-        return self._getDb().functions.find_one(query) is not None
+        query = self._pichashLookupCondition("_pichash", pichash)
+        return self._getDb().functions.find_one(query, {"_id": 1}) is not None
 
     def getMatchesForPicHash(self, pichash: int) -> Set[Tuple[int, int, int]]:
-        query = {"pichash": pichash}
-        self._encodePichash(query)
+        query = self._pichashLookupCondition("_pichash", pichash)
         return set(
             map(
                 lambda x: (x["family_id"], x["sample_id"], x["function_id"]),
@@ -2854,21 +2980,22 @@ class MongoDbStorage(StorageInterface):
         )
 
     def getMatchesForPicHashes(self, pichashes: List[int]) -> Dict[int, Set[Tuple[int, int, int]]]:
+        # padded on a padded instance; otherwise either spelling of a value may be stored (#145)
+        padded = self.isPichashPadded()
         encoded_to_decoded = {}
         for pichash in set(pichashes):
-            query = {"pichash": pichash}
-            self._encodePichash(query)
-            encoded_to_decoded[query["_pichash"]] = pichash
+            for encoded in [encode_pichash_value(pichash, padded=True)] if padded else pichash_value_variants(pichash):
+                encoded_to_decoded[encoded] = pichash
         matches: Dict[int, Set[Tuple[int, int, int]]] = {}
         if encoded_to_decoded:
-            wanted = self._filterPicHashesByMatchCount(list(encoded_to_decoded))
+            wanted = self._filterPicHashesByMatchCount(sorted(encoded_to_decoded))
             fields_to_fetch = {"_pichash": 1, "family_id": 1, "sample_id": 1, "function_id": 1, "_id": 0}
             for hit in self._getDb().functions.find({"_pichash": {"$in": wanted}}, fields_to_fetch):
                 matches.setdefault(encoded_to_decoded[hit["_pichash"]], set()).add((hit["family_id"], hit["sample_id"], hit["function_id"]))
         return matches
 
     def getMatchesForPicBlockHash(self, picblockhash: int) -> Set[Tuple[int, int, int, int]]:
-        query = {"_picblockhashes.hash": hex(picblockhash)}
+        query = self._pichashLookupCondition("_picblockhashes.hash", picblockhash)
         result = self._getDb().functions.aggregate(
             [
                 {"$match": query},
@@ -3096,6 +3223,7 @@ class MongoDbStorage(StorageInterface):
             "num_functions": 0,
             "num_bands": self._storage_config.STORAGE_NUM_BANDS,
             "num_pichashes": num_unique_pichashes,
+            "pichash_padded": self.isPichashPadded(),
         }
         for family_document in self._getDb().families.find():
             stats["num_families"] += 1
@@ -3190,7 +3318,7 @@ class MongoDbStorage(StorageInterface):
             for function_document in function_documents:
                 if function_document["minhash"]:
                     function_id = function_document["function_id"]
-                    minhash_bytes = bytes.fromhex(function_document["minhash"])
+                    minhash_bytes = self._minHashFromStorage(function_document["minhash"])
                     minhash_obj = MinHash(function_id, minhash_bytes, minhash_bits=self._minhash_config.MINHASH_SIGNATURE_BITS)
                     minhashes.append(minhash_obj)
             self._addMinHashesToBands(minhashes)
@@ -3297,7 +3425,7 @@ class MongoDbStorage(StorageInterface):
                     update_document["picblockhashes"] = picblockhashes
                 # prepare single function entry update
                 if update_document:
-                    self._encodePichash(update_document)
+                    self._encodePichash(update_document, padded=self.isPichashPadded())
                     update_command = {"$set": update_document}
                     pic_hash_updates.append(UpdateOne({"function_id": function_document["function_id"]}, update_command, upsert=True))
             # batch insert updates for function_entries
@@ -3443,16 +3571,34 @@ class MongoDbStorage(StorageInterface):
         LOGGER.info("Rebuilt picblockhash index over %d distinct block hashes.", num_hashes)
         return num_hashes
 
+    @staticmethod
+    def _unpaddedBlockHash(stored_hash: str) -> str:
+        """The one spelling getUniqueBlocks keys a block hash by on an instance not (yet) padded.
+
+        Such an instance may hold a value in both spellings while migrate_pichash_padding is
+        underway (#145), and a candidate is dropped by looking its key up, so both have to land on
+        the same key. `hex()` is the one its values had before the migration started. Only a
+        padded value with a leading zero is spelled differently, and the scan fallback calls this
+        once per block entry of the corpus, so every other value is returned without parsing it.
+        """
+        if stored_hash[2:3] != "0":
+            return stored_hash
+        return hex(int(stored_hash, 16))
+
     def _reduceToUniqueBlocksUsingIndex(self, candidate_picblockhashes: Dict, sample_ids: List[int]) -> None:
         """Drop every candidate the index shows in a sample outside the request."""
         requested_sample_ids = set(sample_ids)
         collection = self._getDb()[self._PICBLOCKHASH_INDEX_COLLECTION]
+        padded = self.isPichashPadded()
         candidate_hashes = list(candidate_picblockhashes)
         for offset in range(0, len(candidate_hashes), self._PICBLOCKHASH_INDEX_QUERY_SLICE):
             hash_slice = candidate_hashes[offset : offset + self._PICBLOCKHASH_INDEX_QUERY_SLICE]
+            if not padded:
+                # the index is keyed on the stored spelling, which may be either width here
+                hash_slice = sorted({variant for block_hash in hash_slice for variant in pichash_value_variants(int(block_hash, 16))})
             for document in collection.find({"_id": {"$in": hash_slice}}, {"sample_ids": 1}):
                 if any(sample_id not in requested_sample_ids for sample_id in document["sample_ids"]):
-                    candidate_picblockhashes.pop(document["_id"], None)
+                    candidate_picblockhashes.pop(document["_id"] if padded else self._unpaddedBlockHash(document["_id"]), None)
 
     def _reduceToUniqueBlocksByScan(self, candidate_picblockhashes: Dict, sample_ids: List[int], progress_reporter=None) -> None:
         """The pre-index elimination: read every function that has block hashes.
@@ -3462,12 +3608,13 @@ class MongoDbStorage(StorageInterface):
         """
         if progress_reporter is not None:
             progress_reporter.set_total(self._getDb().functions.count_documents(filter={}))
+        padded = self.isPichashPadded()
         for entry in self._getDb().functions.find({"_picblockhashes": {"$exists": True, "$ne": []}}, {"sample_id": 1, "_picblockhashes": 1, "_id": 0}):
             if progress_reporter is not None:
                 progress_reporter.step()
             if entry["sample_id"] not in sample_ids:
                 for block_entry in entry["_picblockhashes"]:
-                    candidate_picblockhashes.pop(block_entry["hash"], None)
+                    candidate_picblockhashes.pop(block_entry["hash"] if padded else self._unpaddedBlockHash(block_entry["hash"]), None)
 
     def getUniqueBlocks(self, sample_ids: List[int], progress_reporter=None) -> Dict:
         # query once to get all blocks from the functions of our samples
@@ -3476,13 +3623,16 @@ class MongoDbStorage(StorageInterface):
             "unique_blocks_overall": 0,
             "num_samples": len(sample_ids),
         }
-        candidate_picblockhashes: Dict[int, Dict[str, Any]] = {}
+        candidate_picblockhashes: Dict[str, Dict[str, Any]] = {}
+        # keyed by the stored spelling, which on an instance not (yet) padded is normalised so
+        # that a value stored in both widths during a migration stays one block (#145)
+        padded = self.isPichashPadded()
         for entry in self._getDb().functions.find(
             {"sample_id": {"$in": sample_ids}, "_picblockhashes": {"$exists": True, "$ne": []}}, {"function_id": 1, "sample_id": 1, "_picblockhashes": 1, "_id": 0}
         ):
             sample_id = entry["sample_id"]
             for block_entry in entry["_picblockhashes"]:
-                block_hash = block_entry["hash"]
+                block_hash = block_entry["hash"] if padded else self._unpaddedBlockHash(block_entry["hash"])
                 if block_hash not in candidate_picblockhashes:
                     candidate_picblockhashes[block_hash] = {
                         "samples": set(),
@@ -3557,27 +3707,25 @@ class MongoDbStorage(StorageInterface):
 
     ##### helpers for search ######
 
-    # pichashes are stored hex-encoded, in a differently named field ("_pichash") and with a
-    # variable width, so sorting on them would neither order numerically nor let the search cursor
-    # page - its tree compares the sort field with a range operator, which the transpiler rejects.
-    # Zero-padding the stored value would lift this and the range rejection alike (#145).
-    _UNSORTABLE_FIELDS = ("pichash",)
+    # pichashes are stored hex-encoded in a differently named field ("_pichash"). Sorting on them
+    # orders numerically only once the instance stores them zero-padded, and the search cursor
+    # pages by comparing the sort field with a range operator, which the transpiler only allows
+    # then (#145); an instance that has not been migrated keeps rejecting the sort by name.
+    _SORT_FIELD_TO_STORED = {"pichash": "_pichash"}
 
-    @staticmethod
-    def _assert_sortable_fields(full_cursor: Optional[FullSearchCursor]) -> None:
-        if full_cursor is None:
+    def _assert_sortable_fields(self, full_cursor: Optional[FullSearchCursor]) -> None:
+        if full_cursor is None or self.isPichashPadded():
             return
         for field in full_cursor.sort_fields:
-            if field in MongoDbStorage._UNSORTABLE_FIELDS:
-                raise ValueError(f"Sorting by the field '{field}' is not supported by the MongoDB backend.")
+            if field == "pichash":
+                raise ValueError("Sorting by the field 'pichash' needs zero-padded pichashes; run migrate_pichash_padding first.")
 
-    @staticmethod
-    def _get_sort_list_from_cursor(full_cursor: Optional[FullSearchCursor]):
-        MongoDbStorage._assert_sortable_fields(full_cursor)
+    def _get_sort_list_from_cursor(self, full_cursor: Optional[FullSearchCursor]):
+        self._assert_sortable_fields(full_cursor)
         if full_cursor is None:
             return None
         is_backward_search = not full_cursor.is_forward_search
-        sort_list = [(key, 1 if direction ^ is_backward_search else -1) for key, direction in full_cursor.sort_by_list]
+        sort_list = [(self._SORT_FIELD_TO_STORED.get(key, key), 1 if direction ^ is_backward_search else -1) for key, direction in full_cursor.sort_by_list]
         return sort_list
 
     def _getDistinctValues(self, collection: str, field: str) -> Optional[List[Any]]:
@@ -3632,7 +3780,7 @@ class MongoDbStorage(StorageInterface):
                 values = self._getDistinctValues(collection, field)
                 if values is not None:
                     known_values[field] = values
-        query = MongoSearchTranspiler(known_values).visit(full_tree)
+        query = MongoSearchTranspiler(known_values, pichash_padded=self.isPichashPadded()).visit(full_tree)
         return query
 
     ##### search ####
