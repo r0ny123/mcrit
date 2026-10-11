@@ -62,16 +62,17 @@ class TagResource:
 
     @timing
     def on_post(self, req, resp, **route_params):
-        """Add tags to the entity; tags it already carries are kept once."""
+        """Add the tags in the JSON body ``{"tags": [...]}`` to the entity; tags it already carries are kept once. Answers the entity's tags; 400 for a malformed body, an invalid tag, too many tags in the request or a total past MAX_TAGS_PER_ENTITY (nothing is changed), 404 for an unknown id."""
         self._change_tags(req, resp, route_params, is_adding=True)
 
     @timing
     def on_delete(self, req, resp, **route_params):
-        """Remove tags from the entity; tags it does not carry are ignored."""
+        """Remove the tags in the JSON body ``{"tags": [...]}`` from the entity; tags it does not carry are ignored. Answers the entity's tags; 400 for a malformed body, an invalid tag or too many tags in the request, 404 for an unknown id."""
         self._change_tags(req, resp, route_params, is_adding=False)
 
     @timing
     def on_get_collection(self, req, resp):
+        """The distinct tags of ``entity`` (family, sample or function), each with the number of entities carrying it; 400 for any other entity."""
         entity = req.params.get("entity")
         if entity not in TAG_ENTITIES:
             return self._fail(req, resp, falcon.HTTP_400, f"entity must be one of {', '.join(TAG_ENTITIES)}.", "on_get_collection - failed - invalid entity.")

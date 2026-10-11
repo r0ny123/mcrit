@@ -109,8 +109,11 @@ class SmdaReportRouteAndClient(unittest.TestCase):
             response = MagicMock(status_code=200)
             response.json.return_value = {"status": "successful", "data": json.loads(json.dumps(sent.toDict()))}
             client = McritClient("http://mcrit.test")
-            with patch("mcrit.client.McritClient.requests.get", return_value=response):
+            # through the client's session, as every request but getSampleBinary goes since #254
+            with patch.object(client, "_session") as session:
+                session.get.return_value = response
                 received = client.getSmdaReportForSample(1)
+            self.assertEqual("http://mcrit.test/samples/1/smda", session.get.call_args.args[0])
             assert received is not None
             self.assertEqual(sent.smda_report.sha256, received.smda_report.sha256)
             self.assertEqual(len(sent.smda_report.xcfg), len(received.smda_report.xcfg))
