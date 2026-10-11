@@ -303,12 +303,20 @@ class MongoDbStorage(StorageInterface):
                     )
         return self._database
 
-    def _initDb(self, server, port, db_name, username="", password="", flags=""):
-        userpw_url = f"{username}:{password}@" if username and len(username) > 0 and password and len(password) > 0 else ""
-        port_url = f":{port}" if port and len(port) > 0 else ""
-        flags_url = f"?{flags}" if flags and len(flags) > 0 else ""
+    @staticmethod
+    def buildMongoUri(server, port, db_name, username="", password="", flags="") -> str:
+        """The URI MCRIT connects with; migrate_minhash_binary uses it too, so it reaches the same database.
 
-        mongo_uri = f"mongodb://{userpw_url}{server}{port_url}/{db_name}{flags_url}"
+        Credentials go in as configured, so a password holding `@`, `:` or `/` has to be configured
+        percent-encoded already. An empty port leaves it out, which is how a host list is given.
+        """
+        userpw_url = f"{username}:{password}@" if username and password else ""
+        port_url = f":{port}" if port else ""
+        flags_url = f"?{flags}" if flags else ""
+        return f"mongodb://{userpw_url}{server}{port_url}/{db_name}{flags_url}"
+
+    def _initDb(self, server, port, db_name, username="", password="", flags=""):
+        mongo_uri = self.buildMongoUri(server, port, db_name, username, password, flags)
 
         self._database = MongoClient(mongo_uri, connect=False)[db_name]
         self._ensureIndexAndUnknownFamily()
@@ -1656,6 +1664,10 @@ class MongoDbStorage(StorageInterface):
         # "picblockhashes" is the inverted block-hash index; leaving it behind would keep asserting
         # that hashes are held by samples that no longer exist, and getUniqueBlocks would believe it
         # the "sample_binaries" GridFS bucket holds the raw submissions (#95)
+        # the pichash counts and the function ranges go for the same reason as the picblockhash
+        # index (#261): _ensureIndexAndUnknownFamily vouches for both on the emptied database, so
+        # left behind, the counts would count every re-added function twice and the ranges would
+        # map the reset function ids to samples that no longer exist
         collections = [
             "samples",
             "families",
@@ -1672,6 +1684,8 @@ class MongoDbStorage(StorageInterface):
             "picblockhashes",
             "sample_binaries.files",
             "sample_binaries.chunks",
+            self._PICHASH_COUNT_COLLECTION,
+            self._FUNCTION_RANGE_COLLECTION,
         ]
         for band_id in range(self._storage_config.STORAGE_NUM_BANDS):
             collections.append("band_%d" % band_id)
