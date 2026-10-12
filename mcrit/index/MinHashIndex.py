@@ -325,7 +325,10 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             if storage.getSampleBySha256(sample_sha256):
                 LOGGER.info(f"Sample with SHA256 {sample_sha256} already present in database, skipping...")
                 import_report["num_samples_skipped"] += 1
-                import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
+                # as the entry states it, if it does: a sample submitted without statistics holds none
+                statistics = sample_entry_dict.get("statistics")
+                num_functions = statistics.get("num_functions") if isinstance(statistics, dict) else None
+                import_report["num_functions_skipped"] += num_functions if isinstance(num_functions, int) else 0
                 continue
             import_report["num_samples_imported"] += 1
             sample_entry = SampleEntry.fromDict(sample_entry_dict)
@@ -395,6 +398,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
 
     #### NOT REDIRECTED ####
     def addReport(self, smda_report, calculate_hashes=True, calculate_matches=False, username=None):
+        # checked before the lookup, where MongoDB would read an object as a query operator
+        if not SampleEntry.isValidSha256(smda_report.sha256):
+            raise ValueError("the report's sha256 is not 64 hex digits")
         storage = self.getStorage()
         sample_entry = storage.getSampleBySha256(smda_report.sha256)
         if sample_entry:
@@ -606,7 +612,8 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             score = MinHash.calculateMinHashScore(minhash_a.minhash, minhash_b.minhash, minhash_bits=self._minhash_config.MINHASH_SIGNATURE_BITS)
         match_flags = 0
         match_flags += MatcherFlags.IS_MINHASH_FLAG if score is not None and score >= self._minhash_config.MINHASH_MATCHING_THRESHOLD else 0
-        match_flags += MatcherFlags.IS_PICHASH_FLAG if function_entry_a.pichash == function_entry_b.pichash else 0
+        # a PicHash of 0 is a function without one, not a hash two functions can share
+        match_flags += MatcherFlags.IS_PICHASH_FLAG if function_entry_a.pichash and function_entry_a.pichash == function_entry_b.pichash else 0
         match_flags += MatcherFlags.IS_LIBRARY_FLAG if sample_entry_b.is_library else 0
         match_tuple = [function_entry_b.family_id, function_entry_b.sample_id, function_entry_b.function_id, score, match_flags]
         result = {

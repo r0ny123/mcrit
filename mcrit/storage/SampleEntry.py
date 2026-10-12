@@ -1,4 +1,5 @@
 import datetime
+import re
 from typing import TYPE_CHECKING, Dict, Optional
 
 from mcrit.libs.utility import decode_two_complement, encode_two_complement
@@ -26,6 +27,14 @@ class SampleEntry:
     summary: Optional[str]
     statistics: Dict[str, int]
     timestamp: Optional[datetime.datetime]
+
+    SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
+
+    @staticmethod
+    def isValidSha256(sha256) -> bool:
+        """Whether a sha256 a submission states can identify a sample: 64 hex digits. smda copies the
+        field of a report unchecked, and MongoDB reads an object in its place as a query operator."""
+        return isinstance(sha256, str) and SampleEntry.SHA256_PATTERN.fullmatch(sha256) is not None
 
     # TODO -> rename to fromSmdaReport
     def __init__(self, smda_report: Optional["SmdaReport"], sample_id=-1, family_id=0):
@@ -97,9 +106,29 @@ class SampleEntry:
         sample_entry.filename = entry_dict["filename"]
         sample_entry.sha256 = entry_dict["sha256"]
         sample_entry.smda_version = entry_dict["smda_version"]
-        sample_entry.statistics = entry_dict["statistics"]
-        sample_entry.timestamp = datetime.datetime.strptime(entry_dict["timestamp"], "%Y-%m-%dT%H-%M-%S")
+        # a dict, empty for a report without statistics; an export is data from elsewhere, and
+        # statistics of another type it states are read as none
+        statistics = entry_dict.get("statistics")
+        sample_entry.statistics = statistics if isinstance(statistics, dict) else {}
+        sample_entry.timestamp = cls._parseTimestamp(entry_dict.get("timestamp"))
         return sample_entry
+
+    @staticmethod
+    def _parseTimestamp(timestamp) -> Optional[datetime.datetime]:
+        """The timestamp as toDict writes it, or None for a sample that has none.
+
+        smda reads a report whose timestamp is missing or empty as None, which toDict stores as
+        null, and strftime writes a year below 1000 with fewer digits than strptime reads back.
+        Every reader of a stored sample - listings, exports, matching, deleteSample, the query
+        cleanup - comes through here, so such a value is read as no timestamp instead of failing
+        all of them.
+        """
+        if not timestamp:
+            return None
+        try:
+            return datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H-%M-%S")
+        except (TypeError, ValueError):
+            return None
 
     def __str__(self):
         return "Sample {} ({}, {} bit) - {} ({}): ".format(self.sample_id, self.architecture, self.bitness, self.filename, self.family)
