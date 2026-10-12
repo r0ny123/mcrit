@@ -39,6 +39,16 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   the delete, as the sample document is removed with it; a delete that fails partway leaves it on
   the sample until a retry completes the delete.
 
+### Changed
+
+- Every start creates the `(_pichash, df)` index on `pichash_counts` and the `sample_id` and
+  `first_function_id` indexes on `function_ranges`, the specs their rebuilds create ([#261]). Only
+  the rebuilds created them before, so a database that started empty, and so never needed a
+  rebuild, had neither: the upserts of every add, the cutoff's count lookups and the deletes above
+  each scanned the collection. Since `clearStorage` now drops both collections, that would also
+  have been the state after every respawn. Where a rebuild already ran they exist, and nothing
+  changes.
+
 ## [1.15.0] - 2026-10-12
 
 **Minor release: a cheaper PicHash recalculation, client fixes, family actors, an optional binary

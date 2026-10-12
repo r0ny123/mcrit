@@ -371,6 +371,13 @@ class MongoDbStorage(StorageInterface):
             self._getDb()["samples"].create_index([(field, 1), ("sample_id", 1)])
         for field in ("family_id", "sample_id", "function_name", "offset", "num_instructions", "num_blocks"):
             self._getDb()["functions"].create_index([(field, 1), ("function_id", 1)])
+        # the pichash counts and the function ranges, with the specs their rebuilds create. Adds
+        # upsert into both by these keys, the MINHASH_PICHASH_MAX_MATCHES cutoff reads the counts by
+        # them and deleteSample removes from both by them (#261). Only the rebuilds created them
+        # before, so a fresh or cleared database, which never needed one, scanned on every write.
+        self._getDb()[self._PICHASH_COUNT_COLLECTION].create_index([("_pichash", 1), ("df", 1)])
+        self._getDb()[self._FUNCTION_RANGE_COLLECTION].create_index("sample_id")
+        self._getDb()[self._FUNCTION_RANGE_COLLECTION].create_index("first_function_id")
         # stored without guarantee of existence
         self._getDb()["query_samples"].create_index("sample_id")
         self._getDb()["query_samples"].create_index("sha256")

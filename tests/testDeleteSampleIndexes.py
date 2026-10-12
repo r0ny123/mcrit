@@ -136,6 +136,16 @@ class DeleteSampleIndexesTest(TestCase):
         self.assertEqual([readded.sample_id], [sample_id for sample_id, _, _ in ranges])
         self.assertEqual(ranges, self._rangesFromRebuild())
 
+    def testAClearedDatabaseIndexesBothCollections(self):
+        # clearStorage drops both collections and with them the indexes a rebuild made; startup
+        # has to make them again, or every write to either scans the collection
+        self.storage.clearStorage()
+        db = self.storage._getDb()
+        self.assertIn([("_pichash", 1), ("df", 1)], [index["key"] for index in db[self.storage._PICHASH_COUNT_COLLECTION].index_information().values()])
+        range_keys = [index["key"] for index in db[self.storage._FUNCTION_RANGE_COLLECTION].index_information().values()]
+        self.assertIn([("sample_id", 1)], range_keys)
+        self.assertIn([("first_function_id", 1)], range_keys)
+
     def testAnIncompleteCountIndexIsLeftToItsRebuild(self):
         # while incomplete the counts are not trusted and a rebuild will replace them, so a
         # delete does not touch them (adds skip them too)
