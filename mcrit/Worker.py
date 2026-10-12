@@ -316,8 +316,20 @@ class Worker(QueueRemoteCallee):
     @Remote(progress=True)
     def recalculateMinHashes(self, progress_reporter=NoProgressReporter()):
         self._storage.deleteAllMinHashes(progress_reporter=progress_reporter)
-        num_updated = self.updateMinHashes(None, progress_reporter=progress_reporter)
-        self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION)
+        failed_function_ids = []
+        num_updated = self._updateMinHashes(None, progress_reporter, failed_function_ids)
+        # a sample with a function that could not be hashed is not recorded as current, so that a
+        # repair tries it again
+        unhashable_sample_ids = set()
+        for function_id in failed_function_ids:
+            function_entry = self._storage.getFunctionById(function_id)
+            if function_entry is not None:
+                unhashable_sample_ids.add(function_entry.sample_id)
+        if unhashable_sample_ids:
+            LOGGER.warning("Recalculating MinHashes: %d samples have functions that could not be hashed and are not recorded as current.", len(unhashable_sample_ids))
+            self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION, [sample_id for sample_id in self._storage.getSampleIds() if sample_id not in unhashable_sample_ids])
+        else:
+            self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION)
         return num_updated
 
     @staticmethod
@@ -367,7 +379,15 @@ class Worker(QueueRemoteCallee):
                 continue
             # a sample without functions large enough to hash is repaired too: it simply holds no
             # minhashes afterwards, and is recorded as current like any other (#238)
-            minhashes = self.calculateMinHashes(hashable) if hashable else []
+            failed_function_ids = []
+            minhashes = self.calculateMinHashes(hashable, failed_function_ids=failed_function_ids) if hashable else []
+            if failed_function_ids:
+                # dropping the sample's minhashes would drop those of the functions that could not be
+                # hashed again, and recording it as current would stop anything from trying them
+                LOGGER.warning("Repairing MinHashes: %d functions of sample %d cannot be hashed, keeping its minhashes and leaving it stale.", len(failed_function_ids), sample_id)
+                report["num_samples_skipped"] += 1
+                progress_reporter.step()
+                continue
             report["num_functions_dropped"] += self._storage.deleteMinHashesForSample(sample_id)
             if minhashes:
                 self._storage.addMinHashes(minhashes)
@@ -381,6 +401,10 @@ class Worker(QueueRemoteCallee):
     @Remote(progress=True)
     def updateMinHashes(self, function_ids, progress_reporter=NoProgressReporter()):
         """Find unhashed functions in storage and calculate their MinHashes, optionally filter by function_ids or get function_entries passed directly"""
+        return self._updateMinHashes(function_ids, progress_reporter)
+
+    def _updateMinHashes(self, function_ids, progress_reporter, failed_function_ids=None):
+        # failed_function_ids, when given, collects the functions that could not be hashed
         # Counts every MinHash written, across every batch. It has to be initialised before the
         # loops: when there is nothing left to hash the loop body never runs, and returning
         # len(minhashes) then raised UnboundLocalError - so finishing with no work to do failed
@@ -401,7 +425,7 @@ class Worker(QueueRemoteCallee):
             for sliced_ids in zip_longest(*[iter(unhashed_function_ids)] * self.config.MINHASH_CONFIG.MINHASH_GENERATION_WORKPACK_SIZE):
                 sliced_ids = [fid for fid in sliced_ids if fid is not None]
                 unhashed_functions = self._storage.getUnhashedFunctions([fid for fid in sliced_ids if isinstance(fid, int)])
-                minhashes = self.calculateMinHashes(unhashed_functions, progress_reporter=progress_reporter)
+                minhashes = self.calculateMinHashes(unhashed_functions, progress_reporter=progress_reporter, failed_function_ids=failed_function_ids)
                 if minhashes:
                     self._storage.addMinHashes(minhashes)
                     num_updated += len(minhashes)
@@ -417,7 +441,7 @@ class Worker(QueueRemoteCallee):
                 sliced_ids = [fid for fid in sliced_ids if fid is not None]
                 unhashed_functions = self._storage.getUnhashedFunctions([fid for fid in sliced_ids if isinstance(fid, int)])
                 LOGGER.info("Updating MinHashes: %d function entries have no MinHash yet.", len(unhashed_functions))
-                minhashes = self.calculateMinHashes(unhashed_functions, progress_reporter=progress_reporter)
+                minhashes = self.calculateMinHashes(unhashed_functions, progress_reporter=progress_reporter, failed_function_ids=failed_function_ids)
                 if minhashes:
                     self._storage.addMinHashes(minhashes)
                     num_updated += len(minhashes)
@@ -744,7 +768,9 @@ class Worker(QueueRemoteCallee):
     #### used by Worker(updateMinHashes) and MatcherQuery #####
 
     # Reports PROGRESS
-    def calculateMinHashes(self, function_entries, progress_reporter=NoProgressReporter()):
+    def calculateMinHashes(self, function_entries, progress_reporter=NoProgressReporter(), failed_function_ids=None):
+        """MinHashes of the given functions; failed_function_ids, when given, is extended by those that
+        have disassembly and are large enough to hash but could not be."""
         minhashes = []
         smda_functions = []
         LOGGER.info("Calculating MinHashes: hashing for %d function entries requested.", len(function_entries))
@@ -752,7 +778,15 @@ class Worker(QueueRemoteCallee):
         for func in function_entries:
             binary_info = BinaryInfo(b"")
             binary_info.architecture = func.architecture
-            smda_function = smdaFunctionFromXcfg(func.xcfg, binary_info)
+            try:
+                smda_function = smdaFunctionFromXcfg(func.xcfg, binary_info)
+            except Exception as error:
+                # an imported function holds whatever disassembly the export stated: one smda cannot
+                # rebuild would fail the batch, and so every job over the corpus, on every run
+                LOGGER.warning("Calculating MinHashes: function %d cannot be rebuilt from its stored disassembly and is skipped: %s", func.function_id, error)
+                if failed_function_ids is not None:
+                    failed_function_ids.append(func.function_id)
+                continue
             if smda_function is None:
                 without_disassembly += 1
                 continue
@@ -785,10 +819,15 @@ class Worker(QueueRemoteCallee):
                     progress_reporter.set_total(len(smda_functions))
                     is_stepping = True
                 for smda_function in tqdm.tqdm(smda_functions, total=len(smda_functions)):
-                    minhashes.append(self.minhasher.calculateMinHashFromStorage(smda_function))
+                    minhash = self.minhasher.calculateMinHashFromStorage(smda_function)
+                    if minhash is not None:
+                        minhashes.append(minhash)
                     if is_stepping:
                         progress_reporter.step()
             LOGGER.info("Calculated minhashes for %d function entries!", len(minhashes))
+            if failed_function_ids is not None:
+                hashed_function_ids = {minhash.function_id for minhash in minhashes}
+                failed_function_ids.extend(function_id for function_id, _ in smda_functions if function_id not in hashed_function_ids)
         return minhashes
 
     ##### CONFIG CHANGES ####
