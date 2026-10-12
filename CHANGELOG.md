@@ -39,6 +39,18 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   the delete, as the sample document is removed with it; a delete that fails partway leaves it on
   the sample until a retry completes the delete.
 
+- **`recalculatePicHashes` left the pichash counts keyed by the old hashes** ([#261]). It rewrites
+  `_pichash` in place and marked the picblockhash index incomplete, but not the counts, which went
+  on counting hashes the functions no longer carry and missed the new ones. Under
+  `MINHASH_PICHASH_MAX_MATCHES` a hash without a count document is dropped, so a rehashed function
+  whose new hash no other function held lost its exact matches; and with the decrement above,
+  deleting a rehashed sample would take its new hashes away from other samples holding them. A
+  recalculation that changes any pichash now marks the count index incomplete before it writes,
+  and logs that it did. **Run `MongoDbStorage.rebuildPicHashCountIndex()` afterwards**;
+  until then the cutoff counts from the functions collection, which is correct but pays the cost
+  the counts exist to avoid, and adds and deletes leave the counts alone. A run that changes no
+  pichash leaves them complete.
+
 ### Changed
 
 - Every start creates the `(_pichash, df)` index on `pichash_counts` and the `sample_id` and

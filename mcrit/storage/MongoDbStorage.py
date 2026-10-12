@@ -3290,10 +3290,12 @@ class MongoDbStorage(StorageInterface):
         xcfg_missing = 0
         samples_skipped = 0
         picblockhash_index_invalidated = False
+        pichash_count_index_invalidated = False
         for sample_id, sample_info in samples_to_be_updated.items():
             pic_hash_updates = []
             sample_xcfg_missing = 0
             picblockhashes_updated_before = picblockhashes_updated
+            functions_updated_before = functions_updated
             sample_function_documents = list(self._getDb().functions.find({"sample_id": sample_id}, {"function_id": 1, "_pichash": 1, "_picblockhashes": 1, "_xcfg": 1, "_id": 0}))
             # one $in for the whole sample rather than a lookup per function (#137); inline
             # `_xcfg` is the fallback for pre-migration documents (see _attachXcfgBlobs)
@@ -3358,6 +3360,14 @@ class MongoDbStorage(StorageInterface):
                     # old against new hashes per function, which is what the rebuild does anyway.
                     self._setPicBlockHashIndexComplete(False)
                     picblockhash_index_invalidated = True
+                if functions_updated > functions_updated_before and not pichash_count_index_invalidated:
+                    # the same for the pichash counts, which are keyed by the hash: left complete,
+                    # they would go on counting the old hashes and miss the new ones, which the
+                    # cutoff then drops, and a later deleteSample would decrement the new ones,
+                    # taking them away from other samples holding them (#261). Until rebuildPicHashCountIndex runs, the MINHASH_PICHASH_MAX_MATCHES
+                    # cutoff counts from the functions collection, slower but correct.
+                    self._setPicHashCountIndexComplete(False)
+                    pichash_count_index_invalidated = True
                 self._getDb().functions.bulk_write(pic_hash_updates, ordered=False)
             # only a sample whose every function was rehashed holds hashes of this smda and picblocks,
             # whether or not any of them changed; smda_version keeps naming the smda of the report
@@ -3382,6 +3392,8 @@ class MongoDbStorage(StorageInterface):
             )
         if picblockhash_index_invalidated:
             LOGGER.warning("picblockhash index invalidated by the recalculation - run rebuildPicBlockHashIndex().")
+        if pichash_count_index_invalidated:
+            LOGGER.warning("pichash count index invalidated by the recalculation - run rebuildPicHashCountIndex().")
         return {
             "outdated_samples": total_samples,
             "stale_picblockhash_samples": num_stale_picblockhash_samples,
