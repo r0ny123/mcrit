@@ -43,7 +43,7 @@ from mcrit.libs.utility import decode_two_complement, encode_two_complement
 from mcrit.minhash.MinHash import MinHash
 from mcrit.minhash.MinHasher import MINHASH_SHINGLER_REVISION, SHINGLER_REVISION_SINCE
 from mcrit.storage.FamilyEntry import FamilyEntry
-from mcrit.storage.FunctionEntry import FunctionEntry, smdaFunctionFromXcfg
+from mcrit.storage.FunctionEntry import FunctionEntry, checkSubmittedPicHashes, smdaFunctionFromXcfg
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache
 from mcrit.storage.SampleEntry import SampleEntry
@@ -1569,6 +1569,8 @@ class MongoDbStorage(StorageInterface):
 
     def addSmdaReport(self, smda_report: "SmdaReport", isQuery=False) -> Optional["SampleEntry"]:
         assert smda_report.sha256 is not None
+        # the sample is written before its functions are encoded, so this has to come first
+        checkSubmittedPicHashes(smda_report)
         sample_entry = None
         if isQuery:
             sample_entry = SampleEntry(smda_report, sample_id=-1 * self._useCounter("query_samples"), family_id=0)

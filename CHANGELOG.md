@@ -94,9 +94,21 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   instance padded from the start) keeps both indexes. Until the migration is complete a value may
   be stored in both spellings; the cutoff (`MINHASH_PICHASH_MAX_MATCHES`) sums the holders of both
   and keeps or drops the value as a unit, and without its count index it counts them the slow way
-  and logs a warning, with the same results.
+  and logs a warning, with the same results. Only values of 0..2^64-1 fit 16 digits, so a report or
+  import naming a pichash or picblockhash outside that range is now refused: `POST /samples`
+  answers 400, a query job fails, and `POST /import` skips the sample and counts it as skipped.
+  Padding -5 would have stored `"0x-000000000000005"`, which nothing reads back. Older releases
+  stored such values unchecked (-5 as `"-0x5"`); `pad` and `unpad` leave them alone, and `verify`
+  reports them as a problem until their sample is deleted.
 
 ### Fixed
+
+- **A pic_hash that isn't an integer no longer half-stores a sample.** A report's
+  `metadata.pic_hash` comes straight from the submitter, and a dict such as `{"$eq": ...}` was
+  stored as a sub-document; the insert then failed halfway, leaving a sample without its function
+  range and family statistics. It's refused now with the rest of the out-of-range values (see the
+  zero-padded pichash entry). `POST /samples` also answers 400 instead of 500 for any report smda
+  refuses as malformed.
 
 - **`McritClient` raised a `JSONDecodeError` for a 2xx whose body is not JSON** ([#257]). A reverse
   proxy's error or login page, or an empty answer, with a 200 or 202 status went through

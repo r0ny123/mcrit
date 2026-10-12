@@ -15,7 +15,8 @@ Modes:
             settings flag `pichash_padded` is set, which switches every reader and writer
             of the instance to the padded shape.
   verify  - count the values that are still unpadded and check the flag against them;
-            exits 1 when the flag says padded but unpadded values remain.
+            exits 1 when the flag says padded but unpadded values remain, or when values
+            outside 0..2**64-1 are stored, which neither mode can rewrite.
   unpad   - rollback: rewrite every value with `hex()` again and clear the flag.
 
 Stop the mcrit server and its workers before `pad`: while the flag is unset they keep
@@ -53,7 +54,7 @@ from typing import Any, Dict, List, Optional
 from pymongo import ASCENDING, MongoClient, UpdateOne
 
 from mcrit.config.McritConfig import McritConfig
-from mcrit.storage.MongoDbStorage import PICHASH_HEX_DIGITS, MongoDbStorage, encode_pichash_value
+from mcrit.storage.MongoDbStorage import PICHASH_HEX_DIGITS, PICHASH_MAX_VALUE, MongoDbStorage, encode_pichash_value
 
 STATE_COLLECTION = "pichash_padding_state"
 PICHASH_COUNT_COLLECTION = MongoDbStorage._PICHASH_COUNT_COLLECTION
@@ -108,17 +109,47 @@ def padded_block_query() -> Dict[str, Any]:
     return {"_picblockhashes.hash": {"$regex": "^0x[0-9a-f]{%d}$" % PICHASH_HEX_DIGITS}}
 
 
+# what either width spells: a value of 0..PICHASH_MAX_VALUE in 1 to 16 hex digits
+SPELLABLE_PATTERN = "^0x[0-9a-f]{1,%d}$" % PICHASH_HEX_DIGITS
+
+
+def unspellable_query() -> Dict[str, Any]:
+    """Pichashes no width spells: negative ("-0x5"), 2**64 or more, or not a hex string at all."""
+    return {"_pichash": {"$ne": None, "$not": {"$regex": SPELLABLE_PATTERN}}}
+
+
+def unspellable_block_query() -> Dict[str, Any]:
+    return {"_picblockhashes": {"$elemMatch": {"hash": {"$not": {"$regex": SPELLABLE_PATTERN}}}}}
+
+
+def respell(stored: Any, padded: bool) -> Any:
+    """A stored value in the requested width; one no width spells is left as it is, for verify to report.
+
+    Submissions and imports could store a pichash unchecked, so an instance can hold "-0x5"
+    (hex() of -5), which the padded format would turn into the undecodable "0x-000000000000005".
+    """
+    if not isinstance(stored, str):
+        return stored
+    try:
+        value = int(stored, 16)
+    except ValueError:
+        return stored
+    if not 0 <= value <= PICHASH_MAX_VALUE:
+        return stored
+    return encode_pichash_value(value, padded)
+
+
 def rewrite(document: Dict[str, Any], padded: bool) -> Optional[UpdateOne]:
     """The update that brings one document to the requested width, or None if it is there."""
     update: Dict[str, Any] = {}
     pichash = document.get("_pichash")
     if isinstance(pichash, str):
-        wanted = encode_pichash_value(int(pichash, 16), padded)
+        wanted = respell(pichash, padded)
         if wanted != pichash:
             update["_pichash"] = wanted
     block_entries = document.get("_picblockhashes")
     if block_entries:
-        wanted_hashes = [encode_pichash_value(int(entry["hash"], 16), padded) if isinstance(entry.get("hash"), str) else entry.get("hash") for entry in block_entries]
+        wanted_hashes = [respell(entry.get("hash"), padded) for entry in block_entries]
         if wanted_hashes != [entry.get("hash") for entry in block_entries]:
             # positional per-element $set keeps offset/length untouched and the array order stable
             for position, wanted in enumerate(wanted_hashes):
@@ -215,12 +246,18 @@ def verify(db) -> Dict[str, Any]:
             "padded_pichashes": db[collection_name].count_documents(padded_query()),
             "documents_with_unpadded_blockhashes": db[collection_name].count_documents(unpadded_block_query()),
             "documents_with_padded_blockhashes": db[collection_name].count_documents(padded_block_query()),
+            "unspellable_pichashes": db[collection_name].count_documents(unspellable_query()),
+            "documents_with_unspellable_blockhashes": db[collection_name].count_documents(unspellable_block_query()),
         }
         report["collections"][collection_name] = counts
         # only one direction is a problem: a 16-digit value is legitimate under either encoding
         # (most 64 bit pichashes have no leading zero), an unpadded one only while the flag is unset
         if flag and (counts["unpadded_pichashes"] or counts["documents_with_unpadded_blockhashes"]):
             report["problems"].append("%s: flag says padded but unpadded values remain; re-run --mode pad" % collection_name)
+        # neither mode rewrites these: under either flag they sort out of place, and some of them
+        # no reader decodes
+        if counts["unspellable_pichashes"] or counts["documents_with_unspellable_blockhashes"]:
+            report["problems"].append("%s: values outside 0..0x%x that no width spells were left as stored; delete the samples holding them" % (collection_name, PICHASH_MAX_VALUE))
     # A derived index is only read while it is marked complete, and then its keys have to be
     # spelled like the functions it was built from. Here a leading-zero value tells the widths
     # apart in both directions, since `hex()` never writes one.

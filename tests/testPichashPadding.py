@@ -329,6 +329,32 @@ class PichashPaddingTest(TestCase):
         self.db.functions.update_one({"function_id": self.functions[0]["function_id"]}, {"$set": {"_pichash": "0x1"}})
         self.assertEqual(1, migrate_pichash_padding.main(["--mode", "verify", "--host", server, "--port", str(port), "--db", DB_NAME]))
 
+    def test_values_no_width_spells_are_left_as_stored_and_reported(self):
+        """Submissions could store a pichash unchecked. Padded, hex(-5) became the undecodable
+        "0x-000000000000005", verify saw nothing, and every later pad or unpad run aborted on it."""
+        self._make_legacy()
+        negative, wide, operator = [document["function_id"] for document in self.functions[:3]]
+        with_blocks = next(document["function_id"] for document in self.functions if document.get("_picblockhashes"))
+        self.db.functions.update_one({"function_id": negative}, {"$set": {"_pichash": hex(-5)}})
+        self.db.functions.update_one({"function_id": wide}, {"$set": {"_pichash": hex(1 << 64)}})
+        self.db.functions.update_one({"function_id": operator}, {"$set": {"_pichash": {"$eq": "0x5"}}})
+        self.db.functions.update_one({"function_id": with_blocks}, {"$set": {"_picblockhashes.0.hash": hex(-7)}})
+        planted = {document["function_id"]: document for document in self.db.functions.find({"function_id": {"$in": [negative, wide, operator, with_blocks]}}, {"_id": 0})}
+        for mode in ("pad", "pad", "unpad", "pad"):
+            report = migrate_pichash_padding.run(self.db, mode)
+            self.assertEqual(mode == "pad", report["pichash_padded"])
+            self.assertEqual(3, report["collections"]["functions"]["unspellable_pichashes"], mode)
+            self.assertEqual(1, report["collections"]["functions"]["documents_with_unspellable_blockhashes"], mode)
+            self.assertEqual(1, len(report["problems"]), mode)
+            stored = {document["function_id"]: document for document in self.db.functions.find({"function_id": {"$in": list(planted)}}, {"_id": 0})}
+            for function_id in (negative, wide, operator):
+                self.assertEqual(planted[function_id]["_pichash"], stored[function_id]["_pichash"], mode)
+            self.assertEqual("-0x7", stored[with_blocks]["_picblockhashes"][0]["hash"], mode)
+        # everything else was padded as usual, and a padded reader decodes what it decoded before
+        self.assertTrue(all(is_padded(document["_pichash"]) for document in self.db.functions.find({"function_id": {"$nin": [negative, wide, operator]}})))
+        self.storage._pichash_padded = None
+        self.assertEqual(len(self.functions), len(self.storage.getFunctionsBySampleId(self.sample_id) or []))
+
     def _leading_zero_function(self):
         return next(d for d in self.functions if short_form(d["_pichash"]) != d["_pichash"])
 
