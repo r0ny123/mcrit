@@ -118,7 +118,8 @@ class SampleEntry:
         """The timestamp as toDict writes it, or None for a sample that has none.
 
         smda reads a report whose timestamp is missing or empty as None, which toDict stores as
-        null, and strftime writes a year below 1000 with fewer digits than strptime reads back.
+        null, and strftime before Python 3.14 writes a year below 1000 with fewer digits than
+        strptime reads back.
         Every reader of a stored sample - listings, exports, matching, deleteSample, the query
         cleanup - comes through here, so such a value is read as no timestamp instead of failing
         all of them.

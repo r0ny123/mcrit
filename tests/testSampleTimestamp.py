@@ -6,7 +6,6 @@ the listing, the export, the matching jobs resolving it as a candidate, deleteSa
 query cleanup - failed with a TypeError, and the submitting request answered 500 after the write.
 """
 
-import datetime
 import json
 import logging
 import os
@@ -62,8 +61,9 @@ class SampleEntryTimestampTest(unittest.TestCase):
     def test_a_timestamp_toDict_cannot_have_written_reads_as_none(self):
         entry_dict = SampleEntry.toDict(SampleEntry.fromDict({**self._entry_dict(), "timestamp": "2024-01-02T03-04-05"}))
         self.assertEqual("2024-01-02T03-04-05", entry_dict["timestamp"])
-        # null as stored for a report without one, a missing key, and a year strftime writes short
-        for timestamp in (None, "", datetime.datetime(999, 1, 2).strftime("%Y-%m-%dT%H-%M-%S"), "not a timestamp", 5):
+        # null as stored for a report without one, a missing key, and a year below 1000 as strftime
+        # wrote it before Python 3.14, which pads it to four digits
+        for timestamp in (None, "", "999-01-02T00-00-00", "not a timestamp", 5):
             self.assertIsNone(SampleEntry.fromDict({**self._entry_dict(), "timestamp": timestamp}).timestamp, timestamp)
         entry_dict = self._entry_dict()
         del entry_dict["timestamp"]
