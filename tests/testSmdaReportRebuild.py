@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -133,6 +134,42 @@ class SmdaReportRouteAndClient(unittest.TestCase):
         SampleResource(index).on_get_smda_report(falcon.Request(falcon.testing.create_environ(path="/samples/1/smda")), resp, 1)
         self.assertEqual(falcon.HTTP_404, resp.status)
 
+    def test_a_request_during_a_rebuild_answers_503_at_once(self):
+        # a rebuild holds its request thread for seconds on a large sample: a request arriving meanwhile
+        # does not queue behind it, and the slot is free again after the rebuild, failed or not
+        rebuilt = self._rebuilt()
+        index = MagicMock()
+        index.isSampleId.return_value = True
+        resource = SampleResource(index)
+        during = falcon.Response()
+
+        waited = []
+
+        def rebuild_while_another_request_arrives(sample_id):
+            started = time.monotonic()
+            resource.on_get_smda_report(falcon.Request(falcon.testing.create_environ(path="/samples/2/smda")), during, 2)
+            waited.append(time.monotonic() - started)
+            return rebuilt
+
+        index.getSmdaReportForSample.side_effect = rebuild_while_another_request_arrives
+        resp = falcon.Response()
+        resource.on_get_smda_report(falcon.Request(falcon.testing.create_environ(path="/samples/1/smda")), resp, 1)
+        self.assertEqual(falcon.HTTP_200, resp.status)
+        self.assertEqual(falcon.HTTP_503, during.status)
+        self.assertLess(waited[0], 0.5)
+        self.assertEqual(str(SampleResource.SMDA_REBUILD_RETRY_AFTER), during.get_header("Retry-After"))
+        self.assertEqual(1, index.getSmdaReportForSample.call_count)
+        index.getSmdaReportForSample.side_effect = RuntimeError("storage unavailable")
+        with self.assertRaises(RuntimeError):
+            resource.on_get_smda_report(falcon.Request(falcon.testing.create_environ(path="/samples/1/smda")), falcon.Response(), 1)
+        index.getSmdaReportForSample.side_effect = None
+        index.getSmdaReportForSample.return_value = rebuilt
+        resp = falcon.Response()
+        resource.on_get_smda_report(falcon.Request(falcon.testing.create_environ(path="/samples/1/smda")), resp, 1)
+        self.assertEqual(falcon.HTTP_200, resp.status)
+        assert resp.data is not None
+        self.assertEqual(rebuilt.smda_report.sha256, json.loads(resp.data)["data"]["smda_report"]["sha256"])
+
     def test_the_client_answers_a_rebuilt_report(self):
         for kwargs in ({}, {"extras_missing": True}, {"num_functions_without_disassembly": 2}):
             sent = self._rebuilt(**kwargs)
@@ -147,6 +184,24 @@ class SmdaReportRouteAndClient(unittest.TestCase):
             self.assertEqual(sent.complete, received.complete)
             self.assertEqual(sent.incomplete_reasons, received.incomplete_reasons)
             self.assertEqual(sent.num_functions_without_disassembly, received.num_functions_without_disassembly)
+
+    def test_the_client_retries_while_the_server_rebuilds_another_report(self):
+        sent = self._rebuilt()
+        busy = MagicMock(status_code=503, headers={"Retry-After": "5"})
+        busy.json.return_value = {"status": "failed", "data": {"message": "Another SMDA report is being rebuilt, retry shortly."}}
+        done = MagicMock(status_code=200, headers={})
+        done.json.return_value = {"status": "successful", "data": json.loads(json.dumps(sent.toDict()))}
+        client = McritClient("http://mcrit.test")
+        with patch("mcrit.client.McritClient.requests.get", side_effect=[busy, done]) as get, patch("mcrit.client.McritClient.time.sleep") as sleep:
+            received = client.getSmdaReportForSample(1)
+        assert received is not None
+        self.assertEqual(sent.smda_report.sha256, received.smda_report.sha256)
+        self.assertEqual(2, get.call_count)
+        sleep.assert_called_once_with(5.0)
+        # a server that stays busy is asked SMDA_REBUILD_ATTEMPTS times, then answered like any other failure
+        with patch("mcrit.client.McritClient.requests.get", return_value=busy) as get, patch("mcrit.client.McritClient.time.sleep"):
+            self.assertIsNone(client.getSmdaReportForSample(1))
+        self.assertEqual(McritClient.SMDA_REBUILD_ATTEMPTS, get.call_count)
 
 
 if __name__ == "__main__":

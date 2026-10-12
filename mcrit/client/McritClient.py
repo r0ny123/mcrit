@@ -521,13 +521,27 @@ class McritClient:
         if data is not None:
             return SampleEntry.fromDict(data)
 
+    # requests for GET /samples/{id}/smda in all, while the server answers 503 because it is rebuilding another report
+    SMDA_REBUILD_ATTEMPTS = 3
+
     def getSmdaReportForSample(self, sample_id):
         """
         The SMDA report the sample was submitted as, rebuilt from what the server stores (#94), as a
         RebuiltSmdaReport: `.smda_report`, plus `.complete` / `.incomplete_reasons` /
-        `.num_functions_without_disassembly` for what could not be rebuilt. None for an unknown sample
+        `.num_functions_without_disassembly` for what could not be rebuilt. None for an unknown sample.
+        A server rebuilds one report at a time and answers 503 meanwhile; that is retried after its
+        Retry-After, up to SMDA_REBUILD_ATTEMPTS requests in all, before it is handled like any other answer
         """
-        response = requests.get(f"{self.mcrit_server}/samples/{sample_id}/smda", headers=self.headers, timeout=self.timeout)
+        for attempt in range(self.SMDA_REBUILD_ATTEMPTS):
+            response = requests.get(f"{self.mcrit_server}/samples/{sample_id}/smda", headers=self.headers, timeout=self.timeout)
+            if response.status_code != 503 or attempt == self.SMDA_REBUILD_ATTEMPTS - 1:
+                break
+            try:
+                delay = min(float(response.headers.get("Retry-After", 5)), 30)
+            except ValueError:
+                delay = 5
+            LOGGER.warning("MCRIT is rebuilding another SMDA report, retrying sample %s in %s s.", sample_id, delay)
+            time.sleep(delay)
         if self.raw:
             return response
         data = self._handle(response)

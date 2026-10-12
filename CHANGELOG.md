@@ -84,7 +84,10 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   rebuilt report. NOTE that exports do not carry the extras, so an imported sample rebuilds as
   `extras_missing`; deleting a sample, its family or a query sample (also by the query cleanup)
   deletes its extras, `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP` compacts `query_smda_extras` too,
-  and `STORAGE_DROP_DISASSEMBLY` keeps them ([#94]).
+  and `STORAGE_DROP_DISASSEMBLY` keeps them ([#94]). Rebuilding a large sample's report takes
+  seconds and hundreds of MiB in the request thread, so a server process runs one rebuild at a
+  time; a request that arrives during one answers 503 with `Retry-After` instead of tying up
+  another thread. `getSmdaReportForSample` waits that long and asks again, three requests in all.
 
 ### Changed
 
