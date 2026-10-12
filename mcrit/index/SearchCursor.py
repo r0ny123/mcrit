@@ -23,6 +23,13 @@ class MinimalSearchCursor:
 
     @classmethod
     def fromDict(cls, data):
+        # the cursor comes back from the client and its values go into the storage query as they are,
+        # so anything but [[scalar, ...], 0|1] is refused: an object there was a MongoDB query operator
+        if not isinstance(data, list) or len(data) != 2 or not isinstance(data[0], list) or data[1] not in (0, 1):
+            raise ValueError("Malformed search cursor.")
+        # integers beyond 8 bytes are refused too: pymongo cannot encode them
+        if not all(value is None or isinstance(value, (str, float)) or (isinstance(value, int) and -(2**63) <= value < 2**63) for value in data[0]):
+            raise ValueError("Malformed search cursor.")
         result = cls()
         result.record_values, result.is_forward_search = data[0], bool(data[1])
         return result
@@ -74,6 +81,9 @@ class FullSearchCursor:
         self.sort_fields = [sort_info[0] for sort_info in sort_by_list]
         self.sort_directions = [sort_info[1] for sort_info in sort_by_list]
         if input_cursor is not None:
+            if len(input_cursor.record_values) != len(self.sort_fields):
+                # a cursor holds one value per sort field and only fits the sort order it was issued for
+                raise ValueError("The search cursor does not match the requested sort order.")
             self.record_values = input_cursor.record_values
             self.is_forward_search = input_cursor.is_forward_search
             self.is_initial_cursor = False

@@ -7,6 +7,12 @@ from mcrit.server.utils import db_log_msg, get_username, jsonify, timing
 
 
 class FunctionResource:
+    # GET /functions answers at most this many functions, each with its disassembly: without a
+    # limit it loaded the whole corpus into the server process at once, about ten times its size
+    MAX_FUNCTIONS_PER_PAGE = 1000
+    # POST /functions looks up at most this many ids per request, one database query each
+    MAX_FUNCTION_IDS = 10000
+
     def __init__(self, index: MinHashIndex):
         self.index = index
 
@@ -82,16 +88,21 @@ class FunctionResource:
             with_label_only = req.params["with_label_only"].lower().strip() == "true"
         # assume the POST body consists of comma separated function_ids
         post_body = req.stream.read()
+        # counted as sent, before the body is split, so that a long one is not parsed first
+        if post_body.count(b",") >= self.MAX_FUNCTION_IDS:
+            resp.data = jsonify({"status": "failed", "data": {"message": f"At most {self.MAX_FUNCTION_IDS} function ids per request."}})
+            resp.status = falcon.HTTP_400
+            db_log_msg(self.index, req, "FunctionResource.on_post - failed - too many ids.")
+            return
         if re.match(rb"^\d+(?:[\s]*,[\s]*\d+)*$", post_body):
-            target_function_ids = [int(function_id) for function_id in post_body.split(b",")]
+            # each id is looked up once, however often it is named
+            target_function_ids = list(dict.fromkeys(int(function_id) for function_id in post_body.split(b",")))
             function_entries = {}
-            for function_id in target_function_ids:
-                function_entry = self.index.getFunctionById(function_id, with_xcfg=False)
-                if function_entry:
-                    function_dict = function_entry.toDict()
-                    if with_label_only and not function_dict["function_labels"]:
-                        continue
-                    function_entries[function_id] = function_dict
+            for function_id, function_entry in self.index.getFunctionsByIds(target_function_ids).items():
+                function_dict = function_entry.toDict()
+                if with_label_only and not function_dict["function_labels"]:
+                    continue
+                function_entries[function_id] = function_dict
             resp.data = jsonify({"status": "successful", "data": function_entries})
             resp.status = falcon.HTTP_200
             db_log_msg(self.index, req, "FunctionResource.on_post - success.")
@@ -114,6 +125,9 @@ class FunctionResource:
                 limit_function_count = int(req.params["limit"])
             except ValueError:
                 pass
+        # a page at a time: no limit, or one beyond the page size, answers a full page
+        if not 0 < limit_function_count <= self.MAX_FUNCTIONS_PER_PAGE:
+            limit_function_count = self.MAX_FUNCTIONS_PER_PAGE
         function_overview = {}
         function_entries = self.index.getFunctions(start_index, limit_function_count)
         for function_entry in function_entries:

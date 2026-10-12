@@ -3028,6 +3028,21 @@ class MongoDbStorage(StorageInterface):
             entries[entry.family_id] = entry
         return entries
 
+    def getFunctionsByIds(self, function_ids: List[int]) -> Dict[int, "FunctionEntry"]:
+        function_entries = {}
+        # query functions (negative ids) live in their own collection
+        for collection, ids in (
+            (self._getDb().functions, [function_id for function_id in function_ids if function_id >= 0]),
+            (self._getDb().query_functions, [function_id for function_id in function_ids if function_id < 0]),
+        ):
+            if not ids:
+                continue
+            for function_document in collection.find({"function_id": {"$in": ids}}, {"_id": 0}):
+                self._decodeFunction(function_document)
+                function_entry = FunctionEntry.fromDict(function_document)
+                function_entries[function_entry.function_id] = function_entry
+        return function_entries
+
     def getFunctionById(self, function_id: int, with_xcfg=False) -> Optional["FunctionEntry"]:
         field_selection = {"_id": 0}
         if function_id < 0:

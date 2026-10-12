@@ -63,6 +63,10 @@ def _get_field(object, field):
 
 
 class MinHashIndex(QueueRemoteCaller(Worker)):
+    # a search answers at most this many results per page; limit=-1 asked the storage for limit + 1 = 0
+    # results, which MongoDB's find() reads as no limit, so one search could load every function
+    MAX_SEARCH_RESULTS = 1000
+
     def __init__(self, config=None, base_url=None):
         if config is None:
             config = McritConfig()
@@ -647,6 +651,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
     def getFunctionById(self, function_id, with_xcfg=False):
         return self.getStorage().getFunctionById(function_id, with_xcfg=with_xcfg)
 
+    def getFunctionsByIds(self, function_ids):
+        return self.getStorage().getFunctionsByIds(function_ids)
+
     def getFunctions(self, start_index, limit):
         return self.getStorage().getFunctions(start_index, limit)
 
@@ -765,6 +772,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
 
     def _getSearchResultTemplate(self, search_function, search_term, sort_by_list, cursor_str, limit):
         assert isinstance(search_term, str)
+        # a page at a time: no positive limit, or one beyond the page size, answers a full page
+        if not 0 < limit <= self.MAX_SEARCH_RESULTS:
+            limit = self.MAX_SEARCH_RESULTS
 
         sort_fields = [sort_info[0] for sort_info in sort_by_list]
 
@@ -775,7 +785,14 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         is_backward_search = not full_cursor.is_forward_search
 
         parsed_search = self.search_query_parser.parse(search_term)
-        search_results_objects = search_function(parsed_search, cursor=full_cursor, max_num_results=limit + 1)
+        try:
+            search_results_objects = search_function(parsed_search, cursor=full_cursor, max_num_results=limit + 1)
+        except TypeError as mismatched_cursor:
+            # the in-memory search compares the cursor's values with the entries' and fails on a cursor
+            # that was issued for another sort field; MongoDB answers such a cursor with an arbitrary page
+            if cursor is None:
+                raise
+            raise ValueError("The search cursor does not match the requested sort order.") from mismatched_cursor
 
         # Find last last_element_key, which is used for the forward cursor
         search_results_keys = list(search_results_objects.keys())

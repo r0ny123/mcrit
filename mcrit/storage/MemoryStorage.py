@@ -749,6 +749,14 @@ class MemoryStorage(StorageInterface):
             self._families[family_id] = FamilyEntry(family_name=family_name, family_id=family_id)
         return family_id
 
+    def getFunctionsByIds(self, function_ids: List[int]) -> Dict[int, "FunctionEntry"]:
+        function_entries = {}
+        for function_id in function_ids:
+            function_entry = self.getFunctionById(function_id, with_xcfg=False)
+            if function_entry:
+                function_entries[function_id] = function_entry
+        return function_entries
+
     def getFunctionById(self, function_id: int, with_xcfg=False) -> Optional["FunctionEntry"]:
         function_entry = None
         if function_id < 0:

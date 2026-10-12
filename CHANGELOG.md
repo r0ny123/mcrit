@@ -152,6 +152,46 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   functions deleted under it. Query samples written before this release have no count and hold
   the disassembly judgment back until the last of them has expired.
 
+### Security
+
+- **A search cursor's values reached MongoDB as query operators.** `GET
+  /search/{families,samples,functions}` decoded the `cursor` it hands out and put its values into
+  the query unchecked, so a JSON object there became an operator on the sort field (for example
+  `$regex` on `sort_by=function_name`), evaluated by mongod against every entry. A cursor has to be
+  `[[value, ...], 0 or 1]` now, with one string, number (up to 8 bytes), boolean or null per sort
+  field; anything else is answered 400, as is a cursor with a different number of values than the
+  sort has fields. A cursor replayed under a sort field whose values it can't be compared with is
+  answered 400 on the in-memory storage, where it used to fail with a 500; otherwise both storages
+  answer a cursor replayed under another sort with an arbitrary page, so a cursor belongs to the
+  sort and direction it was issued for. Cursors the server hands out are unaffected. The search queries still run without a time limit on mongod.
+
+- **A search query with a few unbalanced parentheses held a server thread for minutes.** The query
+  grammar retried alternatives that began with the same operand, so every nesting level multiplied
+  the work: `((((((a` took about 50 s on `GET /search/families` before it was answered 400, and a
+  handful of such requests occupied every server thread. AND and OR chains are loops now, a NOT
+  whose operand fails is no longer re-read as a search term, and a quoted term no longer matches an
+  escaped quote two ways (an unterminated `"\"\"\"...` cost 2^n steps). Queries parse to the same
+  trees as before, in milliseconds for ordinary queries; the slowest shapes at the new
+  16,384-character limit take about 1.3 s. A query longer than that, or nested deeper than the
+  stack allows (about 47 levels of parentheses, 33 of `(NOT `), is answered 400 instead of 500. A
+  chain of terms used to run out of stack at about 75 terms (implicit AND) or 105 (AND, OR); now
+  chains up to the length limit parse (about 220 OR'd `sha256:` terms, where main stopped at about
+  105). Behaviour change: a query over 16,384 characters is refused even where main answered it,
+  for instance a single very long term. Note that `"a\\\"b"` searches for `a\"b` now; the
+  escaped quote used to be unescaped a second time, into `a"b`.
+
+- **`GET /functions` loaded the whole corpus, disassembly included, into the server process.**
+  Without `limit` (and `McritClient.getFunctions()` sends 0) every function was read and serialised
+  in one response, about ten times its stored size, and `GET /search/{families,samples,functions}`
+  did the same with `limit=-1` or a very large `limit`. Both answer at most 1,000 entries per
+  request now; page with `start` (a position in the function collection, not a function id) or the
+  `cursor`. `POST /functions` looks each id up once, in one query per collection, and answers 400 for
+  more than 10,000 ids; `McritClient.getFunctionsByIds` sends its ids in requests of at most that
+  many and merges the answers, so it works with any number of ids against old and new servers
+  (with `raw_responses` it still sends one request, and the server's answer is returned as it is).
+  Behaviour change: a caller that relied on either listing to return every entry receives the
+  first 1,000, and one that posts ids to `/functions` itself can send at most 10,000 per request; a `McritClient` from an earlier release sends all ids in one request and gets `{}` back for more than that.
+
 ## [1.14.0] - 2026-10-09
 
 **Minor release: one addition, fixes, and nothing to run on a deployment that keeps the defaults.**
