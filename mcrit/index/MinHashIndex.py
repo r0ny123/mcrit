@@ -14,7 +14,7 @@ from mcrit.config.MinHashConfig import MinHashConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MatchingParameters import applyMatchingPreset, resolveMatchingParams
-from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor
+from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor, sortSpec
 from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.libs.utility import compress_encode, decompress_decode
 from mcrit.matchers.MatcherQueryFunction import MatcherQueryFunction
@@ -811,6 +811,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             forward_cursor = MinimalSearchCursor()
             forward_cursor.is_forward_search = True ^ is_backward_search  # switch for backward search, because of swap
             forward_cursor.record_values = [_get_field(last_result, field) for field in sort_fields]
+            forward_cursor.sort_spec = sortSpec(sort_by_list)
             forward_cursor_str = forward_cursor.toStr()
 
         backward_cursor_str = None
@@ -819,6 +820,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             backward_cursor = MinimalSearchCursor()
             backward_cursor.is_forward_search = False ^ is_backward_search  # switch for backward search, because of swap
             backward_cursor.record_values = [_get_field(first_result, field) for field in sort_fields]
+            backward_cursor.sort_spec = sortSpec(sort_by_list)
             backward_cursor_str = backward_cursor.toStr()
 
         if is_backward_search:

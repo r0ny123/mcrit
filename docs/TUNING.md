@@ -401,6 +401,21 @@ The cleanup deletes query jobs too, and so their results in the job queue's Grid
 storage database - the same server, port and `QUEUE_MONGODB_DBNAME` as `STORAGE_MONGODB_DBNAME`,
 as by default - and left alone when it has a database of its own, which this cannot reach.
 
+## Limiting the time a search may take
+
+| setting | default | effect |
+|---|---|---|
+| `STORAGE_MONGODB_SEARCH_MAX_TIME_MS` | `30000` | time limit in milliseconds for the MongoDB scans behind `GET /search/{families,samples,functions}`; `0` = no limit |
+
+A search that runs out of time is stopped on the MongoDB side and answered 400 with a message
+to narrow the search term, instead of holding the database busy for as long as it takes. The
+limit applies to each scan of one search separately: the lookup of the matching entries and,
+for function names, the scan of the distinct names (if that one runs out, the search falls back
+to matching the names in the database, as it does for a corpus with too many distinct names, and
+the scan is not repeated for an hour). The lookups of a single id or sha256 are not limited. The
+in-memory storage has no such limit.
+Raise it (or set 0) if broad searches on a large corpus are cut off and you accept their cost.
+
 ## Keeping submitted binaries
 
 | setting | default | effect |

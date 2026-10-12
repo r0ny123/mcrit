@@ -160,10 +160,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `$regex` on `sort_by=function_name`), evaluated by mongod against every entry. A cursor has to be
   `[[value, ...], 0 or 1]` now, with one string, number (up to 8 bytes), boolean or null per sort
   field; anything else is answered 400, as is a cursor with a different number of values than the
-  sort has fields. A cursor replayed under a sort field whose values it can't be compared with is
-  answered 400 on the in-memory storage, where it used to fail with a 500; otherwise both storages
-  answer a cursor replayed under another sort with an arbitrary page, so a cursor belongs to the
-  sort and direction it was issued for. Cursors the server hands out are unaffected. The search queries still run without a time limit on mongod.
+  sort has fields. Cursors the server issues name the sort fields and directions they belong to, and
+  one replayed under another sort field or direction is answered 400 on both storages (before, it
+  gave an arbitrary page on both, or a 500 in memory when the values could not be compared).
+  Cursors an older server issued carry no sort and are accepted as before, checked by the number of
+  values only. The MongoDB scans of a search now have a time limit,
+  `STORAGE_MONGODB_SEARCH_MAX_TIME_MS` (30 s, 0 = none); the lookups of a single id or sha256 do
+  not. A search that runs out is answered 400 with the advice to narrow the search term.
 
 - **A search query with a few unbalanced parentheses held a server thread for minutes.** The query
   grammar retried alternatives that began with the same operand, so every nesting level multiplied

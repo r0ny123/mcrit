@@ -1,21 +1,29 @@
 import base64
 import json
+import os
+import types
 import unittest
+from unittest import mock
 
 import falcon
 import falcon.testing
 import pymongo
+import pymongo.collection
+import pymongo.errors
 import pytest
+from smda.common.SmdaReport import SmdaReport
 
 from mcrit.config.McritConfig import McritConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor
 from mcrit.server.StatusResource import StatusResource
+from mcrit.storage.MongoDbStorage import MongoDbStorage
 from mcrit.storage.StorageFactory import StorageFactory
 
 from .context import config, getTestMongoServerAndPort
 
+EXAMPLE_REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "example_report.smda")
 FAMILY_NAMES = ["fam0", "fam1", "fam2", "fam3", "fam4"]
 
 
@@ -56,6 +64,16 @@ class SearchCursorShapeTestSuite(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     MinimalSearchCursor.fromStr(encode_cursor(data))
 
+    def testSortOfCursorIsChecked(self):
+        for sort_spec in ("family_name", [], [1], [["family_name"]], {"$ne": 1}, ["family name"], ["family_name\n"], ["$where"], ["-"], ["family_name"] * 9, ["a" * 80]):
+            with self.subTest(sort_spec=sort_spec):
+                with self.assertRaises(ValueError):
+                    MinimalSearchCursor.fromStr(encode_cursor([["fam1"], 1, sort_spec]))
+        cursor = MinimalSearchCursor.fromStr(encode_cursor([["fam1", 3], 1, ["family_name", "-family_id", "statistics.num_functions"]]))
+        assert cursor is not None
+        self.assertEqual(["family_name", "-family_id", "statistics.num_functions"], cursor.sort_spec)
+        self.assertEqual(("fam1", 3), tuple(cursor.record_values))
+
     def testCursorMustMatchTheSortOrder(self):
         cursor = MinimalSearchCursor.fromStr(encode_cursor([["fam2"], 1]))
         with self.assertRaises(ValueError):
@@ -81,8 +99,8 @@ class MemorySearchCursorTestSuite(unittest.TestCase):
         for family_name in FAMILY_NAMES:
             self.index.getStorage().addFamily(family_name)
 
-    def _search(self, cursor_data):
-        request = falcon.Request(falcon.testing.create_environ(path="/search/families", query_string="query=&sort_by=family_name&cursor=" + encode_cursor(cursor_data)))
+    def _search(self, cursor_data, params="sort_by=family_name"):
+        request = falcon.Request(falcon.testing.create_environ(path="/search/families", query_string="query=&" + params + "&cursor=" + encode_cursor(cursor_data)))
         response = falcon.Response()
         StatusResource(self.index).on_get_search_families(request, response)
         assert response.data is not None
@@ -108,6 +126,87 @@ class MemorySearchCursorTestSuite(unittest.TestCase):
         status, _ = self._search([["fam2", "fam3"], 1])
         self.assertEqual(falcon.HTTP_400, status)
 
+    def _issued_cursor(self, params="sort_by=family_name"):
+        request = falcon.Request(falcon.testing.create_environ(path="/search/families", query_string="query=&limit=2&" + params))
+        response = falcon.Response()
+        StatusResource(self.index).on_get_search_families(request, response)
+        assert response.data is not None
+        return json.loads(response.data)["data"]["cursor"]["forward"]
+
+    def _search_with(self, cursor_str, params):
+        request = falcon.Request(falcon.testing.create_environ(path="/search/families", query_string="query=&" + params + "&cursor=" + cursor_str))
+        response = falcon.Response()
+        StatusResource(self.index).on_get_search_families(request, response)
+        assert response.data is not None
+        return response.status, json.loads(response.data)
+
+    def testIssuedCursorsNameTheirSort(self):
+        cursor = MinimalSearchCursor.fromStr(self._issued_cursor())
+        assert cursor is not None
+        self.assertEqual(["family_name", "family_id"], cursor.sort_spec)
+        cursor = MinimalSearchCursor.fromStr(self._issued_cursor("sort_by=family_name&is_ascending=false"))
+        assert cursor is not None
+        self.assertEqual(["-family_name", "-family_id"], cursor.sort_spec)
+
+    def _backward_cursor(self, params="sort_by=family_name"):
+        # the backward cursor of the second page
+        status, payload = self._search_with(self._issued_cursor(params), params + "&limit=2")
+        self.assertEqual(falcon.HTTP_200, status)
+        backward = payload["data"]["cursor"]["backward"]
+        assert backward is not None
+        return backward
+
+    def testIssuedBackwardCursorsNameTheirSort(self):
+        cursor = MinimalSearchCursor.fromStr(self._backward_cursor())
+        assert cursor is not None
+        self.assertFalse(cursor.is_forward_search)
+        self.assertEqual(["family_name", "family_id"], cursor.sort_spec)
+        cursor = MinimalSearchCursor.fromStr(self._backward_cursor("sort_by=family_name&is_ascending=false"))
+        assert cursor is not None
+        self.assertEqual(["-family_name", "-family_id"], cursor.sort_spec)
+
+    def testBackwardCursorReplayedUnderAnotherSortIsAnsweredAsBadInput(self):
+        cursor = self._backward_cursor("sort_by=family_name")
+        status, _ = self._search_with(cursor, "sort_by=family_name")
+        self.assertEqual(falcon.HTTP_200, status)
+        for params in ("sort_by=family_id", "sort_by=family_name&is_ascending=false", "sort_by=num_samples"):
+            with self.subTest(params=params):
+                status, payload = self._search_with(cursor, params)
+                self.assertEqual(falcon.HTTP_400, status)
+                self.assertEqual("failed", payload["status"])
+
+    def testIssuedCursorPagesUnderItsOwnSort(self):
+        for params in ("sort_by=family_name", "sort_by=family_name&is_ascending=false", "sort_by=family_id"):
+            with self.subTest(params=params):
+                status, payload = self._search_with(self._issued_cursor(params), params)
+                self.assertEqual(falcon.HTTP_200, status)
+                # the storage holds the unknown family 0 next to the named ones; the issued page took two
+                self.assertEqual(len(FAMILY_NAMES) + 1 - 2, len(payload["data"]["search_results"]))
+
+    def testCursorReplayedUnderAnotherSortIsAnsweredAsBadInput(self):
+        cursor = self._issued_cursor("sort_by=family_name")
+        for params in ("sort_by=family_id", "sort_by=family_name&is_ascending=false", "sort_by=num_samples"):
+            with self.subTest(params=params):
+                status, payload = self._search_with(cursor, params)
+                self.assertEqual(falcon.HTTP_400, status)
+                self.assertEqual("failed", payload["status"])
+
+    def testLegacyCursorStillPages(self):
+        # [values, direction] without a sort, as an older server issued them
+        status, payload = self._search([["fam2", -1], 1], "sort_by=family_name&is_ascending=false")
+        self.assertEqual(falcon.HTTP_200, status)
+        status, payload = self._search([["fam2", -1], 1])
+        self.assertEqual(falcon.HTTP_200, status)
+        self.assertEqual(["fam2", "fam3", "fam4"], [entry["family_name"] for entry in payload["data"]["search_results"].values()])
+
+    def testMalformedSortOfCursorIsAnsweredAsBadInput(self):
+        for sort_spec in ("family_name", [], [1, 2], [["family_name"]], {"$ne": 1}, ["family name", "family_id"], ["$where", "family_id"], ["family_name"] * 9, ["a" * 80]):
+            with self.subTest(sort_spec=sort_spec):
+                status, _ = self._search([["fam2", -1], 1, sort_spec])
+                self.assertEqual(falcon.HTTP_400, status)
+        status, _ = self._search([["fam2", -1], 1, ["family_name", "family_id"], "extra"])
+        self.assertEqual(falcon.HTTP_400, status)
+
     def testCursorOfAnotherSortOrderIsAnsweredAsBadInput(self):
         status, _ = self._search([["fam2"], 1])
         self.assertEqual(falcon.HTTP_400, status)
@@ -123,6 +222,107 @@ class MongoSearchCursorTestSuite(MemorySearchCursorTestSuite):
     def tearDownClass(cls):
         server, port = getTestMongoServerAndPort()
         pymongo.MongoClient(server, int(port)).drop_database(cls.mongo_db_name)
+
+    def setUp(self):
+        super().setUp()
+        with open(EXAMPLE_REPORT) as fjson:
+            report = SmdaReport.fromDict(json.load(fjson))
+        assert report is not None
+        self.index.getStorage().addSmdaReport(report)
+
+    ROUTES = {
+        "families": ("on_get_search_families", "query=fam"),
+        "samples": ("on_get_search_samples", "query=a"),
+        # a substring term on the function name also runs the scan of the distinct names
+        "functions": ("on_get_search_functions", "query=sub"),
+    }
+
+    def _route(self, route):
+        method, params = self.ROUTES[route]
+        request = falcon.Request(falcon.testing.create_environ(path="/search/" + route, query_string=params))
+        response = falcon.Response()
+        getattr(StatusResource(self.index), method)(request, response)
+        assert response.data is not None
+        return response.status, json.loads(response.data)
+
+    def _calls_of_search(self, route, storage_config=None):
+        storage = self.index.getStorage()
+        calls = {"find": [], "aggregate": []}
+        real = {name: getattr(pymongo.collection.Collection, name) for name in calls}
+
+        def spy_on(name):
+            def spy(collection, *args, **kwargs):
+                calls[name].append(kwargs)
+                return real[name](collection, *args, **kwargs)
+
+            return spy
+
+        saved = storage._storage_config
+        if storage_config is not None:
+            storage._storage_config = storage_config
+        try:
+            with mock.patch.object(pymongo.collection.Collection, "find", spy_on("find")), mock.patch.object(pymongo.collection.Collection, "aggregate", spy_on("aggregate")):
+                status, _ = self._route(route)
+        finally:
+            storage._storage_config = saved
+        self.assertEqual(falcon.HTTP_200, status)
+        return calls
+
+    def testSearchQueriesCarryTheTimeLimit(self):
+        for route in self.ROUTES:
+            with self.subTest(route=route):
+                calls = self._calls_of_search(route)
+                self.assertEqual([30000], [kwargs["max_time_ms"] for kwargs in calls["find"]])
+                if route == "functions":
+                    self.assertEqual([30000], [kwargs["maxTimeMS"] for kwargs in calls["aggregate"]])
+                limited = StorageConfig(STORAGE_METHOD=StorageFactory.STORAGE_METHOD_MONGODB)
+                limited.STORAGE_MONGODB_SEARCH_MAX_TIME_MS = 1234
+                self.index.getStorage()._over_cap_since.clear()
+                calls = self._calls_of_search(route, limited)
+                self.assertEqual([1234], [kwargs["max_time_ms"] for kwargs in calls["find"]])
+                if route == "functions":
+                    self.assertEqual([1234], [kwargs["maxTimeMS"] for kwargs in calls["aggregate"]])
+                limited.STORAGE_MONGODB_SEARCH_MAX_TIME_MS = 0
+                self.index.getStorage()._over_cap_since.clear()
+                calls = self._calls_of_search(route, limited)
+                self.assertEqual([None], [kwargs["max_time_ms"] for kwargs in calls["find"]])
+                if route == "functions":
+                    self.assertEqual([0], [kwargs["maxTimeMS"] for kwargs in calls["aggregate"]])
+
+    def testConfigWithoutTheSettingGetsTheDefault(self):
+        # docker-mcrit replaces the config modules with older copies that do not name the setting
+        storage = object.__new__(MongoDbStorage)
+        setattr(storage, "_storage_config", types.SimpleNamespace())
+        self.assertEqual(30000, storage._getSearchMaxTimeMS())
+
+    def testSearchThatRunsOutOfTimeIsAnsweredAsBadInput(self):
+        def time_out(*args, **kwargs):
+            raise pymongo.errors.ExecutionTimeout("operation exceeded time limit")
+
+        for route in self.ROUTES:
+            with self.subTest(route=route):
+                with mock.patch.object(pymongo.collection.Collection, "find", time_out):
+                    status, payload = self._route(route)
+                self.assertEqual(falcon.HTTP_400, status)
+                self.assertEqual("failed", payload["status"])
+                self.assertIn("took too long", payload["data"]["message"])
+
+    def testDistinctNameScanThatRunsOutOfTimeFallsBackAndIsNotRepeated(self):
+        real_aggregate = pymongo.collection.Collection.aggregate
+        attempts = []
+
+        def time_out_on_scan(collection, pipeline, *args, **kwargs):
+            if any("$group" in stage for stage in pipeline):
+                attempts.append(1)
+                raise pymongo.errors.ExecutionTimeout("operation exceeded time limit")
+            return real_aggregate(collection, pipeline, *args, **kwargs)
+
+        self.index.getStorage()._over_cap_since.clear()
+        with mock.patch.object(pymongo.collection.Collection, "aggregate", time_out_on_scan):
+            for _ in range(3):
+                status, _ = self._route("functions")
+                self.assertEqual(falcon.HTTP_200, status)
+        self.assertEqual(1, len(attempts))
 
 
 if __name__ == "__main__":
