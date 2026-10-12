@@ -72,6 +72,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 - A worker that exceeds `--worker-timeout` is now killed. It was only reported, and kept running
   after the parent had moved on, so a run over many slow files accumulated orphaned processes.
+  Each worker also gets its own temporary directory, which the submitting process removes when the
+  worker ends, also when it was killed at the timeout or crashed in IDA, so the worker's copy of
+  the sample and its IDA database don't pile up in the system temp directory. If the submitting
+  process itself dies (SIGKILL, or IDA crashing it outside worker mode), the next
+  `--disassembler ida` submit removes what it left and says so, on Linux and macOS; on Windows such
+  leftovers have to be removed by hand. SIGTERM and SIGHUP end a submit the way Ctrl-C does, so it
+  cleans up too, but a SIGHUP that `nohup` ignores stays ignored.
 
 ## [1.12.0] - 2026-09-25
 

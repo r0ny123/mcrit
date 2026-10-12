@@ -5,14 +5,17 @@ import json
 import logging
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 
 from dotenv import load_dotenv
 from smda.common.SmdaReport import SmdaReport
 from smda.Disassembler import Disassembler
 
-from mcrit.client.IdaReportProducer import IDA_MISSING_MESSAGE, produceIdaReport
+from mcrit.client.IdaReportProducer import IDA_MISSING_MESSAGE, produceIdaReport, removeAbandonedWorkingDirectories, workingDirectoryPrefix
 from mcrit.client.McritClient import McritClient
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
@@ -229,7 +232,14 @@ def submitViaSubprocess(args, filepath):
     if args.ida_sig_min_matches is not None:
         command.extend(["--ida-sig-min-matches", str(args.ida_sig_min_matches)])
     command.append(filepath)
-    console_handle = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # the child's temporary files - for IDA the working copy of the sample and its database - go to a
+    # directory removed below: a child killed at the timeout or crashing natively cannot clean up itself
+    child_temp_dir = tempfile.mkdtemp(prefix=workingDirectoryPrefix("submit"))
+    try:
+        console_handle = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, TMPDIR=child_temp_dir))
+    except BaseException:
+        shutil.rmtree(child_temp_dir, ignore_errors=True)
+        raise
     try:
         stdout_result, stderr_result = console_handle.communicate(timeout=args.worker_timeout)
         stdout_result = stdout_result.strip().decode("utf-8")
@@ -243,6 +253,26 @@ def submitViaSubprocess(args, filepath):
         console_handle.kill()
         console_handle.communicate()
         print(f"Processing {str(filepath)} with a spawned worker timed out during processing.")
+    finally:
+        # also when left through Ctrl-C or a termination signal: the child must not outlive this process
+        if console_handle.poll() is None:
+            console_handle.kill()
+            console_handle.wait()
+        shutil.rmtree(child_temp_dir, ignore_errors=True)
+
+
+def _exitOnTerminationSignal(signum, frame):
+    sys.exit(128 + signum)
+
+
+def installTerminationHandlers() -> None:
+    """End the CLI on SIGTERM and SIGHUP as Ctrl-C does, through the finally blocks that stop a submit's
+    child and remove its temporary files. A signal that is ignored stays ignored: that is how nohup keeps
+    a run alive past the end of its session."""
+    for signal_name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, signal_name, None)
+        if signum is not None and signal.getsignal(signum) is not signal.SIG_IGN:
+            signal.signal(signum, _exitOnTerminationSignal)
 
 
 ### Main Processing
@@ -316,6 +346,7 @@ class McritConsole:
         client_queue.add_argument("--filter", type=str, help="Filter queue entries with this term.")
 
     def run(self):
+        installTerminationHandlers()
         ARGS = self.parser.parse_args()
         # try to load .env file first
         THIS_FILE_PATH = str(os.path.abspath(__file__))
@@ -504,6 +535,9 @@ class McritConsole:
             ida_logger = logging.getLogger("mcrit.client.IdaReportProducer")
             ida_logger.setLevel(logging.INFO)
             ida_logger.addHandler(logging.StreamHandler(sys.stdout))
+            # the sample copies and databases of runs killed or crashed during an analysis
+            for abandoned in removeAbandonedWorkingDirectories():
+                print(f"NOTE: Removed the temporary directory {abandoned} of an IDA analysis that ended abnormally.")
         if args.disassembler == "ida" and args.mode in ["dir", "recursive", "malpedia"] and not args.worker:
             # idalib holds a single database per process, and one malformed sample must not end the batch
             args.worker = True

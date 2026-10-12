@@ -5,7 +5,9 @@ import hashlib
 import importlib
 import logging
 import os
+import re
 import shutil
+import socket
 import tempfile
 from typing import Any, List, Optional, Tuple
 
@@ -184,13 +186,54 @@ def _applyCandidateSigs(interface: Any, sig_root: str, min_matches: int) -> None
     applySigs(sig_paths, min_matches)
 
 
+def workingDirectoryPrefix(kind: str) -> str:
+    """Prefix of a temporary directory holding a copy of a sample, naming the process it belongs to."""
+    return f"mcrit-{kind}-{socket.gethostname()}-{os.getpid()}-"
+
+
+def removeAbandonedWorkingDirectories(temp_root: Optional[str] = None) -> List[str]:
+    """Remove the working directories (workingDirectoryPrefix) of this host's processes that no longer run.
+
+    A process killed during an analysis (SIGKILL at --worker-timeout, the whole run killed) or crashing
+    inside IDA cannot remove its copy of the sample and the database. Answers the names removed."""
+    if os.name != "posix":
+        # os.kill(pid, 0) only probes on POSIX; on Windows it would terminate the process
+        return []
+    temp_root = temp_root or tempfile.gettempdir()
+    # the pid is the last number before tempfile's suffix, which holds no dash: a host whose name
+    # continues this one's with "-<digits>" must not have its digits taken for a pid of ours
+    owner_pattern = re.compile(rf"^mcrit-(?:ida|submit)-{re.escape(socket.gethostname())}-(\d+)-[^-]*$")
+    removed: List[str] = []
+    try:
+        entries = os.listdir(temp_root)
+    except OSError:
+        return removed
+    for entry in entries:
+        match = owner_pattern.match(entry)
+        if not match:
+            continue
+        try:
+            os.kill(int(match.group(1)), 0)
+            continue
+        except ProcessLookupError:
+            pass
+        except OSError:
+            # running, under another user
+            continue
+        path = os.path.join(temp_root, entry)
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.lexists(path):
+            removed.append(entry)
+    return removed
+
+
 def produceIdaReport(filepath: str, sig_root: Optional[str] = None, min_matches: int = 10) -> SmdaReport:
     """Disassemble a file through a headless IDA database and return it as an SmdaReport."""
     from smda.Disassembler import Disassembler
     from smda.ida.IdaInterface import IdaInterface
     from smda.SmdaConfig import SmdaConfig
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(prefix=workingDirectoryPrefix("ida")) as temp_dir:
         # IDA writes its database files next to the input, so it must never see the original sample
         working_copy = os.path.join(temp_dir, os.path.basename(filepath))
         shutil.copyfile(filepath, working_copy)

@@ -3,6 +3,8 @@
 import hashlib
 import logging
 import os
+import socket
+import subprocess
 import sys
 import tempfile
 import types
@@ -11,7 +13,7 @@ from unittest import mock
 
 from packaging import version
 
-from mcrit.client.IdaReportProducer import applySigs, produceIdaReport, selectCandidateSigs
+from mcrit.client.IdaReportProducer import applySigs, produceIdaReport, removeAbandonedWorkingDirectories, selectCandidateSigs, workingDirectoryPrefix
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(message)s")
@@ -249,6 +251,8 @@ class ProduceIdaReportTest(unittest.TestCase):
         self.assertTrue(self.interface.closed)
         self.assertIsNone(self.ida_interface_class.instance)
         self.assertFalse(os.path.exists(self.working_dirs[0]))
+        # named after this process, so that a later run can remove it if this one is killed during the analysis
+        self.assertTrue(os.path.basename(self.working_dirs[0]).startswith(workingDirectoryPrefix("ida")))
 
     def testCleanupOnDisassemblyFailure(self):
         class FailingDisassembler:
@@ -274,3 +278,40 @@ class ProduceIdaReportTest(unittest.TestCase):
         self.assertIn("mcrit[ida]", str(context.exception))
         self.assertIn("IDADIR", str(context.exception))
         self.assertIsNone(self.ida_interface_class.instance)
+
+
+class AbandonedWorkingDirectoriesTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "probing a process id is POSIX only")
+    def testOnlyTheDirectoriesOfEndedProcessesOnThisHostAreRemoved(self):
+        # a process killed during the analysis, or crashing inside IDA, leaves its sample copy and database behind
+        ended = subprocess.Popen([sys.executable, "-c", "pass"])
+        ended.wait()
+        host = socket.gethostname()
+        names = {
+            "ended_ida": f"mcrit-ida-{host}-{ended.pid}-abc",
+            "ended_submit": f"mcrit-submit-{host}-{ended.pid}-def",
+            "running": f"mcrit-ida-{host}-{os.getpid()}-ghi",
+            "other_host": f"mcrit-ida-other{host}-{ended.pid}-jkl",
+            # a host named "<this host>-<digits>" sharing the temp directory: its first number is not a pid of ours
+            "longer_host": f"mcrit-ida-{host}-{ended.pid}-{ended.pid}-pqr",
+            "unrelated": "tmpmno",
+        }
+        with tempfile.TemporaryDirectory() as temp_root:
+            for name in names.values():
+                os.makedirs(os.path.join(temp_root, name, "tmpchild"))
+                with open(os.path.join(temp_root, name, "tmpchild", "sample.exe.i64"), "wb") as database:
+                    database.write(b"IDA database")
+            removed = removeAbandonedWorkingDirectories(temp_root)
+            self.assertEqual(sorted([names["ended_ida"], names["ended_submit"]]), sorted(removed))
+            self.assertEqual(sorted([names["running"], names["other_host"], names["longer_host"], names["unrelated"]]), sorted(os.listdir(temp_root)))
+
+    def testAnotherUsersLiveRunIsKept(self):
+        # os.kill(pid, 0) refuses a process of another user that is alive: its sample copy and database stay
+        ended = subprocess.Popen([sys.executable, "-c", "pass"])
+        ended.wait()
+        name = f"mcrit-ida-{socket.gethostname()}-{ended.pid}-abc"
+        with tempfile.TemporaryDirectory() as temp_root:
+            os.makedirs(os.path.join(temp_root, name))
+            with mock.patch("mcrit.client.IdaReportProducer.os.kill", side_effect=PermissionError):
+                self.assertEqual([], removeAbandonedWorkingDirectories(temp_root))
+            self.assertEqual([name], os.listdir(temp_root))

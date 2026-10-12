@@ -4,13 +4,22 @@ import contextlib
 import io
 import logging
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from mcrit.client.McritConsole import McritConsole, get_primary_smda_meta_data, getSmdaReportFromFilepath, is_smda_report, submitViaSubprocess
+from mcrit.client.McritConsole import (
+    McritConsole,
+    _exitOnTerminationSignal,
+    get_primary_smda_meta_data,
+    getSmdaReportFromFilepath,
+    installTerminationHandlers,
+    is_smda_report,
+    submitViaSubprocess,
+)
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(message)s")
@@ -85,9 +94,30 @@ class TestCLI(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             console, args = self._submitArgs(["--disassembler", "ida", tmp_dir, "--mode", "dir"])
             self.assertFalse(args.worker)
-            with patch("mcrit.client.McritConsole.is_ida_available", return_value=True), contextlib.redirect_stdout(io.StringIO()):
+            with (
+                patch("mcrit.client.McritConsole.is_ida_available", return_value=True),
+                patch("mcrit.client.McritConsole.removeAbandonedWorkingDirectories", return_value=["mcrit-ida-host-1-abc"]) as cleanup,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
                 console._handle_submit(args)
             self.assertTrue(args.worker)
+            # an IDA submit first removes what killed or crashed runs left behind, and says so
+            cleanup.assert_called_once_with()
+            self.assertIn("mcrit-ida-host-1-abc", output.getvalue())
+
+    @unittest.skipUnless(hasattr(signal, "SIGHUP"), "POSIX signals")
+    def testTerminationHandlersLeaveAnIgnoredSignalIgnored(self):
+        # nohup works by leaving SIGHUP ignored; taking it over would end the run with the session
+        saved = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGHUP)}
+        try:
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            installTerminationHandlers()
+            self.assertIs(signal.SIG_IGN, signal.getsignal(signal.SIGHUP))
+            self.assertIs(_exitOnTerminationSignal, signal.getsignal(signal.SIGTERM))
+        finally:
+            for signum, handler in saved.items():
+                signal.signal(signum, handler)
 
     def testSubprocessCommandForwardsIdaOptions(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -102,6 +132,44 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(command[command.index("--ida-sigs") + 1], tmp_dir)
             self.assertEqual(command[command.index("--ida-sig-min-matches") + 1], "25")
             self.assertEqual(command[-1], "/some/sample")
+
+    def testSubprocessTemporaryFilesAreRemovedAfterTheChild(self):
+        # a child killed at the timeout (or crashing) cannot remove IDA's working copy and database itself
+        _, args = self._submitArgs(["/some/dir", "--mode", "dir"])
+        with tempfile.TemporaryDirectory() as parent_tmp, patch("tempfile.tempdir", parent_tmp):
+            for communicated in ([subprocess.TimeoutExpired("mcrit", 1), (b"", b"")], [(b"", b"")]):
+                child_tmps = []
+                handle = MagicMock()
+                handle.communicate.side_effect = communicated
+
+                def spawn(command, **kwargs):
+                    child_tmps.append(kwargs["env"]["TMPDIR"])
+                    # what the child's own temporary directory holds when it dies
+                    os.makedirs(os.path.join(child_tmps[-1], "tmpchild"))
+                    with open(os.path.join(child_tmps[-1], "tmpchild", "sample.exe.i64"), "wb") as database:
+                        database.write(b"IDA database")
+                    return handle
+
+                with patch("mcrit.client.McritConsole.subprocess.Popen", side_effect=spawn), contextlib.redirect_stdout(io.StringIO()):
+                    submitViaSubprocess(args, "/some/sample")
+                self.assertEqual(1, len(child_tmps))
+                self.assertEqual(parent_tmp, os.path.dirname(child_tmps[0]))
+                self.assertEqual([], os.listdir(parent_tmp))
+
+    def testSubprocessIsStoppedWhenTheParentIsInterrupted(self):
+        # Ctrl-C, or a termination signal turned into SystemExit, while the child runs: the child is killed and its
+        # temporary directory removed before the exception goes on
+        _, args = self._submitArgs(["/some/dir", "--mode", "dir"])
+        with tempfile.TemporaryDirectory() as parent_tmp, patch("tempfile.tempdir", parent_tmp):
+            for interruption in (KeyboardInterrupt(), SystemExit(143)):
+                with patch("mcrit.client.McritConsole.subprocess.Popen") as mock_popen:
+                    mock_popen.return_value.communicate.side_effect = interruption
+                    mock_popen.return_value.poll.return_value = None
+                    with self.assertRaises(type(interruption)), contextlib.redirect_stdout(io.StringIO()):
+                        submitViaSubprocess(args, "/some/sample")
+                mock_popen.return_value.kill.assert_called_once()
+                mock_popen.return_value.wait.assert_called_once()
+                self.assertEqual([], os.listdir(parent_tmp))
 
     def testSubprocessCommandParsesWithServerAndToken(self):
         console = McritConsole()
