@@ -1,5 +1,6 @@
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
+import smda.common.SmdaFunction as smda_function_module
 from smda.common.BinaryInfo import BinaryInfo
 from smda.common.SmdaFunction import SmdaFunction
 
@@ -8,9 +9,75 @@ from mcrit.minhash.MinHash import MinHash
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 
 if TYPE_CHECKING:  # pragma: no cover
-    from smda.common.SmdaFunction import SmdaFunction
+    from smda.common.SmdaReport import SmdaReport
 
     from mcrit.storage.SampleEntry import SampleEntry
+
+# smda publishes the fields SmdaFunction.fromDict requires since 4.4.5; releases before that read the
+# same keys without checking for them first, so the sets below stand in for them there
+REQUIRED_FUNCTION_FIELDS = getattr(smda_function_module, "REQUIRED_FUNCTION_FIELDS", frozenset({"offset", "blocks", "apirefs", "blockrefs", "inrefs", "outrefs", "metadata"}))
+REQUIRED_FUNCTION_METADATA = getattr(
+    smda_function_module,
+    "REQUIRED_FUNCTION_METADATA",
+    frozenset({"binweight", "characteristics", "confidence", "function_name", "strongly_connected_components", "tfidf"}),
+)
+
+
+def missingXcfgFields(xcfg: Dict) -> List[str]:
+    """The fields SmdaFunction.fromDict requires that a stored xcfg lacks, metadata ones as ``metadata.<name>``.
+
+    smda has required the same fields since 4.4.5 (and indexed the same ones directly before
+    that), and SmdaFunction.toDict has written every one of them since smda 1.2, so an xcfg any
+    smda stored is complete - the smda 1.5.12 reports under tests/ included. A non-empty answer
+    means the blob did not come from smda's toDict.
+    """
+    missing = sorted(REQUIRED_FUNCTION_FIELDS.difference(xcfg))
+    metadata = xcfg.get("metadata")
+    if isinstance(metadata, dict):
+        missing.extend(f"metadata.{field}" for field in sorted(REQUIRED_FUNCTION_METADATA.difference(metadata)))
+    return missing
+
+
+def smdaFunctionFromXcfg(xcfg: Optional[Dict], binary_info: Optional[BinaryInfo] = None) -> Optional[SmdaFunction]:
+    """Rebuild the SmdaFunction a stored xcfg describes; None when the function has no stored disassembly.
+
+    Every path that rebuilds functions from storage goes through here. A function can be stored
+    without its disassembly: STORAGE_DROP_DISASSEMBLY removes it once the sample is hashed, a
+    blob over MongoDB's 16 MiB document limit is dropped at insert (#42), and the readers decode
+    a missing blob to ``{}``. smda cannot rebuild a function from ``{}`` - it raises "serialized
+    function is incomplete" - so the callers skip such a function instead of failing the whole
+    batch it came in. An xcfg that is present but lacks a field smda requires still raises, and
+    names the fields, because that is not a state MCRIT writes.
+    """
+    if not xcfg:
+        return None
+    missing = missingXcfgFields(xcfg)
+    if missing:
+        raise ValueError(f"stored disassembly of the function at offset {xcfg.get('offset')} lacks {', '.join(missing)}, which SmdaFunction.fromDict requires")
+    return SmdaFunction.fromDict(xcfg, binary_info=binary_info)
+
+
+def isValidPicHash(value) -> bool:
+    """Whether a value can be stored as a pichash or picblockhash: an int of 0..2**64-1.
+
+    That is what smda and picblocks compute, and all MongoDbStorage reads back (#145): it wrote a
+    negative value as "0x-000000000000005", which no reader decodes, one of 2**64 or more wider
+    than the 16 digits its ordering relies on, and an operator dict as a sub-document. A bool is
+    an int, but no pichash.
+    """
+    return type(value) is int and 0 <= value < 1 << 64
+
+
+def checkSubmittedPicHashes(smda_report: "SmdaReport") -> None:
+    """Refuse a report stating a pic_hash that cannot be stored, before any of it is written.
+
+    smda keeps the pic_hash a current report states and recomputes it only for older ones, so it
+    is whatever was submitted. A function without one is stored with 0, as FunctionEntry does.
+    """
+    for smda_function in smda_report.getFunctions():
+        if not isValidPicHash(smda_function.pic_hash or 0):
+            raise ValueError(f"the function at offset {smda_function.offset} states a pic_hash that is not an integer of 0..2**64-1")
+
 
 # Dataclass, post init
 # constructor -> .fromSmdaFunction
@@ -68,10 +135,16 @@ class FunctionEntry:
     def getMinHash(self, minhash_bits=32):
         return MinHash(function_id=self.function_id, minhash_bytes=self.minhash, minhash_bits=minhash_bits)
 
-    def toSmdaFunction(self):
+    def hasValidPicHashes(self) -> bool:
+        """Whether the pichash and every picblockhash can be stored, see isValidPicHash; for an imported entry."""
+        blocks = self.picblockhashes
+        return isValidPicHash(self.pichash) and isinstance(blocks, list) and all(isinstance(block, dict) and isValidPicHash(block.get("hash")) for block in blocks)
+
+    def toSmdaFunction(self) -> Optional[SmdaFunction]:
+        """The SmdaFunction this entry's disassembly describes; None when it carries none."""
         binary_info = BinaryInfo(b"")
         binary_info.architecture = self.architecture
-        return SmdaFunction.fromDict(self.xcfg, binary_info=binary_info)
+        return smdaFunctionFromXcfg(self.xcfg, binary_info)
 
     def toDict(self):
         empty_minhash = MinHash()
