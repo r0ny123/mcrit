@@ -207,6 +207,19 @@ class SmdaReportRouteAndClient(unittest.TestCase):
             self.assertIsNone(client.getSmdaReportForSample(1))
         self.assertEqual(McritClient.SMDA_REBUILD_ATTEMPTS, fake_requests.get.call_count)
 
+    def test_the_client_waits_a_sane_delay_whatever_retry_after_says(self):
+        # time.sleep raises on a negative or nan delay; an HTTP date isn't a number of seconds
+        done = MagicMock(status_code=200, headers={})
+        done.json.return_value = {"status": "successful", "data": json.loads(json.dumps(self._rebuilt().toDict()))}
+        client = McritClient("http://mcrit.test")
+        for retry_after, delay in (("nan", 5), ("-1", 5), ("inf", 30), ("120", 30), ("Wed, 21 Oct 2026 07:28:00 GMT", 5), ("0", 0)):
+            with self.subTest(retry_after=retry_after):
+                busy = MagicMock(status_code=503, headers={"Retry-After": retry_after})
+                with patch("mcrit.client.McritClient.requests") as fake_requests, patch("mcrit.client.McritClient.time") as fake_time:
+                    fake_requests.get.side_effect = [busy, done]
+                    self.assertIsNotNone(client.getSmdaReportForSample(1))
+                fake_time.sleep.assert_called_once_with(delay)
+
 
 if __name__ == "__main__":
     unittest.main()

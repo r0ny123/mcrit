@@ -537,9 +537,13 @@ class McritClient:
             if response.status_code != 503 or attempt == self.SMDA_REBUILD_ATTEMPTS - 1:
                 break
             try:
-                delay = min(float(response.headers.get("Retry-After", 5)), 30)
+                delay = float(response.headers.get("Retry-After", 5))
             except ValueError:
                 delay = 5
+            # time.sleep refuses a negative or nan delay, which a misbehaving proxy could send
+            if not delay >= 0:
+                delay = 5
+            delay = min(delay, 30)
             LOGGER.warning("MCRIT is rebuilding another SMDA report, retrying sample %s in %s s.", sample_id, delay)
             time.sleep(delay)
         if self.raw:

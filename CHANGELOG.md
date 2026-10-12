@@ -87,7 +87,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   and `STORAGE_DROP_DISASSEMBLY` keeps them ([#94]). Rebuilding a large sample's report takes
   seconds and hundreds of MiB in the request thread, so a server process runs one rebuild at a
   time; a request that arrives during one answers 503 with `Retry-After` instead of tying up
-  another thread. `getSmdaReportForSample` waits that long and asks again, three requests in all.
+  another thread. `getSmdaReportForSample` waits that long (at most 30 s, and 5 s for a value that
+  isn't a usable number of seconds) and asks again, three requests in all.
 
 ### Changed
 
