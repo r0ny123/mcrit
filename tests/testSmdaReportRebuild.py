@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -192,14 +193,24 @@ class SmdaReportRouteAndClient(unittest.TestCase):
         done = MagicMock(status_code=200, headers={})
         done.json.return_value = {"status": "successful", "data": json.loads(json.dumps(sent.toDict()))}
         client = McritClient("http://mcrit.test")
-        with patch("mcrit.client.McritClient.requests.get", side_effect=[busy, done]) as get, patch("mcrit.client.McritClient.time.sleep") as sleep:
+        # patching time.sleep patches it for every thread, so only this thread's sleeps are recorded
+        # and skipped; threads left running by other tests keep sleeping for real
+        test_thread, real_sleep, delays = threading.get_ident(), time.sleep, []
+
+        def sleep(delay):
+            if threading.get_ident() == test_thread:
+                delays.append(delay)
+            else:
+                real_sleep(delay)
+
+        with patch("mcrit.client.McritClient.requests.get", side_effect=[busy, done]) as get, patch("mcrit.client.McritClient.time.sleep", side_effect=sleep):
             received = client.getSmdaReportForSample(1)
         assert received is not None
         self.assertEqual(sent.smda_report.sha256, received.smda_report.sha256)
         self.assertEqual(2, get.call_count)
-        sleep.assert_called_once_with(5.0)
+        self.assertEqual([5.0], delays)
         # a server that stays busy is asked SMDA_REBUILD_ATTEMPTS times, then answered like any other failure
-        with patch("mcrit.client.McritClient.requests.get", return_value=busy) as get, patch("mcrit.client.McritClient.time.sleep"):
+        with patch("mcrit.client.McritClient.requests.get", return_value=busy) as get, patch("mcrit.client.McritClient.time.sleep", side_effect=sleep):
             self.assertIsNone(client.getSmdaReportForSample(1))
         self.assertEqual(McritClient.SMDA_REBUILD_ATTEMPTS, get.call_count)
 
