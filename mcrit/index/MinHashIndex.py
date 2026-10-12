@@ -2,7 +2,7 @@
 import json
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional
 
 from smda.common.SmdaReport import SmdaReport
@@ -102,7 +102,8 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             return
         last_timestamp = self._getLastCleanup()
         if last_timestamp:
-            now = datetime.now()
+            # the storage stamps the last cleanup in UTC
+            now = datetime.now(UTC).replace(tzinfo=None)
             if last_timestamp + self._cleanup_delta < now:
                 LOGGER.info("Scheduling a cleanup for query samples.")
                 self.doDbCleanup(force_recalculation=True)

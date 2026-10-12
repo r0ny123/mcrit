@@ -33,6 +33,11 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   the timestamp without its time zone too. Past that, it still couldn't delete a stale query sample
   on the memory backend, which looked for the sample's functions among the regular ones and raised
   a KeyError; it now deletes the query sample and its functions.
+- **The query cleanup job aged query samples by the server's local time**, while smda stamps them
+  in UTC. On a server east of UTC a query sample was deleted early by the offset, and west of UTC
+  it was kept that much longer. Query samples are now compared with a cutoff in UTC; query jobs,
+  which the queue stamps in local time, keep a local one. The schedule that starts the cleanup had
+  the same offset, since the storage records the last cleanup in UTC, and now reads it as UTC too.
 - **`sort_by=function_id` on sample search is refused with a 400.** Samples have no function id:
   MongoDB sorted every sample as null, and the memory backend answered 500 from the second page on.
 
