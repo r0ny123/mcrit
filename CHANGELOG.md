@@ -99,7 +99,9 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   answers 400, a query job fails, and `POST /import` skips the sample and counts it as skipped.
   Padding -5 would have stored `"0x-000000000000005"`, which nothing reads back. Older releases
   stored such values unchecked (-5 as `"-0x5"`); `pad` and `unpad` leave them alone, and `verify`
-  reports them as a problem until their sample is deleted.
+  reports them as a problem until their sample is deleted. A pichash-sorted search pages through
+  a new (`_pichash`, `function_id`) index like the other sort fields, instead of sorting the whole
+  `functions` collection for every page; the first start after upgrading builds it once.
 
 ### Fixed
 

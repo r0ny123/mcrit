@@ -402,7 +402,8 @@ class MongoDbStorage(StorageInterface):
             self._getDb()["families"].create_index([(field, 1), ("family_id", 1)])
         for field in ("family_id", "family", "filename", "version", "bitness", "sha256", "statistics.num_functions"):
             self._getDb()["samples"].create_index([(field, 1), ("sample_id", 1)])
-        for field in ("family_id", "sample_id", "function_name", "offset", "num_instructions", "num_blocks"):
+        # The pichash sort (allowed once the instance stores pichashes zero-padded, #145) sorts on the stored "_pichash".
+        for field in ("family_id", "sample_id", "function_name", "offset", "num_instructions", "num_blocks", "_pichash"):
             self._getDb()["functions"].create_index([(field, 1), ("function_id", 1)])
         # stored without guarantee of existence
         self._getDb()["query_samples"].create_index("sample_id")
