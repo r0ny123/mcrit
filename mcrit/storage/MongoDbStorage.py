@@ -841,8 +841,10 @@ class MongoDbStorage(StorageInterface):
         # taken out at most once per sample: the queue runs a failed delete job again and two
         # deletes of one sample can overlap, and a second decrement would leave other samples'
         # hashes undercounted or without a count document, which drops their exact matches
-        # under MINHASH_PICHASH_MAX_MATCHES. A delete that dies after claiming leaves them
-        # overcounted instead, as before this fix, until rebuildPicHashCountIndex runs.
+        # under MINHASH_PICHASH_MAX_MATCHES. A delete that dies after the claim but before the
+        # decrement leaves the counts too high, as before this fix, until rebuildPicHashCountIndex
+        # runs. One that dies after the decrement leaves them too low, since the sample's functions
+        # are still stored but no longer counted, until a retry completes the delete.
         claim = self._getDb().samples.update_one({"sample_id": sample_id, "pichash_counts_removed": {"$ne": True}}, {"$set": {"pichash_counts_removed": True}})
         if claim.modified_count:
             self._removeSampleFromPicHashCounts(sample_id)
