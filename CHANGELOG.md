@@ -15,6 +15,31 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-10-12
+
+**Minor release: a cheaper PicHash recalculation, client fixes, family actors, an optional binary
+store and a query cleanup that keeps working.** Nothing changes results. There are no repair jobs,
+and every new setting is off by default.
+
+- **The first start builds five new indexes**: three on `samples` for the recalculation stamps
+  (#250), and two for the `sample_binaries` GridFS bucket, which every instance creates whether or
+  not it keeps binaries (#178).
+- **The first `recalculatePicHashes` after upgrading is still about a full pass**, since no sample
+  carries the new stamp yet. Each run after that selects only what changed (see Fixed).
+- **Client callers:**
+  - `McritClient.awaitResult` now raises `JobFailedError` for a failed job. It used to return
+    `None` by default, after a request to `/results/None`.
+  - `modifyFamily` sends JSON, and in raw mode it answers the `Response`.
+  - The client now reuses one connection per instance (see Changed).
+- **New optional stored fields, no migration:**
+  - on samples: `pichash_smda_version` and `pichash_unrehashable_smda_version`
+  - on families: `actors`
+  - on query samples: `num_query_functions`
+- **New settings, all off by default:** `STORAGE_KEEP_SUBMITTED_BINARIES`,
+  `STORAGE_SERVE_SUBMITTED_BINARIES` and `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP`. A deployment that
+  ships its own config modules needs them added (docker-mcrit warns at startup about missing
+  settings).
+
 ### Added
 
 - `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP`, default `False`, runs MongoDB's `compact` on
