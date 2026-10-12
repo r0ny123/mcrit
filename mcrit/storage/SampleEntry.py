@@ -51,10 +51,14 @@ class SampleEntry:
     # the report fields SampleEntry represents in fields of its own, or that are the functions
     _REPORT_FIELDS_HELD_ELSEWHERE = ("architecture", "base_addr", "binary_size", "bitness", "metadata", "sha256", "smda_version", "statistics", "timestamp", "xcfg")
     _METADATA_FIELDS_HELD_ELSEWHERE = ("binweight", "component", "family", "filename", "is_library", "version")
+    # smda's `buffer` is the analysed binary itself (a report made with smda's STORE_BUFFER). It is
+    # never kept with the extras: the bytes a sample was submitted as are kept and handed out only
+    # under STORAGE_KEEP_/STORAGE_SERVE_SUBMITTED_BINARIES (#95), never by GET /samples/{id}/smda
+    _REPORT_FIELDS_NOT_KEPT = ("buffer",)
 
     @classmethod
     def smdaExtrasOf(cls, smda_report: "SmdaReport") -> Dict[str, Any]:
-        """Everything of the SMDA report this entry and the functions hold no field for (#94).
+        """The SMDA report's fields this entry and the functions hold no field for (#94), but its buffer.
 
         Never part of the entry itself: the whole-binary data references and xmetadata grow with
         the binary and have no cap, and the entry is the wire format of every sample listing, job
@@ -64,7 +68,8 @@ class SampleEntry:
         # as JSON would carry them: the data references are keyed by integer addresses, which
         # a report file cannot hold and MongoDB refuses; SmdaReport.fromDict reads the string
         # keys back, exactly as it does for a report loaded from disk
-        extras = json.loads(json.dumps({key: value for key, value in report_dict.items() if key not in cls._REPORT_FIELDS_HELD_ELSEWHERE}))
+        left_out = cls._REPORT_FIELDS_HELD_ELSEWHERE + cls._REPORT_FIELDS_NOT_KEPT
+        extras = json.loads(json.dumps({key: value for key, value in report_dict.items() if key not in left_out}))
         metadata = report_dict.get("metadata") or {}
         # an unset metadata value (None) is what SmdaReport emits for a field the report never
         # had; handing it back explicitly would make fromDict normalise it into a value
@@ -75,7 +80,8 @@ class SampleEntry:
         """The SMDA report this sample came from, as SmdaReport.fromDict() reads it, given the
         functions' xcfg by offset and the extras from smdaExtrasOf(). Without extras (a sample
         stored before they were kept) the defaults of an empty report fill in (#94)."""
-        extras = dict(smda_extras or {})
+        # extras stored before the buffer was left out may still carry one
+        extras = {key: value for key, value in (smda_extras or {}).items() if key not in self._REPORT_FIELDS_NOT_KEPT}
         metadata = dict(extras.pop("metadata", None) or {})
         metadata.update(
             {"binweight": self.binweight, "component": self.component, "family": self.family, "filename": self.filename, "is_library": self.is_library, "version": self.version}

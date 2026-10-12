@@ -46,6 +46,22 @@ class SampleEntryRebuildsTheReport(unittest.TestCase):
         assert rebuilt is not None
         self.assertEqual(report.toDict(), rebuilt.toDict())
 
+    def test_the_analysed_buffer_is_neither_kept_nor_rebuilt(self):
+        # a report made with smda's STORE_BUFFER carries the binary itself, which only
+        # STORAGE_KEEP_/STORAGE_SERVE_SUBMITTED_BINARIES may keep and hand out (#95)
+        report = self._report()
+        report.buffer = b"\x55\x8b\xec" + b"submitted sample bytes" * 64
+        packed = report.toDict()["buffer"]
+        extras = SampleEntry.smdaExtrasOf(report)
+        self.assertNotIn("buffer", extras)
+        # nor do extras stored before the buffer was left out hand one back
+        entry = SampleEntry(report, sample_id=1, family_id=1)
+        for stored in (extras, dict(extras, buffer=packed)):
+            rebuilt = SmdaReport.fromDict(entry.toSmdaReportDict({}, json.loads(json.dumps(stored))))
+            assert rebuilt is not None
+            self.assertIsNone(rebuilt.buffer)
+            self.assertNotIn("buffer", rebuilt.toDict())
+
     def test_without_extras_the_report_still_rebuilds(self):
         report = self._report()
         entry = SampleEntry(report, sample_id=1, family_id=1)
@@ -76,6 +92,20 @@ class TheExtrasStayOffTheWire(unittest.TestCase):
         assert resp.data is not None
         self.assertIn(str(sample_id), json.loads(resp.data)["data"])
         self.assertNotIn("xdata_refs_from", resp.data.decode() if isinstance(resp.data, bytes) else resp.data)
+
+    def test_a_submitted_buffer_is_not_served_by_the_smda_route(self):
+        report = SampleEntryRebuildsTheReport()._report()
+        report.buffer = b"\x55\x8b\xec" + b"submitted sample bytes" * 64
+        index = MinHashIndex(config=memory_config)
+        index.getStorage().clearStorage()
+        sample_id = index.addReport(report, calculate_hashes=False)["sample_info"]["sample_id"]
+        self.assertNotIn("buffer", index.getStorage().getSmdaExtras(sample_id) or {})
+        resp = falcon.Response()
+        SampleResource(index).on_get_smda_report(falcon.Request(falcon.testing.create_environ(path=f"/samples/{sample_id}/smda")), resp, sample_id)
+        assert resp.data is not None
+        data = json.loads(resp.data)["data"]
+        self.assertEqual(report.sha256, data["smda_report"]["sha256"])
+        self.assertNotIn("buffer", data["smda_report"])
 
 
 class SmdaReportRouteAndClient(unittest.TestCase):

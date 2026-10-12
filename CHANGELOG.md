@@ -74,7 +74,9 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   those extras grow with the binary. They are stored as a JSON blob split into documents of at
   most 8 MiB, so a report past the 16 MiB document limit still stores (a 25 MB test report takes
   4 documents, its sample document stays under 1 KB). The disassembly comes from the functions'
-  `xcfg` blobs in one batched fetch, and the example report round-trips byte for byte. The
+  `xcfg` blobs in one batched fetch, and the example report round-trips byte for byte. smda's
+  `buffer`, the analysed binary itself in a report made with `STORE_BUFFER`, is never kept, so this
+  route can't hand out a binary that `STORAGE_SERVE_SUBMITTED_BINARIES` keeps back. The
   response is `{"smda_report", "complete", "incomplete_reasons",
   "num_functions_without_disassembly"}`: `extras_missing` flags a sample stored before this (its
   extras fall back to an empty report's defaults), `disassembly_missing` counts functions without
