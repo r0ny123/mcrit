@@ -17,7 +17,7 @@ from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor
 from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.migrations import migrate_pichash_padding
-from mcrit.storage.MongoDbStorage import PICHASH_HEX_DIGITS, encode_pichash_value
+from mcrit.storage.MongoDbStorage import PICHASH_HEX_DIGITS, MongoDbStorage, encode_pichash_value
 from mcrit.storage.StorageFactory import StorageFactory
 
 from .context import getTestMongoServerAndPort
@@ -64,7 +64,7 @@ class PichashMigrationConnectionTest(TestCase):
     """
 
     def test_the_uri_is_built_as_mcrit_builds_it(self):
-        build = migrate_pichash_padding.build_mongo_uri
+        build = MongoDbStorage.buildMongoUri
         self.assertEqual("mongodb://h:27999/db", build("h", "27999", "db", None, None, ""))
         # credentials go in as configured: a password holding "@" has to be configured as "%40"
         # for MCRIT to connect at all, and quoting it again would send "%2540"
@@ -75,8 +75,6 @@ class PichashMigrationConnectionTest(TestCase):
 
     def test_mcrit_connects_with_the_same_uri(self):
         # what keeps the claim true: MongoDbStorage._initDb, given the same settings, builds the same URI
-        from mcrit.storage.MongoDbStorage import MongoDbStorage
-
         for server, port, username, password, flags in (("a:1,b:2", "", "u", "s3cr%40t", "authSource=admin"), ("h", "27999", "", "", "")):
             storage_config = StorageConfig(STORAGE_SERVER=server, STORAGE_PORT=port, STORAGE_MONGODB_DBNAME="db")
             storage_config.STORAGE_MONGODB_USERNAME = username
@@ -89,7 +87,7 @@ class PichashMigrationConnectionTest(TestCase):
                 patch.object(MongoDbStorage, "_ensureIndexAndUnknownFamily"),
             ):
                 MongoDbStorage(config)._getDb()
-            self.assertEqual(migrate_pichash_padding.build_mongo_uri(server, port, "db", username, password, flags), client.call_args.args[0])
+            self.assertEqual(MongoDbStorage.buildMongoUri(server, port, "db", username, password, flags), client.call_args.args[0])
 
     def _runMain(self, argv, **storage_values):
         """main() with the given storage config; returns (uri connected to, database name used)."""

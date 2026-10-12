@@ -70,19 +70,6 @@ COLLECTIONS = ("functions", "query_functions")
 PROJECTION = {"function_id": 1, "_pichash": 1, "_picblockhashes.hash": 1, "_id": 0}
 
 
-def build_mongo_uri(host: str, port: str, db_name: str, username: Optional[str], password: Optional[str], flags: Optional[str]) -> str:
-    """The URI MongoDbStorage._initDb builds from the same settings, so this reaches the same database.
-
-    Credentials go in as configured: MCRIT does not quote them, so a password holding `@`, `:` or
-    `/` is configured percent-encoded already. An empty port leaves it out, which is how a host
-    list is given.
-    """
-    credentials = "%s:%s@" % (username, password) if username and password else ""
-    port_part = ":%s" % port if port else ""
-    query = "?%s" % flags if flags else ""
-    return "mongodb://%s%s%s/%s%s" % (credentials, host, port_part, db_name, query)
-
-
 def log(message):
     print("%s %s" % (datetime.now(UTC).strftime("%H:%M:%S"), message), flush=True)
 
@@ -310,7 +297,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         db = client[args.db] if args.db else client.get_default_database(default=configured_db)
     else:
         db_name = args.db or configured_db
-        uri = build_mongo_uri(args.host, args.port, db_name, storage_config.STORAGE_MONGODB_USERNAME, storage_config.STORAGE_MONGODB_PASSWORD, storage_config.STORAGE_MONGODB_FLAGS)
+        uri = MongoDbStorage.buildMongoUri(
+            args.host, args.port, db_name, storage_config.STORAGE_MONGODB_USERNAME, storage_config.STORAGE_MONGODB_PASSWORD, storage_config.STORAGE_MONGODB_FLAGS
+        )
         db = MongoClient(uri, connect=True)[db_name]
     # the database name only: the URI can carry a password
     log("database %s" % db.name)
