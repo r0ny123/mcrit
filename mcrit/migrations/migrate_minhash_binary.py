@@ -12,6 +12,10 @@ returns it to the filesystem.
   binary - rewrite hex minhashes as binary.
   revert - rewrite binary minhashes as hex, for going back to an MCRIT that only reads hex. Stop
            the server and workers first: a running MCRIT stores new minhashes as binary again.
+           It refuses to start while the job queue holds queued or in-progress jobs, unless
+           --force is given. The queue checked is the configured queue collection in the database
+           being migrated, where MCRIT keeps it by default; an idle server holds no jobs and so
+           passes the check, which does not replace stopping it.
 
 Each update only applies while the function still holds the value just read, so a minhash that
 was rehashed in the meantime is left as it is. Only minhashes still in the old form are selected,
@@ -38,6 +42,7 @@ from typing import List, Optional
 from pymongo import ASCENDING, MongoClient, UpdateOne
 
 from mcrit.config.McritConfig import McritConfig
+from mcrit.libs.mongoqueue import MongoQueue
 from mcrit.storage.MongoDbStorage import MongoDbStorage
 
 COLLECTIONS = ("functions", "query_functions")
@@ -93,16 +98,24 @@ def convert(db, collection_name, mode, batch_size):
     return num_converted
 
 
+def count_active_jobs(db, queue_collection_name):
+    """How many jobs the queue holds as queued or in progress, by the queue's own state queries."""
+    states = MongoQueue._STATE_QUERIES
+    return db[queue_collection_name].count_documents({"$or": [states["queued"], states["in_progress"]]})
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--mode", choices=["count", "binary", "revert"], required=True)
-    storage_config = McritConfig().STORAGE_CONFIG
+    config = McritConfig()
+    storage_config = config.STORAGE_CONFIG
     parser.add_argument("--host", default=storage_config.STORAGE_SERVER)
     # a string, as in the config: an empty port is how a host list is configured
     parser.add_argument("--port", default=storage_config.STORAGE_PORT)
     parser.add_argument("--db", default=None, help="database to migrate; defaults to the one --uri names, else the configured one")
     parser.add_argument("--uri", default=None, help="complete MongoDB URI; replaces host, port and the configured credentials and flags")
     parser.add_argument("--batch", type=int, default=2000)
+    parser.add_argument("--force", action="store_true", help="revert even while the job queue holds queued or in-progress jobs")
     args = parser.parse_args(argv)
     if args.batch < 1:
         parser.error("--batch must be at least 1")
@@ -121,6 +134,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         db = MongoClient(uri, connect=True)[db_name]
     # the database name only: the URI can carry a password
     log("database %s" % db.name)
+    if args.mode == "revert":
+        # a running MCRIT stores binary again behind the revert; its jobs are the visible sign of one
+        queue_collection_name = config.QUEUE_CONFIG.QUEUE_MONGODB_COLLECTION_NAME
+        num_active_jobs = count_active_jobs(db, queue_collection_name)
+        if num_active_jobs and not args.force:
+            log("%s.%s holds %d queued or in-progress jobs; stop the server and workers first, or pass --force" % (db.name, queue_collection_name, num_active_jobs))
+            return 1
+        log("%s.%s: %d queued or in-progress jobs" % (db.name, queue_collection_name, num_active_jobs))
     if args.mode != "count":
         for collection_name in COLLECTIONS:
             convert(db, collection_name, args.mode, args.batch)

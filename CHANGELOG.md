@@ -32,6 +32,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   NOTE that this changes the stored data shape. An MCRIT from before this release fails on a
   binary minhash (`bytes.fromhex` refuses `bytes`), so upgrade the server and every worker
   together, and run `--mode revert` with them stopped before going back to an older release.
+  `--mode revert` refuses to start while the job queue holds queued or in-progress jobs, unless
+  `--force` is given; an idle server holds none, so the check does not replace stopping it.
   Scripts that read `functions.minhash` directly get `bytes` for functions hashed after the
   upgrade, hex for those hashed before it until the migration runs, and `""` for functions not
   hashed yet.

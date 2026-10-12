@@ -12,6 +12,7 @@ import sys
 import unittest
 from contextlib import redirect_stdout
 from copy import deepcopy
+from datetime import datetime
 from unittest.mock import patch
 
 import pymongo
@@ -25,6 +26,7 @@ from mcrit.config.QueueConfig import QueueConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.libs.mongoqueue import DEFAULT_INSERT
 from mcrit.matchers.MatcherSample import MatcherSample
 from mcrit.migrations import migrate_minhash_binary
 from mcrit.minhash.MinHash import MinHash
@@ -649,6 +651,40 @@ class MinHashMigrationTest(unittest.TestCase):
         self.assertEqual(len(self.reference) // 10, sum(1 for line in lines if " converted, up to function_id " in line))
         self.assertEqual(1, sum(1 for line in lines if "functions: done, %d minhashes rewritten as binary in %d batches" % (converted, converted) in line))
         self.assertEqual(len(self.reference) // 10 + 1, len(lines))
+
+    def _revert_main(self, *extra):
+        server, port = getTestMongoServerAndPort()
+        argv = ["--mode", "revert", "--host", server, "--port", str(port), "--db", DB_NAME, *extra]
+        with redirect_stdout(io.StringIO()):
+            return migrate_minhash_binary.main(argv)
+
+    def test_revert_refuses_while_the_queue_holds_queued_or_running_jobs(self):
+        migrate_minhash_binary.convert(self.db, "functions", "binary", batch_size=7)
+        converted = self._raw()
+        now = datetime.now()
+        job = dict(DEFAULT_INSERT, attempts_left=3, method="updateMinHashesForSample")
+        self.db.queue.insert_many(
+            [
+                dict(job, finished_at=now, started_at=now),
+                dict(job, attempts_left=0),
+                dict(job, terminated=True),
+            ]
+        )
+        self.addCleanup(self.db.queue.drop)
+        # finished, failed and terminated jobs do not hold a revert back
+        self.assertEqual(0, self._revert_main())
+        self.assertEqual(len(self.reference), migrate_minhash_binary.count(self.db)["functions"]["hex"])
+
+        for blocking_job in [job, dict(job, locked_by="worker", locked_at=now, started_at=now)]:
+            migrate_minhash_binary.convert(self.db, "functions", "binary", batch_size=7)
+            inserted = self.db.queue.insert_one(dict(blocking_job)).inserted_id
+
+            self.assertEqual(1, self._revert_main())
+            self.assertEqual(converted, self._raw())
+
+            self.assertEqual(0, self._revert_main("--force"))
+            self.assertEqual(len(self.reference), migrate_minhash_binary.count(self.db)["functions"]["hex"])
+            self.db.queue.delete_one({"_id": inserted})
 
 
 if __name__ == "__main__":
