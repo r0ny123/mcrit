@@ -23,7 +23,7 @@ from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache, StorageBackedMatchingCache
-from mcrit.storage.SampleEntry import SampleEntry
+from mcrit.storage.SampleEntry import TIMESTAMP_FORMAT, SampleEntry
 from mcrit.storage.StorageInterface import BinaryStream, StorageInterface
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -117,9 +117,17 @@ class MemorySearchTranspiler(BaseVisitor):
                 pass
 
         chosen_operator = string_to_operator[node.operator]
+        is_ordering = node.operator in ("<", "<=", ">", ">=")
 
         def compare(entry):
-            return chosen_operator(_get_field(entry, node.field), value)
+            entry_value = _get_field(entry, node.field)
+            if isinstance(entry_value, datetime.datetime):
+                # compared as stored in MongoDB: as text, which orders like the datetime
+                entry_value = entry_value.strftime(TIMESTAMP_FORMAT)
+            if is_ordering and (entry_value is None or value is None):
+                # nothing orders against a missing value, as in MongoDB
+                return False
+            return chosen_operator(entry_value, value)
 
         return compare
 
@@ -1201,7 +1209,7 @@ class MemoryStorage(StorageInterface):
                 val1 = tuple1[i]
                 val2 = tuple2[i]
                 if val1 == val2:
-                    pass
+                    continue
                 if val1 is None:
                     return -direction
                 if val2 is None:

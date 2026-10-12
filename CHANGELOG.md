@@ -15,6 +15,20 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **A sample submitted without a timestamp broke the sample listing on MongoDB.** smda reads an
+  empty `timestamp` as none, MCRIT stored it as null, and reading the sample back raised a
+  TypeError. From then on every route that read it answered 500, `GET /samples` and sample search
+  included. Such a sample now reads back with no timestamp.
+- **Sample search sorted by `timestamp` answered 500 whenever there was a next page**, on both
+  backends: the page's cursor held a datetime, which JSON can't encode. The cursor now holds the
+  timestamp as it's stored. Paging through samples without a timestamp also stopped at the last of
+  them, since nothing compares greater than a missing value; the cursor now steps past them, and
+  over them backwards and in descending order.
+- **`sort_by=function_id` on sample search is refused with a 400.** Samples have no function id:
+  MongoDB sorted every sample as null, and the memory backend answered 500 from the second page on.
+
 ## [1.15.0] - 2026-10-12
 
 **Minor release: a cheaper PicHash recalculation, client fixes, family actors, an optional binary

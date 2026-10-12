@@ -26,7 +26,7 @@ from mcrit.queue.QueueRemoteCalls import QueueRemoteCaller
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
 from mcrit.storage.MatchedFunctionEntry import MatchedFunctionEntry
-from mcrit.storage.SampleEntry import SampleEntry
+from mcrit.storage.SampleEntry import TIMESTAMP_FORMAT, SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
 from mcrit.Worker import Worker
 
@@ -50,6 +50,15 @@ def _get_field_once(object, field):
         return object[field]
     except Exception:
         pass
+
+
+def _get_cursor_value(object, field):
+    """A sort field's value as a cursor carries it: JSON, and comparable to the stored value. A
+    sample's timestamp is a datetime on the entry but stored as text, so the cursor holds the text."""
+    value = _get_field(object, field)
+    if isinstance(value, datetime):
+        return value.strftime(TIMESTAMP_FORMAT)
+    return value
 
 
 def _get_field(object, field):
@@ -793,7 +802,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             last_result = search_results_objects[last_element_key]
             forward_cursor = MinimalSearchCursor()
             forward_cursor.is_forward_search = True ^ is_backward_search  # switch for backward search, because of swap
-            forward_cursor.record_values = [_get_field(last_result, field) for field in sort_fields]
+            forward_cursor.record_values = [_get_cursor_value(last_result, field) for field in sort_fields]
             forward_cursor_str = forward_cursor.toStr()
 
         backward_cursor_str = None
@@ -801,7 +810,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             first_result = search_results_objects[search_results_keys[0]]
             backward_cursor = MinimalSearchCursor()
             backward_cursor.is_forward_search = False ^ is_backward_search  # switch for backward search, because of swap
-            backward_cursor.record_values = [_get_field(first_result, field) for field in sort_fields]
+            backward_cursor.record_values = [_get_cursor_value(first_result, field) for field in sort_fields]
             backward_cursor_str = backward_cursor.toStr()
 
         if is_backward_search:
@@ -940,7 +949,6 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         if sort_by not in (
             None,
             "filename",
-            "function_id",
             "sample_id",
             "family_id",
             "family",
