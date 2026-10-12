@@ -18,6 +18,8 @@ was rehashed in the meantime is left as it is. Only minhashes still in the old f
 which makes a run resumable without keeping state: a killed run is started again, and re-running
 after completion changes nothing. Functions that are not hashed yet keep their "" marker.
 
+Progress is logged every 10 batches, and once per collection when it is done.
+
 Usage (--host, --port and --db default to MCRIT's storage config, --batch to 2000). It connects the
 way MCRIT does, with the credentials and flags it is configured with (STORAGE_MONGODB_USERNAME,
 _PASSWORD, _FLAGS). --uri takes a complete MongoDB URI instead; the database is then --db, else the
@@ -41,6 +43,7 @@ from mcrit.storage.MongoDbStorage import MongoDbStorage
 COLLECTIONS = ("functions", "query_functions")
 HEX_MINHASH = {"minhash": {"$type": "string", "$ne": ""}}
 BINARY_MINHASH = {"minhash": {"$type": "binData"}}
+LOG_EVERY_BATCHES = 10
 
 
 def log(message):
@@ -66,7 +69,8 @@ def convert(db, collection_name, mode, batch_size):
     selection = HEX_MINHASH if mode == "binary" else BINARY_MINHASH
     last_function_id = None
     num_converted = 0
-    started = time.time()
+    num_batches = 0
+    started = time.perf_counter()
     while True:
         query = dict(selection)
         if last_function_id is not None:
@@ -81,7 +85,11 @@ def convert(db, collection_name, mode, batch_size):
             converted = bytes.fromhex(stored) if mode == "binary" else bytes(stored).hex()
             updates.append(UpdateOne({"function_id": document["function_id"], "minhash": stored}, {"$set": {"minhash": converted}}))
         num_converted += collection.bulk_write(updates, ordered=False).modified_count
-        log("%s: %d converted, up to function_id %d (%.0f/s)" % (collection_name, num_converted, last_function_id, num_converted / max(time.time() - started, 1e-9)))
+        num_batches += 1
+        if num_batches % LOG_EVERY_BATCHES == 0:
+            log("%s: %d converted, up to function_id %d (%.0f/s)" % (collection_name, num_converted, last_function_id, num_converted / max(time.perf_counter() - started, 1e-9)))
+    form = "binary" if mode == "binary" else "hex"
+    log("%s: done, %d minhashes rewritten as %s in %d batches, %.1f s" % (collection_name, num_converted, form, num_batches, time.perf_counter() - started))
     return num_converted
 
 
@@ -115,8 +123,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     log("database %s" % db.name)
     if args.mode != "count":
         for collection_name in COLLECTIONS:
-            num_converted = convert(db, collection_name, args.mode, args.batch)
-            log("%s: done, %d minhashes rewritten as %s" % (collection_name, num_converted, "binary" if args.mode == "binary" else "hex"))
+            convert(db, collection_name, args.mode, args.batch)
     for collection_name, collection_counts in count(db).items():
         log("%s: %d hex, %d binary, %d not hashed" % (collection_name, collection_counts["hex"], collection_counts["binary"], collection_counts["not_hashed"]))
     return 0

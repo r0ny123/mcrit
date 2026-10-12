@@ -25,8 +25,9 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   them, and `--mode count` says how many are left. It connects the way MCRIT does, with the
   credentials and flags MCRIT is configured with (`STORAGE_MONGODB_USERNAME`, `_PASSWORD`,
   `_FLAGS`); `--uri` takes a complete MongoDB URI instead, and the database is then `--db`, else
-  the one the URI names, else the configured one. MongoDB reuses the space this frees, and only
-  `compact` returns it to the filesystem. Exports and the REST API still carry hex.
+  the one the URI names, else the configured one. It logs progress every 10 batches (of 2,000
+  minhashes by default) and one summary line per collection. MongoDB reuses the space this frees,
+  and only `compact` returns it to the filesystem. Exports and the REST API still carry hex.
 
   NOTE that this changes the stored data shape. An MCRIT from before this release fails on a
   binary minhash (`bytes.fromhex` refuses `bytes`), so upgrade the server and every worker

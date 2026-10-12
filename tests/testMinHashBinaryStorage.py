@@ -639,6 +639,17 @@ class MinHashMigrationTest(unittest.TestCase):
         for function_id, signature in query_reference.items():
             self.assertEqual(signature, self.db.query_functions.find_one({"function_id": function_id})["minhash"], function_id)
 
+    def test_progress_is_logged_every_ten_batches_and_once_when_done(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            converted = migrate_minhash_binary.convert(self.db, "functions", "binary", batch_size=1)
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(self.reference), converted)
+        self.assertEqual(len(self.reference) // 10, sum(1 for line in lines if " converted, up to function_id " in line))
+        self.assertEqual(1, sum(1 for line in lines if "functions: done, %d minhashes rewritten as binary in %d batches" % (converted, converted) in line))
+        self.assertEqual(len(self.reference) // 10 + 1, len(lines))
+
 
 if __name__ == "__main__":
     unittest.main()
