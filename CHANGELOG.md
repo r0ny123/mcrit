@@ -26,6 +26,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   timestamp as it's stored. Paging through samples without a timestamp also stopped at the last of
   them, since nothing compares greater than a missing value; the cursor now steps past them, and
   over them backwards and in descending order.
+- **On the memory backend, sorting samples by `timestamp` failed when a store mixed time-zone-aware
+  and naive timestamps**, as it does when smda runs in the same process. It now sorts them as the
+  text MongoDB stores, which leaves out the time zone, so both backends order them the same way.
+  The query cleanup job raised a TypeError on such a query sample in the same way; it now compares
+  the timestamp without its time zone too. Past that, it still couldn't delete a stale query sample
+  on the memory backend, which looked for the sample's functions among the regular ones and raised
+  a KeyError; it now deletes the query sample and its functions.
 - **`sort_by=function_id` on sample search is refused with a 400.** Samples have no function id:
   MongoDB sorted every sample as null, and the memory backend answered 500 from the second page on.
 

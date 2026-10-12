@@ -1,4 +1,5 @@
 import copy
+import datetime
 import json
 import os
 import unittest
@@ -11,6 +12,7 @@ from mcrit.config.McritConfig import McritConfig
 from mcrit.config.QueueConfig import QueueConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.index.SearchCursor import MinimalSearchCursor
 from mcrit.queue.QueueFactory import QueueFactory
 from mcrit.storage.StorageFactory import StorageFactory
 
@@ -69,6 +71,26 @@ class SampleSearchSort(unittest.TestCase):
         self.assertIsNone(storage.getSampleById(1).timestamp)
         self.assertIsNone(storage.getSampleBySha256("%064x" % 2).toDict()["timestamp"])
         self.assertEqual(list(range(len(TIMESTAMPS))), sorted(sample.sample_id for sample in storage.getSamples(0, 0)))
+
+    def test_naive_and_aware_timestamps_sort_together(self):
+        # smda run in-process stamps a report with an aware datetime, while a stored one reads back
+        # naive; the memory backend compared the two and failed
+        index = self._index()
+        with open(EXAMPLE_REPORT) as fjson:
+            report = SmdaReport.fromDict(dict(json.load(fjson), sha256="%064x" % 99))
+        assert report is not None
+        report.timestamp = datetime.datetime(2026, 1, 1, 12, tzinfo=datetime.UTC)
+        aware_id = index.getStorage().addSmdaReport(report).sample_id
+        pages, _ = self._pages(index, True)
+        self.assertEqual([1, 3, 2, aware_id, 0, 4], [sample_id for page in pages for sample_id in page])
+
+    def test_a_cursor_with_nothing_after_it_finds_nothing(self):
+        # no cursor the server issues names None for the id; a crafted one made the memory backend
+        # fail, and must not match every sample on MongoDB either
+        cursor = MinimalSearchCursor()
+        cursor.record_values, cursor.is_forward_search = [None], False
+        results = self._index().getSampleSearchResults("", cursor=cursor.toStr())
+        self.assertEqual({}, results["search_results"])
 
     def test_function_id_is_not_a_sample_sort_field(self):
         # samples have no function_id: MongoDB sorted every sample as null and the memory backend failed

@@ -1,11 +1,12 @@
 import os
 import unittest
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from smda.common.SmdaReport import SmdaReport
 
+from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.queue.LocalQueue import LocalQueue
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.Worker import Worker
@@ -76,6 +77,34 @@ class DbCleanupTest(unittest.TestCase):
         self.assertEqual([-7], sorted(call.args[0] for call in storage.deleteSample.call_args_list))
         self.assertEqual(["old-finished"], [call.args[0] for call in queue.delete_job.call_args_list])
         self.assertEqual(1, report["num_query_samples_deleted"])
+
+    def test_a_query_sample_with_an_aware_timestamp_is_compared_too(self):
+        # smda run in-process stamps an aware timestamp, which the memory backend keeps; the
+        # comparison with the naive cutoff used to raise a TypeError
+        query_samples = [_sample(-5, 64 * "a", OLD.replace(tzinfo=UTC)), _sample(-7, 64 * "b", RECENT.replace(tzinfo=UTC))]
+        worker, queue, storage = self._worker([], {}, query_samples)
+        report = worker.doDbCleanup()
+        self.assertEqual([-5], [call.args[0] for call in storage.deleteSample.call_args_list])
+        self.assertEqual(1, report["num_query_samples_deleted"])
+
+    def test_the_memory_backend_deletes_a_stale_query_sample(self):
+        # the memory backend keeps query samples apart, and deleting one used to look for its
+        # functions among the regular ones and raise a KeyError
+        storage = MinHashIndex(config).getStorage()
+        storage.clearStorage()
+        stale, recent = SmdaReport.fromFile(EXAMPLE_REPORT), SmdaReport.fromFile(EXAMPLE_REPORT)
+        assert stale is not None and recent is not None
+        stale.timestamp, recent.timestamp = OLD.replace(tzinfo=UTC), RECENT.replace(tzinfo=UTC)
+        stale_id = storage.addSmdaReport(stale, isQuery=True).sample_id
+        recent_id = storage.addSmdaReport(recent, isQuery=True).sample_id
+        stale_function_ids = [entry.function_id for entry in storage.getFunctionsBySampleId(stale_id)]
+        worker, _, _ = self._worker([], {}, [])
+        worker._storage = storage
+        report = worker.doDbCleanup()
+        self.assertEqual(1, report["num_query_samples_deleted"])
+        self.assertEqual([recent_id], [sample.sample_id for sample in storage.getSamples(0, 0, is_query=True)])
+        self.assertTrue(stale_function_ids)
+        self.assertFalse(any(storage.isFunctionId(function_id) for function_id in stale_function_ids))
 
     def test_orphaned_query_data_is_removed_and_compaction_is_opt_in(self):
         worker, queue, storage = self._worker([], {}, [])

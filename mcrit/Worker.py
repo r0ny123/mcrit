@@ -225,7 +225,9 @@ class Worker(QueueRemoteCallee):
                 continue
             if sample_entry.sha256 not in samples_to_be_deleted:
                 samples_to_be_deleted[sample_entry.sha256] = []
-            if sample_entry.timestamp < time_cutoff:
+            # smda run in-process stamps an aware timestamp, the memory backend keeps it as is, and
+            # MongoDB stores the wall time without the zone; compare it the way MongoDB keeps it
+            if sample_entry.timestamp.replace(tzinfo=None) < time_cutoff:
                 samples_to_be_deleted[sample_entry.sha256].append(sample_entry)
         for state, job in query_jobs:
             # a finished job is dated by when it finished, a failed one by when it last ran

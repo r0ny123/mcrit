@@ -115,4 +115,8 @@ class FullSearchCursor:
                 inner_condition.append(SearchConditionNode(field, operator, value))
             conditions.append(AndNode(inner_condition))
 
+        if not conditions:
+            # only a cursor naming None for the id gets here, and no record comes after it; an
+            # empty OR would match everything on MongoDB, so ask for the id no record has
+            return SearchConditionNode(self.sort_fields[-1], "=", None)
         return OrNode(conditions)
