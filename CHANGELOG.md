@@ -15,6 +15,15 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **`McritClient` sent its token and request bodies wherever a redirect pointed.** requests drops
+  an `Authorization` header when a redirect leads to another host, but not the `apitoken` header
+  MCRIT uses, and on a 307 or 308 it sends the body again, so a redirect from the server, or from
+  whatever answered in its place, handed the token and any submitted binary or report to the host
+  it named. A redirect to another origin now gets neither. One within the server's origin, or
+  from http to https on the same host, keeps both, as before.
+
 ## [1.15.0] - 2026-10-12
 
 **Minor release: a cheaper PicHash recalculation, client fixes, family actors, an optional binary

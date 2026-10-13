@@ -111,20 +111,20 @@ class BinaryRouteTest(unittest.TestCase):
 class BinaryClientTest(unittest.TestCase):
     def test_the_client_hands_out_the_bytes_or_none(self):
         client = McritClient("http://mcrit.test")
-        with patch("mcrit.client.McritClient.requests.get", return_value=MagicMock(status_code=200, content=b"bytes")) as get:
+        with patch("mcrit.client.McritClient.requests.Session.get", return_value=MagicMock(status_code=200, content=b"bytes")) as get:
             self.assertEqual(b"bytes", client.getSampleBinary(3))
             self.assertIn("/samples/3/binary", get.call_args.args[0])
-        with patch("mcrit.client.McritClient.requests.get", return_value=MagicMock(status_code=404)):
+        with patch("mcrit.client.McritClient.requests.Session.get", return_value=MagicMock(status_code=404)):
             self.assertIsNone(client.getSampleBinary(3))
 
     def test_the_client_error_modes_apply(self):
         failure = MagicMock(status_code=404, url="http://mcrit.test/samples/3/binary")
         failure.json.return_value = {"status": "failed", "data": {"message": "No binary kept for this sample."}}
-        with patch("mcrit.client.McritClient.requests.get", return_value=failure):
+        with patch("mcrit.client.McritClient.requests.Session.get", return_value=failure):
             with self.assertRaises(McritNotFound):
                 McritClient("http://mcrit.test", raise_client_errors=True).getSampleBinary(3)
         failure.status_code = 500
-        with patch("mcrit.client.McritClient.requests.get", return_value=failure):
+        with patch("mcrit.client.McritClient.requests.Session.get", return_value=failure):
             with self.assertRaises(McritServerError):
                 McritClient("http://mcrit.test", raise_server_errors=True).getSampleBinary(3)
 

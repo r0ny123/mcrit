@@ -182,6 +182,25 @@ def handle_response(response, raise_client_errors=False, raise_server_errors=Fal
 DEFAULT_TIMEOUT = (10, None)
 
 
+class _McritSession(requests.Session):
+    """A session that keeps the token and request bodies to the server they were meant for.
+
+    requests drops an Authorization header when a redirect leads to another host, but not the
+    `apitoken` header MCRIT uses, and on a 307 or 308 it sends the body along, a sample binary or
+    report included. A redirect to another origin now gets neither; a redirect within the
+    server's own origin, or from http to https on the same host, keeps both, as before.
+    """
+
+    def rebuild_auth(self, prepared_request, response):
+        super().rebuild_auth(prepared_request, response)
+        if self.should_strip_auth(response.request.url, prepared_request.url):
+            prepared_request.headers.pop("apitoken", None)
+            if prepared_request.body is not None:
+                prepared_request.body = None
+                for header in ("Content-Length", "Content-Type", "Transfer-Encoding"):
+                    prepared_request.headers.pop(header, None)
+
+
 class McritClient:
     def __init__(self, mcrit_server=None, apitoken=None, username=None, raw_responses=False, raise_client_errors=False, raise_server_errors=False, timeout=DEFAULT_TIMEOUT):
         """
@@ -198,7 +217,7 @@ class McritClient:
         self.raise_server_errors = raise_server_errors
         self.timeout = timeout
         # one session keeps connections open; a new TLS handshake per request costs most of a second
-        self._session = requests.Session()
+        self._session = _McritSession()
         if apitoken:
             self.headers.update({"apitoken": apitoken})
         if username:
@@ -525,7 +544,7 @@ class McritClient:
         The raw binary the sample was submitted as, when the server keeps them (STORAGE_KEEP_SUBMITTED_BINARIES) and serves them (STORAGE_SERVE_SUBMITTED_BINARIES); None otherwise
         None does not tell those cases apart: a server not serving binaries answers 403, which is also what a missing or invalid token gets; raise_client_errors raises McritUnauthorized or McritNotFound instead, and raw mode hands back the response to look at
         """
-        response = requests.get(f"{self.mcrit_server}/samples/{sample_id}/binary", headers=self.headers, timeout=self.timeout)
+        response = self._session.get(f"{self.mcrit_server}/samples/{sample_id}/binary", headers=self.headers, timeout=self.timeout)
         if self.raw:
             return response
         if response.status_code != 200:
