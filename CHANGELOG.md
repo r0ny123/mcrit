@@ -22,8 +22,9 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   MongoDB refused, kept the samples written so far without functions, and the retry of the
   corrected export skipped them as present already. A submitted report whose function insert
   failed did the same, and every resubmission was answered that the sample existed. A failed
-  import now removes the samples it added, with their functions and family counters, and a failed
-  submission removes its sample, before the error is answered. Samples that were there before
+  import now removes the samples it added, with their functions and family counters, and on
+  MongoDB a submission whose function insert failed removes its sample, before the error is
+  answered. Samples that were there before
   are left alone, and so are families, which may have been there before as well. Minhashes are
   added after this, and a failure there still leaves the samples in place, as before. Should an
   index write fail after the functions were stored, the samples' picblockhashes are taken out
