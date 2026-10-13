@@ -774,7 +774,11 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         full_cursor = FullSearchCursor(cursor, sort_by_list)
         is_backward_search = not full_cursor.is_forward_search
 
-        parsed_search = self.search_query_parser.parse(search_term)
+        try:
+            parsed_search = self.search_query_parser.parse(search_term)
+        except RecursionError:
+            # the parser recurses once per term and per level of nesting
+            raise ValueError("The query has too many terms or is nested too deeply.") from None
         search_results_objects = search_function(parsed_search, cursor=full_cursor, max_num_results=limit + 1)
 
         # Find last last_element_key, which is used for the forward cursor

@@ -139,11 +139,15 @@ class MongoSearchTranspiler(BaseVisitor):
         value = node.value
         if node.operator.endswith("?"):
             value = re.compile(re.escape(node.value), re.IGNORECASE)
-        elif node.field in ("pichash", "offset") or node.field.endswith("_id") or "num_" in node.field:
-            try:
-                value = int(value, 0)
-            except Exception:
-                pass
+        elif node.isNumeric():
+            value = node.numericValue()
+            # offsets are stored as signed 64 bit values, an offset of 2**63 and above wrapped around
+            if node.field == "offset" and value is not None and value >= 2**63:
+                if isinstance(node.value, str) and node.operator in ("<", "<=", ">", ">="):
+                    # wrapped, it would compare below every other offset; a search cursor's own
+                    # conditions follow that order, which is the order MongoDB sorts offsets in
+                    raise ValueError("Range operators on 'offset' are only supported below 2**63.")
+                value = encode_two_complement(value)
         mongo_operator = operator_to_mongo[node.operator]
         if node.field == "pichash" and mongo_operator in ("$lt", "$lte", "$gt", "$gte"):
             # pichashes are stored as hex strings, on which range comparisons are not meaningful
@@ -898,8 +902,10 @@ class MongoDbStorage(StorageInterface):
         self._getDb().samples.update_one({"sample_id": sample_id}, {"$unset": {"minhash_smda_version": "", "minhash_shingler_revision": ""}})
         return num_hashed
 
-    def setMinHashVersionForSamples(self, smda_version: str, sample_ids: Optional[List[int]] = None) -> None:
-        query = {} if sample_ids is None else {"sample_id": {"$in": list(sample_ids)}}
+    def setMinHashVersionForSamples(self, smda_version: str, sample_ids: Optional[List[int]] = None, except_sample_ids: Optional[Iterable[int]] = None) -> None:
+        query: Dict[str, Any] = {} if sample_ids is None else {"sample_id": {"$in": list(sample_ids)}}
+        if except_sample_ids:
+            query = {"$and": [query, {"sample_id": {"$nin": list(except_sample_ids)}}]}
         self._getDb().samples.update_many(query, {"$set": {"minhash_smda_version": smda_version, "minhash_shingler_revision": MINHASH_SHINGLER_REVISION}})
 
     def _staleMinHashVersionQuery(self, threshold_version: str) -> Dict[str, Any]:
@@ -3199,18 +3205,67 @@ class MongoDbStorage(StorageInterface):
                 progress_reporter.step()
         return {"minhash_functions_indexed": minhash_functions}
 
+    def _resetBands(self) -> None:
+        for band_id in range(self._storage_config.STORAGE_NUM_BANDS):
+            self._getDb()["band_%d" % band_id].drop()
+            # the same indexes _initDb and rebuildMinhashBandIndex create: the df cutoff and the
+            # bucketed writes need theirs from the first write on, not from the next restart
+            self._getDb()["band_%d" % band_id].create_index("band_hash")
+            self._getDb()["band_%d" % band_id].create_index([("band_hash", 1), ("df", 1)])
+            self._getDb()["band_%d" % band_id].create_index([("band_hash", 1), ("bucket", 1)])
+
     def deleteAllMinHashes(self, progress_reporter=None):
         # delete all minhashes
         self._getDb().functions.update_many({}, {"$set": {"minhash": ""}})
         # reset bands
-        collections = []
-        for band_id in range(self._storage_config.STORAGE_NUM_BANDS):
-            collections.append("band_%d" % band_id)
-        for c in collections:
-            self._getDb()[c].drop()
-            self._getDb()[c].create_index("band_hash")
+        self._resetBands()
         LOGGER.info("Dropped all Minhashes and created a fresh banding index.")
         return
+
+    def deleteRehashableMinHashes(self, progress_reporter=None) -> Set[int]:
+        self._resetBands()
+        functions = self._getDb().functions
+        kept_sample_ids: Set[int] = set()
+        num_dropped = num_kept = 0
+        # streamed in function_id order rather than listed first: a corpus of ten million functions
+        # would otherwise hold every id at once. Each batch only changes documents already read.
+        hashed = functions.find({"minhash": {"$nin": ["", None]}}, {"function_id": 1, "_id": 0}).sort("function_id", 1).batch_size(10000)
+        for batch in self._batchedIds(hashed, 10000):
+            # disassembly lives in the xcfg collection, or inline in a function not yet migrated by
+            # migrate_xcfg_split; an empty one is what STORAGE_DROP_DISASSEMBLY leaves
+            with_disassembly = {document["_id"] for document in self._getDb().xcfg.find({"_id": {"$in": batch}, "_xcfg": {"$nin": ["", "{}", None]}}, {"_id": 1})}
+            with_disassembly.update(
+                document["function_id"]
+                for document in functions.find({"function_id": {"$in": batch}, "_xcfg": {"$exists": True, "$nin": ["", "{}", None]}}, {"function_id": 1, "_id": 0})
+            )
+            rehashable = [function_id for function_id in batch if function_id in with_disassembly]
+            if rehashable:
+                num_dropped += functions.update_many({"function_id": {"$in": rehashable}}, {"$set": {"minhash": ""}}).modified_count
+            kept = [function_id for function_id in batch if function_id not in with_disassembly]
+            if kept:
+                kept_documents = list(functions.find({"function_id": {"$in": kept}}, {"function_id": 1, "sample_id": 1, "minhash": 1, "_id": 0}))
+                kept_minhashes = [minhash for minhash in (self._getMinHashFromStorage(document) for document in kept_documents) if minhash is not None]
+                self._addMinHashesToBands(kept_minhashes)
+                kept_sample_ids.update(document["sample_id"] for document in kept_documents)
+                num_kept += len(kept_minhashes)
+        LOGGER.info(
+            "Dropped %d minhashes to recalculate and created a fresh banding index; kept %d of functions without disassembly in %d samples.",
+            num_dropped,
+            num_kept,
+            len(kept_sample_ids),
+        )
+        return kept_sample_ids
+
+    @staticmethod
+    def _batchedIds(documents, size: int) -> Iterator[List[int]]:
+        batch: List[int] = []
+        for document in documents:
+            batch.append(document["function_id"])
+            if len(batch) == size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
     def recalculateAllPicHashes(self, progress_reporter=None):
         # get current SMDA version

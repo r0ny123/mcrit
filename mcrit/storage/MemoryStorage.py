@@ -10,7 +10,7 @@ import uuid
 from collections import defaultdict
 from copy import copy, deepcopy
 from itertools import zip_longest
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from packaging import version as packaging_version
 from picblocks.blockhasher import BlockHasher
@@ -110,16 +110,12 @@ class MemorySearchTranspiler(BaseVisitor):
 
             return check_regex
 
-        if node.field in ("pichash", "offset") or node.field.endswith("_id") or "num_" in node.field:
-            try:
-                value = int(value, 0)
-            except Exception:
-                pass
+        compared: Any = node.numericValue() if node.isNumeric() else value
 
         chosen_operator = string_to_operator[node.operator]
 
         def compare(entry):
-            return chosen_operator(_get_field(entry, node.field), value)
+            return chosen_operator(_get_field(entry, node.field), compared)
 
         return compare
 
@@ -435,6 +431,22 @@ class MemoryStorage(StorageInterface):
         self._minhash_shingler_revisions.pop(sample_id, None)
         return num_hashed
 
+    def deleteRehashableMinHashes(self, progress_reporter=None) -> Set[int]:
+        self._bands = {band_number: {} for band_number in self._bands}
+        kept_sample_ids: Set[int] = set()
+        for function_entry in self._functions.values():
+            minhash = function_entry.getMinHash(self._minhash_config.MINHASH_SIGNATURE_BITS)
+            if not minhash or not minhash.hasMinHash():
+                continue
+            if function_entry.xcfg:
+                function_entry.minhash = b""
+                function_entry.minhash_shingle_composition = {}
+            else:
+                # no disassembly to compute it from again: kept, and banded again
+                self.addMinHash(minhash)
+                kept_sample_ids.add(function_entry.sample_id)
+        return kept_sample_ids
+
     def deleteAllMinHashes(self, progress_reporter=None) -> int:
         num_deleted = 0
         for sample_id in list(self._samples):
@@ -442,9 +454,10 @@ class MemoryStorage(StorageInterface):
         self._bands = {band_number: {} for band_number in self._bands}
         return num_deleted
 
-    def setMinHashVersionForSamples(self, smda_version: str, sample_ids: Optional[List[int]] = None) -> None:
+    def setMinHashVersionForSamples(self, smda_version: str, sample_ids: Optional[List[int]] = None, except_sample_ids: Optional[Iterable[int]] = None) -> None:
+        excepted = set(except_sample_ids or [])
         for sample_id in list(self._samples) if sample_ids is None else sample_ids:
-            if sample_id in self._samples:
+            if sample_id in self._samples and sample_id not in excepted:
                 self._minhash_versions[sample_id] = smda_version
                 self._minhash_shingler_revisions[sample_id] = MINHASH_SHINGLER_REVISION
 
