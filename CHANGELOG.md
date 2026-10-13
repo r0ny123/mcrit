@@ -23,10 +23,11 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   - an integer beyond 63 bits for an `_id` or `num_` field, or beyond 64 bits for an `offset`;
   - a `pichash` that wasn't a number;
   - a numeric field compared with text;
-  - a query of a hundred or so terms, or nested that deep.
+  - a query of seventy or eighty terms, or fifty levels of nesting.
 
-  They are 400s now, with a message saying what's wrong. A number in a query may still be decimal
-  with leading zeros, or `0x` hex, but no longer a fraction or a negative offset. On MongoDB, an
+  They are 400s now, with a message saying what's wrong. A number in a query may still be `0x`
+  hex, and now also decimal with leading zeros, which was compared as text and found nothing, but
+  no longer a fraction or a negative offset. On MongoDB, an
   `offset` of 2^63 and above, where 64-bit kernel code sits, now finds the function stored there;
   it was a 500. MongoDB stores such an offset as a negative number and sorts it below every other
   one, so a range comparison with one (`offset:>=0xffffffff80000000`) is a 400 there rather than
