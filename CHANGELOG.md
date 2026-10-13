@@ -22,9 +22,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   only condition of the request, so a typo deleted every job and stored result. It is now a 400 and
   deletes nothing. `MongoQueue.delete_jobs` also dropped `finished_before` whenever `created_before`
   came with it, which deleted queued and running jobs along with the finished ones; both now apply.
-  The memory queue's `delete_jobs` didn't filter at all: it ignored `created_before`, raised a
-  TypeError without a `finished_before`, and deleted nothing without a method. It now filters like
-  MongoDB. A repeated date parameter is a 400 as well, where it was a 500.
+  The memory queue's `delete_jobs` compared both dates with `finished_before`, raised a TypeError
+  without one, and deleted nothing without a method. It now filters like MongoDB. A repeated date parameter is a 400 as well, where it was a 500.
 - **Deleting a cross compare's child job left its combine job queued forever.** The combine job
   waits for its children, and one deleted before it finished never let it go, so a client awaiting
   the cross compare polled indefinitely. Deleting a job now releases whatever waits on it, the way
