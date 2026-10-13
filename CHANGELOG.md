@@ -15,6 +15,43 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DELETE /jobs` deleted every job when a date filter didn't parse.** A `created_before` or
+  `finished_before` that wasn't `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS` was dropped, and with it the
+  only condition of the request, so a typo deleted every job and stored result. It is now a 400 and
+  deletes nothing. `MongoQueue.delete_jobs` also dropped `finished_before` whenever `created_before`
+  came with it, which deleted queued and running jobs along with the finished ones; both now apply.
+  The memory queue's `delete_jobs` didn't filter at all: it ignored `created_before`, raised a
+  TypeError without a `finished_before`, and deleted nothing without a method. It now filters like
+  MongoDB. A repeated date parameter is a 400 as well, where it was a 500.
+- **Deleting a cross compare's child job left its combine job queued forever.** The combine job
+  waits for its children, and one deleted before it finished never let it go, so a client awaiting
+  the cross compare polled indefinitely. Deleting a job now releases whatever waits on it, the way
+  a failed job does: the combine job runs and fails, saying a child job failed.
+- **A job could be finished, failed or released by a worker that no longer held it.**
+  `Job.complete`, `error` and `release` wrote to the job whatever had happened to it since. Under
+  `mcrit spawningworker`, a failing job process errored the job and the spawning worker errored it
+  again: each failure cost two attempts, a job ended at `attempts_left` -1 and showed as queued
+  forever, and the second error could unlock the job under a worker that had taken it in between,
+  so two workers ran it at once. A finished job process was also counted as finished twice. These
+  calls now act only while the job is unfinished and held by whoever took it (a job process acts
+  for its spawning worker), so each failure costs one attempt and a late write from a former
+  holder changes nothing; a late completion is logged. The spawning worker's completion still
+  releases the jobs waiting on one its job process finished, in case that process died before it
+  could.
+- **Worker liveness depended on the time zone.** Heartbeats were written and compared in each
+  host's local time, so a worker on a host west of the one checking looked dead and had its jobs
+  reclaimed, one east of it looked alive for hours after dying, and a DST change shifted every
+  worker by an hour. Heartbeats are now also written in UTC (`heartbeats_utc` next to `heartbeats`
+  in the queue's `workers` counter) and judged by that. A worker of an older release writes only
+  the local one, which is compared in local time as before, so a rolling upgrade judges both alike.
+- **`POST /respawn` left every job result and query binary in GridFS.** `MongoQueue.clear()`
+  dropped a collection named `fs`, which GridFS doesn't use. It now removes the files no job refers
+  to once the queue is gone, as `POST /delete_orphaned_queue_files` does, which also leaves the
+  files of other queues sharing the database alone. Results left behind by an earlier respawn go
+  with the next one, or with that cleanup.
+
 ## [1.15.0] - 2026-10-12
 
 **Minor release: a cheaper PicHash recalculation, client fixes, family actors, an optional binary
