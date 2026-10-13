@@ -15,6 +15,32 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **An import or submission that failed part way left samples without their functions.** A sample
+  is written before its functions, so `POST /import` failing on a later entry, or on a function
+  MongoDB refused, kept the samples written so far without functions, and the retry of the
+  corrected export skipped them as present already. A submitted report whose function insert
+  failed did the same, and every resubmission was answered that the sample existed. A failed
+  import now removes the samples it added, with their functions and family counters, and a failed
+  submission removes its sample, before the error is answered. Samples that were there before
+  are left alone, and so are families, which may have been there before as well. Minhashes are
+  added after this, and a failure there still leaves the samples in place, as before. Should an
+  index write fail after the functions were stored, the samples' picblockhashes are taken out
+  again, but their pichash counts stay raised until `rebuildPicHashCountIndex` runs.
+- **Imported functions were missing from the function range index.** `addSmdaReport` records which
+  function ids each sample owns, but the import didn't, so a shortlisted match never attributed an
+  imported function to its sample and dropped its minhash matches. Imports now record them, and
+  a range lookup cached while the import ran is not used past it. Functions imported before this
+  fix are picked up by `rebuildFunctionRangeIndex`.
+- **Resubmitting a report added its function names as labels unchecked.** `POST /samples` for a
+  sample that exists already adds the report's function names as the submitter's labels, without
+  the limits `PUT /functions/{id}` applies, to a sample that may well be someone else's. Such a
+  label now has to be what a rename could set, 1 to 256 printable ASCII characters once stripped,
+  and others are left out. The first report of a sample keeps every name it holds, long mangled
+  and non-ASCII ones included, as before. On MongoDB, a label for a function deleted meanwhile no
+  longer recreates it as a document holding only that label.
+
 ## [1.15.0] - 2026-10-12
 
 **Minor release: a cheaper PicHash recalculation, client fixes, family actors, an optional binary

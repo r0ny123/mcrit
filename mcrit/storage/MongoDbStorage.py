@@ -1490,7 +1490,7 @@ class MongoDbStorage(StorageInterface):
             target_sample = SampleEntry.fromDict(report_dict)
         return target_sample
 
-    def updateFunctionLabels(self, smda_report: "SmdaReport", username) -> Optional["SampleEntry"]:
+    def updateFunctionLabels(self, smda_report: "SmdaReport", username, checked: bool = False) -> Optional["SampleEntry"]:
         assert smda_report.sha256 is not None
         sample_entry = self.getSampleBySha256(smda_report.sha256)
         if not sample_entry:
@@ -1498,11 +1498,11 @@ class MongoDbStorage(StorageInterface):
         # check which functions in the SmdaReport have suitable function_names
         submitted_labels = {}
         for smda_function in smda_report.getFunctions():
-            function_name = smda_function.function_name
-            if function_name and not re.match("sub_[a-fA-F0-9]{1,16}", function_name):
+            label = FunctionLabelEntry.labelFromReport(smda_function.function_name, checked=checked)
+            if label is not None and smda_function.offset is not None:
                 # use two-complement to convert unit64 to int64 and vice versa
                 offset = encode_two_complement(smda_function.offset)
-                submitted_labels[offset] = function_name
+                submitted_labels[offset] = label
         # get the respective FunctionEntries and check if the label is novel
         sample_function_entries = {entry.offset: entry for entry in self.getFunctionsBySampleId(sample_entry.sample_id) or []}
         label_updates = []
@@ -1519,7 +1519,13 @@ class MongoDbStorage(StorageInterface):
             if is_new_label:
                 new_function_entry_label = FunctionLabelEntry(extracted_label, username)
                 update_command = {"$push": {"function_labels": new_function_entry_label.toDict()}}
-                label_updates.append(UpdateOne({"function_id": sample_function_entries[label_offset].function_id}, update_command, upsert=True))
+                # as modifyFunction does: the "not yet labelled so by this user" check is part of the
+                # filter, and a function deleted meanwhile is not recreated as a bare label document
+                not_yet_labelled = {
+                    "function_id": sample_function_entries[label_offset].function_id,
+                    "function_labels": {"$not": {"$elemMatch": {"username": username, "function_label": extracted_label}}},
+                }
+                label_updates.append(UpdateOne(not_yet_labelled, update_command))
         if label_updates:
             self._getDb().functions.bulk_write(label_updates, ordered=False)
 
@@ -1547,11 +1553,18 @@ class MongoDbStorage(StorageInterface):
                 # its hashes are computed right here, by the running smda and picblocks
                 self._dbInsert("samples", {**sample_entry.toDict(), "pichash_smda_version": SmdaConfig().VERSION, "picblockhash_version": PICBLOCKS_VERSION})
                 function_ids = self._useCounterBulk("functions", smda_report.num_functions)
-                function_dicts = []
-                for function_id, smda_function in zip(function_ids, smda_report.getFunctions()):
-                    function_dicts.append(self._getFunctionDocument(sample_entry, smda_function, function_id))
-                self._insertXcfgDocuments(function_dicts)
-                self._dbInsertMany("functions", function_dicts)
+                try:
+                    function_dicts = []
+                    for function_id, smda_function in zip(function_ids, smda_report.getFunctions()):
+                        function_dicts.append(self._getFunctionDocument(sample_entry, smda_function, function_id))
+                    self._insertXcfgDocuments(function_dicts)
+                    self._dbInsertMany("functions", function_dicts)
+                except Exception:
+                    # a sample whose functions could not all be written would stay without them, and
+                    # every resubmission of the report would be answered that it exists already
+                    self._discardFunctions(function_ids)
+                    self._getDb().samples.delete_one({"sample_id": sample_entry.sample_id})
+                    raise
                 self._addToPicBlockHashIndex(function_dicts)
                 self._addToPicHashCounts(function_dicts)
                 self._recordFunctionRange(sample_entry.sample_id, [document["function_id"] for document in function_dicts])
@@ -1581,10 +1594,16 @@ class MongoDbStorage(StorageInterface):
         # add function to regular storage
         function_dict = function_entry.toDict()
         self._encodeFunction(function_dict)
-        self._insertXcfgDocuments([function_dict])
-        self._dbInsert("functions", function_dict)
+        try:
+            self._insertXcfgDocuments([function_dict])
+            self._dbInsert("functions", function_dict)
+        except Exception:
+            self._discardFunctions([function_entry.function_id])
+            raise
         self._addToPicBlockHashIndex([function_dict])
         self._addToPicHashCounts([function_dict])
+        self._recordFunctionRange(function_entry.sample_id, [function_entry.function_id])
+        self._updateDbState()
         return function_entry
 
     def importFunctionEntries(self, function_entries: List["FunctionEntry"]) -> Optional[List["FunctionEntry"]]:
@@ -1599,11 +1618,47 @@ class MongoDbStorage(StorageInterface):
             function_dict = function_entry.toDict()
             self._encodeFunction(function_dict)
             functions_as_dicts.append(function_dict)
-        self._insertXcfgDocuments(functions_as_dicts)
-        self._dbInsertMany("functions", functions_as_dicts)
+        try:
+            self._insertXcfgDocuments(functions_as_dicts)
+            self._dbInsertMany("functions", functions_as_dicts)
+        except Exception:
+            # none of them, rather than the ones before the document that failed
+            self._discardFunctions(function_ids)
+            raise
         self._addToPicBlockHashIndex(functions_as_dicts)
         self._addToPicHashCounts(functions_as_dicts)
+        # as addSmdaReport does: without a range, a shortlisted match never attributes these
+        # functions to their sample, and their minhash matches are dropped
+        function_ids_by_sample: Dict[int, List[int]] = {}
+        for function_dict in functions_as_dicts:
+            function_ids_by_sample.setdefault(function_dict["sample_id"], []).append(function_dict["function_id"])
+        for sample_id, sample_function_ids in function_ids_by_sample.items():
+            self._recordFunctionRange(sample_id, sample_function_ids)
+        # the range lookup is cached per db state: one built while these were being written must not outlive them
+        self._updateDbState()
         return function_entries
+
+    def _discardFunctions(self, function_ids: Iterable[int]) -> None:
+        """Remove what a failed insert of these functions may have written before it failed."""
+        function_ids = list(function_ids)
+        self._deleteXcfgForFunctionIds(function_ids)
+        for offset in range(0, len(function_ids), 10000):
+            self._getDb().functions.delete_many({"function_id": {"$in": function_ids[offset : offset + 10000]}})
+
+    def discardImportedSample(self, sample_entry: "SampleEntry") -> None:
+        sample_id = sample_entry.sample_id
+        # only the sample this entry was imported as: an entry importSampleEntry skipped still
+        # carries the id it had elsewhere, which here may well be another sample's
+        if self._getDb().samples.find_one({"sample_id": sample_id, "sha256": sample_entry.sha256}, {"_id": 1}) is None:
+            return
+        # the picblockhash index is read from the functions, so before they go, as in deleteSample
+        self._removeSampleFromPicBlockHashIndex(sample_id)
+        self._discardFunctions([document["function_id"] for document in self._getDb().functions.find({"sample_id": sample_id}, {"function_id": 1, "_id": 0})])
+        if self._getDb().samples.delete_one({"sample_id": sample_id, "sha256": sample_entry.sha256}).deleted_count:
+            # the mirror of importSampleEntry's increment; the family stays, since it may have been
+            # there before the import, with actors of its own
+            self._updateFamilyStats(sample_entry.family_id, -1, -sample_entry.statistics["num_functions"], -int(sample_entry.is_library))
+        self._updateDbState()
 
     def getFunctionsBySampleId(self, sample_id: int) -> Optional[List["FunctionEntry"]]:
         if not self.isSampleId(sample_id):
