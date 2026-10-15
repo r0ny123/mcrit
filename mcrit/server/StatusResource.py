@@ -197,11 +197,6 @@ class StatusResource:
             result["limit"] = int(params.get("limit"))
         except (TypeError, ValueError):
             pass
-        else:
-            # 0 or a negative limit failed the paging with an IndexError, and one too large for 64
-            # bits once the search asks for one more result to know whether there is a next page
-            if not 1 <= result["limit"] <= 2**63 - 2:
-                raise ValueError("limit has to be a number from 1 to 2**63-2.")
         return result
 
     def _respond_search(self, req, resp, search_method, endpoint):

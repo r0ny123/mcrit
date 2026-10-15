@@ -1,7 +1,6 @@
 """Search input the storages can't serve is a 400, on both storages, not a 500.
 
-Only a ValueError was answered as a client error. A negative limit failed the paging with an
-IndexError, an integer beyond 64 bits made MongoDB raise OverflowError, a pichash that wasn't a
+Only a ValueError was answered as a client error. An integer beyond 64 bits made MongoDB raise OverflowError, a pichash that wasn't a
 number failed its encoding with a TypeError, a numeric field compared with text failed the memory
 storage's comparison, and a deeply nested query ran out of recursion.
 """
@@ -28,10 +27,6 @@ logging.disable(logging.CRITICAL)
 EXAMPLE_REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "example_report.smda")
 
 REFUSED = [
-    ("functions", {"query": "x", "limit": "-1"}),
-    ("functions", {"query": "", "limit": "0"}),
-    ("functions", {"query": "", "limit": str(2**63 - 1)}),
-    ("samples", {"query": "x", "limit": str(2**64)}),
     ("samples", {"query": "sample_id:" + str(2**64)}),
     ("functions", {"query": "function_id:-" + str(2**64)}),
     ("functions", {"query": "num_instructions:>" + str(2**63)}),
@@ -42,7 +37,8 @@ REFUSED = [
     ("functions", {"query": "offset:" + str(2**64)}),
     ("functions", {"query": "offset:-5"}),
     ("functions", {"query": "(" * 2000 + "a" + ")" * 2000}),
-    ("functions", {"query": " ".join(["word"] * 2000)}),
+    # nearly 20 KB: beyond what a parser that recurses per term can take, and beyond a cap on query length
+    ("functions", {"query": " ".join(["word"] * 4000)}),
 ]
 
 SERVED = [

@@ -19,11 +19,10 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 - **Search answered 500 for input it couldn't serve.** Only a `ValueError` was answered as a client
   error, so each of these failed with a traceback, on MongoDB, in memory, or both:
-  - a `limit` of 0 or less, or one too large for 64 bits;
   - an integer beyond 63 bits for an `_id` or `num_` field, or beyond 64 bits for an `offset`;
   - a `pichash` that wasn't a number;
   - a numeric field compared with text;
-  - a query of seventy or eighty terms, or fifty levels of nesting.
+  - a query nested fifty levels deep.
 
   They are 400s now, with a message saying what's wrong. A number in a query may still be `0x`
   hex, and now also decimal with leading zeros, which was compared as text and found nothing, but
@@ -38,7 +37,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   Those minhashes are now kept and put into the fresh band index, and only the samples hashed
   again are recorded as current. `repairMinHashes` dropped them the same way for a sample only some
   of whose functions still have disassembly; it keeps them now, and such a sample stays listed as
-  stale, so each repair hashes its other functions again. The fresh band index also gets its
+  stale, so each repair hashes its other functions again and `/status` keeps counting it: that
+  count no longer reaches zero while such samples are left. The fresh band index also gets its
   `(band_hash, df)` and `(band_hash, bucket)` indexes right away; they used to come back only with
   the next start.
 
