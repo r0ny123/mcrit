@@ -533,7 +533,7 @@ class McritClient:
         Retry-After, up to SMDA_REBUILD_ATTEMPTS requests in all, before it is handled like any other answer
         """
         for attempt in range(self.SMDA_REBUILD_ATTEMPTS):
-            response = requests.get(f"{self.mcrit_server}/samples/{sample_id}/smda", headers=self.headers, timeout=self.timeout)
+            response = self._session.get(f"{self.mcrit_server}/samples/{sample_id}/smda", headers=self.headers, timeout=self.timeout)
             if response.status_code != 503 or attempt == self.SMDA_REBUILD_ATTEMPTS - 1:
                 break
             try:

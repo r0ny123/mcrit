@@ -176,7 +176,7 @@ class SmdaReportRouteAndClient(unittest.TestCase):
             response = MagicMock(status_code=200)
             response.json.return_value = {"status": "successful", "data": json.loads(json.dumps(sent.toDict()))}
             client = McritClient("http://mcrit.test")
-            with patch("mcrit.client.McritClient.requests.get", return_value=response):
+            with patch.object(client._session, "get", return_value=response):
                 received = client.getSmdaReportForSample(1)
             assert received is not None
             self.assertEqual(sent.smda_report.sha256, received.smda_report.sha256)
@@ -192,20 +192,18 @@ class SmdaReportRouteAndClient(unittest.TestCase):
         done = MagicMock(status_code=200, headers={})
         done.json.return_value = {"status": "successful", "data": json.loads(json.dumps(sent.toDict()))}
         client = McritClient("http://mcrit.test")
-        # the client module's own `requests` and `time` names are replaced, not requests.get and time.sleep
-        # themselves: those are shared, and a thread left running by another test would land in the mocks
-        with patch("mcrit.client.McritClient.requests") as fake_requests, patch("mcrit.client.McritClient.time") as fake_time:
-            fake_requests.get.side_effect = [busy, done]
+        # this client's session and the client module's own `time` name are replaced, not time.sleep itself:
+        # that is shared, and a thread left running by another test would land in the mock
+        with patch.object(client._session, "get", side_effect=[busy, done]) as get, patch("mcrit.client.McritClient.time") as fake_time:
             received = client.getSmdaReportForSample(1)
         assert received is not None
         self.assertEqual(sent.smda_report.sha256, received.smda_report.sha256)
-        self.assertEqual(2, fake_requests.get.call_count)
+        self.assertEqual(2, get.call_count)
         fake_time.sleep.assert_called_once_with(5.0)
         # a server that stays busy is asked SMDA_REBUILD_ATTEMPTS times, then answered like any other failure
-        with patch("mcrit.client.McritClient.requests") as fake_requests, patch("mcrit.client.McritClient.time"):
-            fake_requests.get.return_value = busy
+        with patch.object(client._session, "get", return_value=busy) as get, patch("mcrit.client.McritClient.time"):
             self.assertIsNone(client.getSmdaReportForSample(1))
-        self.assertEqual(McritClient.SMDA_REBUILD_ATTEMPTS, fake_requests.get.call_count)
+        self.assertEqual(McritClient.SMDA_REBUILD_ATTEMPTS, get.call_count)
 
     def test_the_client_waits_a_sane_delay_whatever_retry_after_says(self):
         # time.sleep raises on a negative or nan delay; an HTTP date isn't a number of seconds
@@ -215,8 +213,7 @@ class SmdaReportRouteAndClient(unittest.TestCase):
         for retry_after, delay in (("nan", 5), ("-1", 5), ("inf", 30), ("120", 30), ("Wed, 21 Oct 2026 07:28:00 GMT", 5), ("0", 0)):
             with self.subTest(retry_after=retry_after):
                 busy = MagicMock(status_code=503, headers={"Retry-After": retry_after})
-                with patch("mcrit.client.McritClient.requests") as fake_requests, patch("mcrit.client.McritClient.time") as fake_time:
-                    fake_requests.get.side_effect = [busy, done]
+                with patch.object(client._session, "get", side_effect=[busy, done]), patch("mcrit.client.McritClient.time") as fake_time:
                     self.assertIsNotNone(client.getSmdaReportForSample(1))
                 fake_time.sleep.assert_called_once_with(delay)
 
