@@ -332,12 +332,18 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                     import_report["num_samples_skipped"] += 1
                     import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
                     continue
-                import_report["num_samples_imported"] += 1
                 sample_entry = SampleEntry.fromDict(sample_entry_dict)
                 # adjust family_id in sample_entry using our remapping
                 sample_entry.family_id = family_id_remapping[sample_entry.family_id]
                 # add sample_entry to storage and receive new sample_id
                 remapped_sample_entry = storage.importSampleEntry(sample_entry)
+                if remapped_sample_entry is None:
+                    # another writer stored the same sample since the check above: it is theirs, so this
+                    # import neither attaches functions to it nor removes it should it fail later
+                    import_report["num_samples_skipped"] += 1
+                    import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
+                    continue
+                import_report["num_samples_imported"] += 1
                 imported_sample_entries.append(remapped_sample_entry)
                 if sample_sha256 in export_data["function_entries"]:
                     function_entries = export_data["function_entries"][sample_sha256]

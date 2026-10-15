@@ -106,6 +106,36 @@ class IngestWriteOrderMixin(unittest.TestCase):
         self.assertEqual(kept_functions, len(storage.getFunctionsBySampleId(kept.sample_id)))
         self.assertEqual(kept_counters, self._family_counters(target))
 
+    def test_a_failed_import_leaves_a_sample_another_writer_stored_meanwhile_alone(self):
+        export_data = self._export_of("example_report.smda", "example_report_2.smda")
+        first_sha256, second_sha256 = list(export_data["sample_entries"])
+        broken = copy.deepcopy(export_data)
+        function_entries = broken["function_entries"][second_sha256]
+        function_entries[next(iter(function_entries))] = {}
+        target = self._index()
+        storage = target.getStorage()
+        import_sample_entry = storage.importSampleEntry
+        theirs = []
+
+        def stored_meanwhile(sample_entry):
+            # another writer stores the first sample between the import's check and its insert; on an
+            # empty instance it gets the id it had in the export, which is what the rollback checked
+            if sample_entry.sha256 == first_sha256 and not theirs:
+                theirs.append(storage.addSmdaReport(load_report("example_report.smda")))
+            return import_sample_entry(sample_entry)
+
+        with mock.patch.object(storage, "importSampleEntry", side_effect=stored_meanwhile):
+            with self.assertRaises(Exception):
+                target.addImportData(broken)
+        assert theirs[0] is not None
+        self.assertEqual(export_data["sample_entries"][first_sha256]["sample_id"], theirs[0].sample_id)
+        still_there = storage.getSampleBySha256(first_sha256)
+        assert still_there is not None
+        self.assertEqual(theirs[0].sample_id, still_there.sample_id)
+        # with its own functions only: the import attached none of the export's to it
+        self.assertEqual(theirs[0].statistics["num_functions"], len(storage.getFunctionsBySampleId(still_there.sample_id)))
+        self.assertIsNone(storage.getSampleBySha256(second_sha256))
+
     def test_a_first_submission_keeps_every_name_its_disassembly_found(self):
         index = self._index()
         report = load_report()

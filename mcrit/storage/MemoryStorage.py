@@ -548,9 +548,10 @@ class MemoryStorage(StorageInterface):
             self._samples[sample_id] = sample_entry
             self._sample_by_sha256[sample_entry.sha256] = sample_id
             self._updateFamilyStats(sample_entry.family_id, +1, sample_entry.statistics["num_functions"], int(sample_entry.is_library))
-        else:
-            LOGGER.warning("Sample %s already existed, skipping.", sample_entry.sha256)
-        return sample_entry
+            return sample_entry
+        # the entry still carries the id it had in the export, which here may well be another sample's
+        LOGGER.warning("Sample %s already existed, skipping.", sample_entry.sha256)
+        return None
 
     def discardImportedSample(self, sample_entry: "SampleEntry") -> None:
         sample_id = sample_entry.sample_id

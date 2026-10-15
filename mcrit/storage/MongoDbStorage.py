@@ -1582,9 +1582,10 @@ class MongoDbStorage(StorageInterface):
             self._ensureFamilyDocument(sample_entry.family_id, sample_entry.family)
             self._updateFamilyStats(sample_entry.family_id, +1, sample_entry.statistics["num_functions"], int(sample_entry.is_library))
             self._updateDbState()
-        else:
-            LOGGER.warning("Sample %s already existed, skipping.", sample_entry.sha256)
-        return sample_entry
+            return sample_entry
+        # the entry still carries the id it had in the export, which here may well be another sample's
+        LOGGER.warning("Sample %s already existed, skipping.", sample_entry.sha256)
+        return None
 
     def importFunctionEntry(self, function_entry: "FunctionEntry") -> Optional["FunctionEntry"]:
         function_entry.function_id = self._useCounter("functions")

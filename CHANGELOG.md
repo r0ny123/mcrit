@@ -25,7 +25,9 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   import now removes the samples it added, with their functions and family counters, and on
   MongoDB a submission whose function insert failed removes its sample, before the error is
   answered. Samples that were there before
-  are left alone, and so are families, which may have been there before as well. Minhashes are
+  are left alone, and so are families, which may have been there before as well. So is a sample
+  another import stored while this one ran: the import skips it, attaches none of its functions
+  to it, and does not remove it if it fails later. Minhashes are
   added after this, and a failure there still leaves the samples in place, as before. Should an
   index write fail after the functions were stored, the samples' picblockhashes are taken out
   again, but their pichash counts stay raised until `rebuildPicHashCountIndex` runs.
