@@ -37,7 +37,7 @@ class SearchCursorShapeTestSuite(unittest.TestCase):
     run an attacker's backtracking pattern over every function of the corpus"""
 
     def testCursorsThisServerIssuesAreAccepted(self):
-        for record_values in (["fam2", 3], [7], [None, 1], [True, 2], [1.5, 0], ["0x1f", 9]):
+        for record_values in (["fam2", 3], [7], [None, 1], [True, 2], [1.5, 0], ["0x1f", 9], [0xFFFFFFFF80001000, 4], [2**64 - 1, 5], [-(2**63), 6]):
             for direction in (0, 1):
                 with self.subTest(record_values=record_values, direction=direction):
                     cursor = MinimalSearchCursor.fromStr(encode_cursor([record_values, direction]))
@@ -54,6 +54,8 @@ class SearchCursorShapeTestSuite(unittest.TestCase):
             [["fam1", 1], 2],
             [[10**30, 1], 1],
             [[-(10**30)], 1],
+            [[2**64, 1], 1],
+            [[-(2**63) - 1], 1],
             [["fam1", 1]],
             {"0": ["fam1"], "1": 1},
             "fam1",
@@ -63,6 +65,14 @@ class SearchCursorShapeTestSuite(unittest.TestCase):
             with self.subTest(data=data):
                 with self.assertRaises(ValueError):
                     MinimalSearchCursor.fromStr(encode_cursor(data))
+
+    def testCursorIssuedPastAKernelSpaceOffsetIsAccepted(self):
+        # paging by offset past 0xffffffff8... in memory: the server has to take back the cursor it issued
+        issued = MinimalSearchCursor()
+        issued.record_values, issued.sort_spec = [0xFFFFFFFF80001000, 17], ["offset", "function_id"]
+        cursor = MinimalSearchCursor.fromStr(issued.toStr())
+        assert cursor is not None
+        self.assertEqual([0xFFFFFFFF80001000, 17], cursor.record_values)
 
     def testSortOfCursorIsChecked(self):
         for sort_spec in ("family_name", [], [1], [["family_name"]], {"$ne": 1}, ["family name"], ["family_name\n"], ["$where"], ["-"], ["family_name"] * 9, ["a" * 80]):

@@ -42,8 +42,9 @@ class MinimalSearchCursor:
         # so anything but [[scalar, ...], 0|1] is refused: an object there was a MongoDB query operator
         if not isinstance(data, list) or len(data) not in (2, 3) or not isinstance(data[0], list) or data[1] not in (0, 1):
             raise ValueError("Malformed search cursor.")
-        # integers beyond 8 bytes are refused too: pymongo cannot encode them
-        if not all(value is None or isinstance(value, (str, float)) or (isinstance(value, int) and -(2**63) <= value < 2**63) for value in data[0]):
+        # integers beyond 8 bytes are refused too. Up to 2**64 is kept: a function offset in kernel space
+        # (0xffffffff8...) is one, and the memory storage issues it as it is when paging by offset
+        if not all(value is None or isinstance(value, (str, float)) or (isinstance(value, int) and -(2**63) <= value < 2**64) for value in data[0]):
             raise ValueError("Malformed search cursor.")
         sort_spec = None
         if len(data) == 3:
