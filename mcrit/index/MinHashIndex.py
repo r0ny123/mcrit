@@ -319,35 +319,52 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         # iterate samples
         index = 0
         function_entries_to_import = []
-        for sample_sha256, sample_entry_dict in export_data["sample_entries"].items():
-            index += 1
-            # check if sample is already present, and skip if yes
-            if storage.getSampleBySha256(sample_sha256):
-                LOGGER.info(f"Sample with SHA256 {sample_sha256} already present in database, skipping...")
-                import_report["num_samples_skipped"] += 1
-                import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
-                continue
-            import_report["num_samples_imported"] += 1
-            sample_entry = SampleEntry.fromDict(sample_entry_dict)
-            # adjust family_id in sample_entry using our remapping
-            sample_entry.family_id = family_id_remapping[sample_entry.family_id]
-            # add sample_entry to storage and receive new sample_id
-            remapped_sample_entry = storage.importSampleEntry(sample_entry)
-            if sample_sha256 in export_data["function_entries"]:
-                function_entries = export_data["function_entries"][sample_sha256]
-                # decompress function_entries if necessary
-                if is_compressed:
-                    function_entries = json.loads(decompress_decode(function_entries))
-                # iterate functions and add them, adjusting family_id and sample_id
-                for old_function_id, function_entry_dict in function_entries.items():
-                    function_entry = FunctionEntry.fromDict(function_entry_dict)
-                    function_entry.sample_id = remapped_sample_entry.sample_id
-                    function_entry.family_id = remapped_sample_entry.family_id
-                    function_entries_to_import.append(function_entry)
-                    import_report["num_functions_imported"] += 1
-            LOGGER.info("Sample %d with SHA256 %s added...", index, sample_sha256)
+        imported_sample_entries = []
+        # every sample is written before any function, so one that fails - a later entry that does not
+        # read, a function insert MongoDB refuses - would leave the samples before it without functions,
+        # and a corrected import would skip them as present already: they are removed again instead
+        try:
+            for sample_sha256, sample_entry_dict in export_data["sample_entries"].items():
+                index += 1
+                # check if sample is already present, and skip if yes
+                if storage.getSampleBySha256(sample_sha256):
+                    LOGGER.info(f"Sample with SHA256 {sample_sha256} already present in database, skipping...")
+                    import_report["num_samples_skipped"] += 1
+                    import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
+                    continue
+                sample_entry = SampleEntry.fromDict(sample_entry_dict)
+                # adjust family_id in sample_entry using our remapping
+                sample_entry.family_id = family_id_remapping[sample_entry.family_id]
+                # add sample_entry to storage and receive new sample_id
+                remapped_sample_entry = storage.importSampleEntry(sample_entry)
+                if remapped_sample_entry is None:
+                    # another writer stored the same sample since the check above: it is theirs, so this
+                    # import neither attaches functions to it nor removes it should it fail later
+                    import_report["num_samples_skipped"] += 1
+                    import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
+                    continue
+                import_report["num_samples_imported"] += 1
+                imported_sample_entries.append(remapped_sample_entry)
+                if sample_sha256 in export_data["function_entries"]:
+                    function_entries = export_data["function_entries"][sample_sha256]
+                    # decompress function_entries if necessary
+                    if is_compressed:
+                        function_entries = json.loads(decompress_decode(function_entries))
+                    # iterate functions and add them, adjusting family_id and sample_id
+                    for old_function_id, function_entry_dict in function_entries.items():
+                        function_entry = FunctionEntry.fromDict(function_entry_dict)
+                        function_entry.sample_id = remapped_sample_entry.sample_id
+                        function_entry.family_id = remapped_sample_entry.family_id
+                        function_entries_to_import.append(function_entry)
+                        import_report["num_functions_imported"] += 1
+                LOGGER.info("Sample %d with SHA256 %s added...", index, sample_sha256)
 
-        adjusted_function_entries = storage.importFunctionEntries(function_entries_to_import)
+            adjusted_function_entries = storage.importFunctionEntries(function_entries_to_import)
+        except Exception:
+            LOGGER.error("Import failed, removing the %d samples it had added.", len(imported_sample_entries))
+            for imported_sample_entry in imported_sample_entries:
+                storage.discardImportedSample(imported_sample_entry)
+            raise
         LOGGER.info(f"{len(adjusted_function_entries)} functions added")
         # we can only start indexing once our imported function_entries had their function_id adjusted to our DB
         minhashes_to_import = []
@@ -398,7 +415,8 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         storage = self.getStorage()
         sample_entry = storage.getSampleBySha256(smda_report.sha256)
         if sample_entry:
-            self._storage.updateFunctionLabels(smda_report, username)
+            # the sample may well be someone else's: its labels are held to what a rename could set
+            self._storage.updateFunctionLabels(smda_report, username, checked=True)
             return {"existed": True, "sample_info": sample_entry.toDict()}
         sample_entry = storage.addSmdaReport(smda_report)
         if not sample_entry:

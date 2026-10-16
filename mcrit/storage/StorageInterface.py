@@ -181,7 +181,7 @@ class StorageInterface:
         """
         raise NotImplementedError
 
-    def updateFunctionLabels(self, smda_report: "SmdaReport", username: str) -> Optional["SampleEntry"]:
+    def updateFunctionLabels(self, smda_report: "SmdaReport", username: str, checked: bool = False) -> Optional["SampleEntry"]:
         """Use a given SMDA report to update all non-dummy function labels for the SampleEntry matching its SHA256
         If no matching SampleEntry exists, no update happens.
         One name per function address is taken, the one the report gives: other names a linker folded
@@ -190,6 +190,8 @@ class StorageInterface:
         Args:
             smda_report: the SmdaReport to be used for updating function labels
             username: a username that allows tracking who submitted the labels
+            checked: hold each name to what PUT /functions/{id} accepts, for a report submitted for a
+                sample that exists already (see FunctionLabelEntry.labelFromReport)
 
         Returns:
             True if SampleEntry was found and potentially labels were added, False otherwise.
@@ -206,6 +208,14 @@ class StorageInterface:
 
         Returns:
             An adjusted SampleEntry if successful or None, if SampleEntry was already added.
+        """
+        raise NotImplementedError
+
+    def discardImportedSample(self, sample_entry: "SampleEntry") -> None:
+        """Undo importSampleEntry for an import that failed: the sample, the functions it got, and its family counters.
+
+        Args:
+            sample_entry: the entry importSampleEntry returned
         """
         raise NotImplementedError
 

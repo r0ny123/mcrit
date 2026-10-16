@@ -486,7 +486,7 @@ class MemoryStorage(StorageInterface):
         self._updateDbState()
         return True
 
-    def updateFunctionLabels(self, smda_report: "SmdaReport", username: str) -> Optional["SampleEntry"]:
+    def updateFunctionLabels(self, smda_report: "SmdaReport", username: str, checked: bool = False) -> Optional["SampleEntry"]:
         assert smda_report.sha256 is not None
         sample_entry = self.getSampleBySha256(smda_report.sha256)
         if not sample_entry:
@@ -494,9 +494,9 @@ class MemoryStorage(StorageInterface):
         # check which functions in the SmdaReport have suitable function_names
         extracted_labels = {}
         for smda_function in smda_report.getFunctions():
-            function_name = smda_function.function_name
-            if function_name and smda_function.offset is not None and not re.match("sub_[a-fA-F0-9]{1,16}", function_name):
-                extracted_labels[smda_function.offset] = function_name
+            label = FunctionLabelEntry.labelFromReport(smda_function.function_name, checked=checked)
+            if label is not None and smda_function.offset is not None:
+                extracted_labels[smda_function.offset] = label
         # get the respective FunctionEntries and check if the label is novel
         sample_function_entries = {entry.offset: entry for entry in self.getFunctionsBySampleId(sample_entry.sample_id) or []}
         for label_offset, extracted_label in extracted_labels.items():
@@ -548,9 +548,26 @@ class MemoryStorage(StorageInterface):
             self._samples[sample_id] = sample_entry
             self._sample_by_sha256[sample_entry.sha256] = sample_id
             self._updateFamilyStats(sample_entry.family_id, +1, sample_entry.statistics["num_functions"], int(sample_entry.is_library))
-        else:
-            LOGGER.warning("Sample %s already existed, skipping.", sample_entry.sha256)
-        return sample_entry
+            return sample_entry
+        # the entry still carries the id it had in the export, which here may well be another sample's
+        LOGGER.warning("Sample %s already existed, skipping.", sample_entry.sha256)
+        return None
+
+    def discardImportedSample(self, sample_entry: "SampleEntry") -> None:
+        sample_id = sample_entry.sample_id
+        stored = self._samples.get(sample_id)
+        # only the sample this entry was imported as, as MongoDbStorage does
+        if stored is None or stored.sha256 != sample_entry.sha256:
+            return
+        for function_id in self._sample_id_to_function_ids.pop(sample_id, []):
+            function_entry = self._functions.pop(function_id, None)
+            if function_entry is not None and function_entry.pichash:
+                self._pichashes.get(function_entry.pichash, set()).discard((function_entry.family_id, sample_id, function_id))
+        del self._samples[sample_id]
+        self._sample_by_sha256.pop(sample_entry.sha256, None)
+        # the mirror of importSampleEntry's increment; the family stays, as in MongoDbStorage
+        self._updateFamilyStats(sample_entry.family_id, -1, -sample_entry.statistics["num_functions"], -int(sample_entry.is_library))
+        self._updateDbState()
 
     def importFunctionEntry(self, function_entry: "FunctionEntry") -> Optional["FunctionEntry"]:
         function_entry.function_id = self._useCounter("functions")
