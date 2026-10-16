@@ -132,15 +132,28 @@ class FullSearchCursor:
             return AndNode([])
 
         # condition has form (a > a0) or (a = a0 and b>b0) or (a=a0 and b=b0 and c>c0)...
+        # A missing value (None) sorts before every other one, but no comparison with it holds, so
+        # "after None" is "not None", nothing is "before None", and "before a0" includes None. The
+        # last sort field is the id, which is never None.
         conditions = []
         for inner_condition_length in range(1, len(self.sort_fields) + 1):
             inner_condition: List[NodeType] = []
-            for i in range(inner_condition_length):
-                if i != inner_condition_length - 1:
-                    operator = "="
-                else:
-                    operator = get_operator(i)
-                inner_condition.append(SearchConditionNode(self.sort_fields[i], operator, self.record_values[i]))
+            for i in range(inner_condition_length - 1):
+                inner_condition.append(SearchConditionNode(self.sort_fields[i], "=", self.record_values[i]))
+            last = inner_condition_length - 1
+            field, value, operator = self.sort_fields[last], self.record_values[last], get_operator(last)
+            if value is None:
+                if operator == "<":
+                    continue
+                inner_condition.append(SearchConditionNode(field, "!=", None))
+            elif operator == "<" and last < len(self.sort_fields) - 1:
+                inner_condition.append(OrNode([SearchConditionNode(field, "<", value), SearchConditionNode(field, "=", None)]))
+            else:
+                inner_condition.append(SearchConditionNode(field, operator, value))
             conditions.append(AndNode(inner_condition))
 
+        if not conditions:
+            # only a cursor naming None for the id gets here, and no record comes after it; an
+            # empty OR would match everything on MongoDB, so ask for the id no record has
+            return SearchConditionNode(self.sort_fields[-1], "=", None)
         return OrNode(conditions)

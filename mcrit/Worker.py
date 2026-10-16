@@ -4,7 +4,7 @@ import hashlib
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -208,7 +208,9 @@ class Worker(QueueRemoteCallee):
         compact the collections they lived in (#68)."""
         now = datetime.now()
         delta = timedelta(seconds=self._storage_config.STORAGE_MONGODB_CLEANUP_TTL)
+        # the queue stamps jobs in local time, while smda stamps a sample in UTC
         time_cutoff = now - delta
+        sample_time_cutoff = datetime.now(UTC).replace(tzinfo=None) - delta
         LOGGER.info("Fetching data from the queues.")
         query_jobs = []
         for method in self.QUERY_JOB_METHODS:
@@ -225,7 +227,12 @@ class Worker(QueueRemoteCallee):
                 continue
             if sample_entry.sha256 not in samples_to_be_deleted:
                 samples_to_be_deleted[sample_entry.sha256] = []
-            if sample_entry.timestamp < time_cutoff:
+            # smda run in-process stamps an aware timestamp, which the memory backend keeps as is,
+            # while MongoDB stores the UTC wall time without the zone; compare it the way MongoDB keeps it
+            timestamp = sample_entry.timestamp
+            if timestamp.tzinfo is not None:
+                timestamp = timestamp.astimezone(UTC).replace(tzinfo=None)
+            if timestamp < sample_time_cutoff:
                 samples_to_be_deleted[sample_entry.sha256].append(sample_entry)
         for state, job in query_jobs:
             # a finished job is dated by when it finished, a failed one by when it last ran

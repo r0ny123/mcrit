@@ -149,6 +149,29 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   count no longer reaches zero while such samples are left. The fresh band index also gets its
   `(band_hash, df)` and `(band_hash, bucket)` indexes right away; they used to come back only with
   the next start.
+- **A sample submitted without a timestamp broke the sample listing on MongoDB.** smda reads an
+  empty `timestamp` as none, MCRIT stored it as null, and reading the sample back raised a
+  TypeError. From then on every route that read it answered 500, `GET /samples` and sample search
+  included. Such a sample now reads back with no timestamp.
+- **Sample search sorted by `timestamp` answered 500 whenever there was a next page**, on both
+  backends: the page's cursor held a datetime, which JSON can't encode. The cursor now holds the
+  timestamp as it's stored. Paging through samples without a timestamp also stopped at the last of
+  them, since nothing compares greater than a missing value; the cursor now steps past them, and
+  over them backwards and in descending order.
+- **On the memory backend, sorting samples by `timestamp` failed when a store mixed time-zone-aware
+  and naive timestamps**, as it does when smda runs in the same process. It now sorts them as the
+  text MongoDB stores, which leaves out the time zone, so both backends order them the same way.
+  The query cleanup job raised a TypeError on such a query sample in the same way; it now compares
+  the timestamp without its time zone too. Past that, it still couldn't delete a stale query sample
+  on the memory backend, which looked for the sample's functions among the regular ones and raised
+  a KeyError; it now deletes the query sample and its functions.
+- **The query cleanup job aged query samples by the server's local time**, while smda stamps them
+  in UTC. On a server east of UTC a query sample was deleted early by the offset, and west of UTC
+  it was kept that much longer. Query samples are now compared with a cutoff in UTC; query jobs,
+  which the queue stamps in local time, keep a local one. The schedule that starts the cleanup had
+  the same offset, since the storage records the last cleanup in UTC, and now reads it as UTC too.
+- **`sort_by=function_id` on sample search is refused with a 400.** Samples have no function id:
+  MongoDB sorted every sample as null, and the memory backend answered 500 from the second page on.
 
 ## [1.15.0] - 2026-10-12
 

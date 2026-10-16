@@ -23,7 +23,7 @@ from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache, StorageBackedMatchingCache
-from mcrit.storage.SampleEntry import SampleEntry
+from mcrit.storage.SampleEntry import TIMESTAMP_FORMAT, SampleEntry
 from mcrit.storage.StorageInterface import BinaryStream, StorageInterface
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -113,9 +113,17 @@ class MemorySearchTranspiler(BaseVisitor):
         compared: Any = node.numericValue() if node.isNumeric() else value
 
         chosen_operator = string_to_operator[node.operator]
+        is_ordering = node.operator in ("<", "<=", ">", ">=")
 
         def compare(entry):
-            return chosen_operator(_get_field(entry, node.field), compared)
+            entry_value = _get_field(entry, node.field)
+            if isinstance(entry_value, datetime.datetime):
+                # compared as stored in MongoDB: as text, which orders like the datetime
+                entry_value = entry_value.strftime(TIMESTAMP_FORMAT)
+            if is_ordering and (entry_value is None or compared is None):
+                # nothing orders against a missing value, as in MongoDB
+                return False
+            return chosen_operator(entry_value, compared)
 
         return compare
 
@@ -197,10 +205,11 @@ class MemoryStorage(StorageInterface):
             return False
         function_ids = self._sample_id_to_function_ids[sample_id]
         if sample_id < 0:
+            # a query sample and its functions are kept apart from the regular ones
             for function_id in function_ids:
-                del self._functions[function_id]
+                del self._query_functions[function_id]
             del self._sample_id_to_function_ids[sample_id]
-            del self._samples[sample_id]
+            del self._query_samples[sample_id]
             return True
         for function_id in function_ids:
             function_entry = self._functions[function_id]
@@ -1225,9 +1234,14 @@ class MemoryStorage(StorageInterface):
     def _get_sort_key_from_cursor(full_cursor: Optional[FullSearchCursor]):
         assert full_cursor is not None
 
-        # Mapping entry -> tuple to sort by
+        # Mapping entry -> tuple to sort by; a datetime is sorted as the text MongoDB stores, which
+        # also leaves out its time zone, so naive and aware timestamps sort together
+        def get_value(entry, field):
+            value = _get_field(entry, field)
+            return value.strftime(TIMESTAMP_FORMAT) if isinstance(value, datetime.datetime) else value
+
         def get_tuple_from_entry(entry):
-            return tuple(_get_field(entry, field) for field in full_cursor.sort_fields)
+            return tuple(get_value(entry, field) for field in full_cursor.sort_fields)
 
         # custom tuple compare function considering sort direction per dimension
         is_backward_search = not full_cursor.is_forward_search
@@ -1239,7 +1253,7 @@ class MemoryStorage(StorageInterface):
                 val1 = tuple1[i]
                 val2 = tuple2[i]
                 if val1 == val2:
-                    pass
+                    continue
                 if val1 is None:
                     return -direction
                 if val2 is None:

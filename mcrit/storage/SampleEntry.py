@@ -3,6 +3,9 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 from mcrit.libs.utility import decode_two_complement, encode_two_complement
 
+# how a sample's timestamp is stored and sent; its text order is the chronological order
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H-%M-%S"
+
 if TYPE_CHECKING:  # pragma: no cover
     from smda.common.SmdaReport import SmdaReport
 
@@ -75,7 +78,7 @@ class SampleEntry:
             "sha256": self.sha256,
             "smda_version": self.smda_version,
             "statistics": self.statistics,
-            "timestamp": self.timestamp.strftime("%Y-%m-%dT%H-%M-%S") if self.timestamp is not None else None,
+            "timestamp": self.timestamp.strftime(TIMESTAMP_FORMAT) if self.timestamp is not None else None,
             "version": self.version,
         }
         return sample_entry
@@ -98,7 +101,9 @@ class SampleEntry:
         sample_entry.sha256 = entry_dict["sha256"]
         sample_entry.smda_version = entry_dict["smda_version"]
         sample_entry.statistics = entry_dict["statistics"]
-        sample_entry.timestamp = datetime.datetime.strptime(entry_dict["timestamp"], "%Y-%m-%dT%H-%M-%S")
+        # a report submitted with an empty timestamp is stored with none
+        timestamp = entry_dict["timestamp"]
+        sample_entry.timestamp = datetime.datetime.strptime(timestamp, TIMESTAMP_FORMAT) if timestamp is not None else None
         return sample_entry
 
     def __str__(self):
