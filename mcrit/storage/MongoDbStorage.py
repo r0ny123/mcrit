@@ -149,6 +149,10 @@ class MongoSearchTranspiler(BaseVisitor):
                     # conditions follow that order, which is the order MongoDB sorts offsets in
                     raise ValueError("Range operators on 'offset' are only supported below 2**63.")
                 value = encode_two_complement(value)
+        elif isinstance(value, int) and not isinstance(value, bool) and not -(2**63) <= value < 2**63:
+            # a search cursor may carry up to 2**64 for an offset, and that much reaches a text field's
+            # condition too when a client crafts one; pymongo would raise OverflowError, a 500
+            raise ValueError(f"The value for '{node.field}' does not fit into 64 bits.")
         mongo_operator = operator_to_mongo[node.operator]
         if node.field == "pichash" and mongo_operator in ("$lt", "$lte", "$gt", "$gte"):
             # pichashes are stored as hex strings, on which range comparisons are not meaningful

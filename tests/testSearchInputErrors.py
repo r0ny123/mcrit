@@ -17,6 +17,7 @@ import pytest
 from smda.common.SmdaReport import SmdaReport
 
 from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.index.SearchCursor import MinimalSearchCursor
 from mcrit.server.StatusResource import StatusResource
 
 from .context import config
@@ -115,6 +116,17 @@ class SearchInputErrorsMixin(unittest.TestCase):
         second = self.client.simulate_get("/search/functions", params={"query": "", "limit": "1", "sort_by": "offset", "is_ascending": "false", "cursor": cursor})
         self.assertEqual(falcon.HTTP_200, second.status)
         self.assertNotEqual(list(first.json["data"]["search_results"]), list(second.json["data"]["search_results"]))
+
+    def test_a_cursor_number_beyond_63_bits_on_a_text_field_is_a_400(self):
+        """A cursor may hold up to 2**64 for a kernel-space offset; on a text sort field MongoDB can't
+        encode that and answered 500."""
+        for kind, sort_by in (("families", "family_name"), ("samples", "filename"), ("functions", "function_name")):
+            for value in (2**63, 2**64 - 1):
+                cursor = MinimalSearchCursor()
+                cursor.record_values = [value, 1]
+                with self.subTest(kind=kind, value=value):
+                    response = self.client.simulate_get(f"/search/{kind}", params={"query": "", "sort_by": sort_by, "cursor": cursor.toStr()})
+                    self.assertEqual(falcon.HTTP_400, response.status)
 
     def test_offset_ranges_above_2_63_are_refused_on_mongodb_only(self):
         """MongoDB keeps such an offset as a negative number, which a range over it can't reach."""
