@@ -206,15 +206,17 @@ class StatusResource:
         return result
 
     def _respond_search(self, req, resp, search_method, endpoint):
-        args = self._get_search_args(req.params)
         try:
+            args = self._get_search_args(req.params)
             search_results = search_method(**args)
         except ValueError as unsupported_search:
             # a field/operator combination the backend cannot serve (e.g. a range comparison on
-            # pichash) is a client error - it used to leave the responder as a 500 with a traceback
-            resp.data = jsonify({"status": "failed", "data": {"message": str(unsupported_search)}})
+            # pichash), a value the field can't hold, or a query the parser can't take apart is a
+            # client error - it used to leave the responder as a 500 with a traceback
+            message = str(unsupported_search)
+            resp.data = jsonify({"status": "failed", "data": {"message": message}})
             resp.status = falcon.HTTP_400
-            db_log_msg(self.index, req, f"StatusResource.{endpoint} - failed - {unsupported_search}")
+            db_log_msg(self.index, req, f"StatusResource.{endpoint} - failed - {message}")
             return
         resp.data = jsonify({"status": "successful", "data": search_results})
         db_log_msg(self.index, req, f"StatusResource.{endpoint} - success.")
