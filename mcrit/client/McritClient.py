@@ -12,6 +12,7 @@ from smda.Disassembler import Disassembler
 from mcrit.queue.LocalQueue import Job
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
+from mcrit.storage.RebuiltSmdaReport import RebuiltSmdaReport
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.SearchResult import SearchResult
 
@@ -182,7 +183,29 @@ def handle_response(response, raise_client_errors=False, raise_server_errors=Fal
 DEFAULT_TIMEOUT = (10, None)
 
 
+class _McritSession(requests.Session):
+    """A session that keeps the token and request bodies to the server they were meant for.
+
+    requests drops an Authorization header when a redirect leads to another host, but not the
+    `apitoken` header MCRIT uses, and on a 307 or 308 it sends the body along, a sample binary or
+    report included. A redirect to another origin now gets neither; a redirect within the
+    server's own origin, or from http to https on the same host, keeps both, as before.
+    """
+
+    def rebuild_auth(self, prepared_request, response):
+        super().rebuild_auth(prepared_request, response)
+        if self.should_strip_auth(response.request.url, prepared_request.url):
+            prepared_request.headers.pop("apitoken", None)
+            if prepared_request.body is not None:
+                prepared_request.body = None
+                for header in ("Content-Length", "Content-Type", "Transfer-Encoding"):
+                    prepared_request.headers.pop(header, None)
+
+
 class McritClient:
+    # the most function ids one POST /functions is asked for; the server refuses more
+    MAX_FUNCTION_IDS_PER_REQUEST = 10000
+
     def __init__(self, mcrit_server=None, apitoken=None, username=None, raw_responses=False, raise_client_errors=False, raise_server_errors=False, timeout=DEFAULT_TIMEOUT):
         """
         raw_responses: every method answers the requests.Response itself.
@@ -198,7 +221,7 @@ class McritClient:
         self.raise_server_errors = raise_server_errors
         self.timeout = timeout
         # one session keeps connections open; a new TLS handshake per request costs most of a second
-        self._session = requests.Session()
+        self._session = _McritSession()
         if apitoken:
             self.headers.update({"apitoken": apitoken})
         if username:
@@ -520,12 +543,44 @@ class McritClient:
         if data is not None:
             return SampleEntry.fromDict(data)
 
+    # requests for GET /samples/{id}/smda in all, while the server answers 503 because it is rebuilding another report
+    SMDA_REBUILD_ATTEMPTS = 3
+
+    def getSmdaReportForSample(self, sample_id):
+        """
+        The SMDA report the sample was submitted as, rebuilt from what the server stores (#94), as a
+        RebuiltSmdaReport: `.smda_report`, plus `.complete` / `.incomplete_reasons` /
+        `.num_functions_without_disassembly` for what could not be rebuilt. None for an unknown sample.
+        A server rebuilds one report at a time and answers 503 meanwhile; that is retried after its
+        Retry-After, up to SMDA_REBUILD_ATTEMPTS requests in all, before it is handled like any other answer
+        """
+        for attempt in range(self.SMDA_REBUILD_ATTEMPTS):
+            response = self._session.get(f"{self.mcrit_server}/samples/{sample_id}/smda", headers=self.headers, timeout=self.timeout)
+            if response.status_code != 503 or attempt == self.SMDA_REBUILD_ATTEMPTS - 1:
+                break
+            try:
+                delay = float(response.headers.get("Retry-After", 5))
+            except ValueError:
+                delay = 5
+            # time.sleep refuses a negative or nan delay, which a misbehaving proxy could send
+            if not delay >= 0:
+                delay = 5
+            delay = min(delay, 30)
+            LOGGER.warning("MCRIT is rebuilding another SMDA report, retrying sample %s in %s s.", sample_id, delay)
+            time.sleep(delay)
+        if self.raw:
+            return response
+        data = self._handle(response)
+        if data is None:
+            return None
+        return RebuiltSmdaReport.fromDict(data)
+
     def getSampleBinary(self, sample_id):
         """
         The raw binary the sample was submitted as, when the server keeps them (STORAGE_KEEP_SUBMITTED_BINARIES) and serves them (STORAGE_SERVE_SUBMITTED_BINARIES); None otherwise
         None does not tell those cases apart: a server not serving binaries answers 403, which is also what a missing or invalid token gets; raise_client_errors raises McritUnauthorized or McritNotFound instead, and raw mode hands back the response to look at
         """
-        response = requests.get(f"{self.mcrit_server}/samples/{sample_id}/binary", headers=self.headers, timeout=self.timeout)
+        response = self._session.get(f"{self.mcrit_server}/samples/{sample_id}/binary", headers=self.headers, timeout=self.timeout)
         if self.raw:
             return response
         if response.status_code != 200:
@@ -583,7 +638,7 @@ class McritClient:
 
     def getFunctions(self, start=0, limit=0):
         """
-        Get a all FunctionEntries, optionally from sample_id <start> and up to <limit> many
+        Get FunctionEntries, optionally from position <start> in the function collection and up to <limit> many (0 = as many as the server answers at once, 1000)
         Supported by mcritweb API pass-through
         """
         query_string = ""
@@ -602,14 +657,22 @@ class McritClient:
         Supported by mcritweb API pass-through
         """
         query_with_label_only = "?with_label_only=True" if with_label_only else ""
-        function_id_string = ",".join(["%d" % fid for fid in function_ids])
-        response = self._session.post(f"{self.mcrit_server}/functions{query_with_label_only}", data=function_id_string, headers=self.headers, timeout=self.timeout)
         if self.raw:
-            return response
-        data = self._handle(response)
-        if data is not None:
-            return {int(k): FunctionEntry.fromDict(v) for k, v in data.items()}
-        return {}
+            # the response itself is the answer, so all ids go in one request, as the caller sent them
+            function_id_string = ",".join(["%d" % fid for fid in function_ids])
+            return self._session.post(f"{self.mcrit_server}/functions{query_with_label_only}", data=function_id_string, headers=self.headers, timeout=self.timeout)
+        # the server answers at most MAX_FUNCTION_IDS_PER_REQUEST ids at a time, so ask in chunks
+        distinct_ids = list(dict.fromkeys(function_ids))
+        result = {}
+        for chunk_start in range(0, max(len(distinct_ids), 1), self.MAX_FUNCTION_IDS_PER_REQUEST):
+            function_id_string = ",".join(["%d" % fid for fid in distinct_ids[chunk_start : chunk_start + self.MAX_FUNCTION_IDS_PER_REQUEST]])
+            response = self._session.post(f"{self.mcrit_server}/functions{query_with_label_only}", data=function_id_string, headers=self.headers, timeout=self.timeout)
+            data = self._handle(response)
+            if data is None:
+                # a failed chunk fails the call, as a failed request always did, rather than answering part of the ids
+                return {}
+            result.update({int(k): FunctionEntry.fromDict(v) for k, v in data.items()})
+        return result
 
     def isFunctionId(self, function_id):
         """
