@@ -85,10 +85,21 @@ class MongoDbStorageDeleteSampleTest(TestCase):
                 {"sample_id": 8, "first_function_id": 12, "last_function_id": 20},
             ]
         )
+        # and the SMDA report's extras, kept apart from the sample document (#94)
+        smda_extras = FakeCollection([{"sample_id": 7, "chunk": 0}])
         setattr(
             self.storage,
             "_database",
-            FakeDb(functions=functions, samples=samples, families=families, xcfg=xcfg, query_xcfg=query_xcfg, settings=settings, function_ranges=function_ranges),
+            FakeDb(
+                functions=functions,
+                samples=samples,
+                families=families,
+                xcfg=xcfg,
+                query_xcfg=query_xcfg,
+                smda_extras=smda_extras,
+                settings=settings,
+                function_ranges=function_ranges,
+            ),
         )
         setattr(
             self.storage,
@@ -152,6 +163,7 @@ class MongoDbStorageDeleteSampleTest(TestCase):
         self.assertEqual([{"sample_id": 7}], function_ranges.delete_many_calls)
         self.assertEqual([8], [document["sample_id"] for document in function_ranges.documents])
         self.assertEqual([{"sample_id": 7}], samples.delete_one_calls)
+        self.assertEqual([{"sample_id": 7}], smda_extras.delete_many_calls)
         self.assertEqual([7], deleted_binaries)
         # decremented by what was deleted (two function documents, one sample), and the family
         # deleted because no sample references it any more (#151)

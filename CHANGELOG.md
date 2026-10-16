@@ -249,6 +249,30 @@ and every new setting is off by default.
   to answer a yes/no question; it uses `hasSampleBinary()` now, which reads one metadata
   document. `getSampleBinary()` is unchanged for callers that want the bytes.
 
+- **`GET /samples/{id}/smda` and `McritClient.getSmdaReportForSample` rebuild a sample's SMDA
+  report from storage.** The report's top-level fields and metadata that `SampleEntry` holds no
+  field for - including smda's whole-binary `xdata_refs_from`/`xdata_refs_to` and `xmetadata` -
+  are kept in new `smda_extras`/`query_smda_extras` collections keyed by sample id, never in the
+  sample document: `SampleEntry.toDict()` is what `/samples`, job results and exports carry, and
+  those extras grow with the binary. They are stored as a JSON blob split into documents of at
+  most 8 MiB, so a report past the 16 MiB document limit still stores (a 25 MB test report takes
+  4 documents, its sample document stays under 1 KB). The disassembly comes from the functions'
+  `xcfg` blobs in one batched fetch, and the example report round-trips byte for byte. smda's
+  `buffer`, the analysed binary itself in a report made with `STORE_BUFFER`, is never kept, so this
+  route can't hand out a binary that `STORAGE_SERVE_SUBMITTED_BINARIES` keeps back. The
+  response is `{"smda_report", "complete", "incomplete_reasons",
+  "num_functions_without_disassembly"}`: `extras_missing` flags a sample stored before this (its
+  extras fall back to an empty report's defaults), `disassembly_missing` counts functions without
+  stored `xcfg` (`STORAGE_DROP_DISASSEMBLY`, or a blob over the limit), which are absent from the
+  rebuilt report. NOTE that exports do not carry the extras, so an imported sample rebuilds as
+  `extras_missing`; deleting a sample, its family or a query sample (also by the query cleanup)
+  deletes its extras, `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP` compacts `query_smda_extras` too,
+  and `STORAGE_DROP_DISASSEMBLY` keeps them ([#94]). Rebuilding a large sample's report takes
+  seconds and hundreds of MiB in the request thread, so a server process runs one rebuild at a
+  time; a request that arrives during one answers 503 with `Retry-After` instead of tying up
+  another thread. `getSmdaReportForSample` waits that long (at most 30 s, and 5 s for a value that
+  isn't a usable number of seconds) and asks again, three requests in all.
+
 ### Changed
 
 - `McritClient` sends all requests through one `requests.Session`, so consecutive calls reuse a
@@ -377,6 +401,10 @@ and every new setting is off by default.
   (with `raw_responses` it still sends one request, and the server's answer is returned as it is).
   Behaviour change: a caller that relied on either listing to return every entry receives the
   first 1,000, and one that posts ids to `/functions` itself can send at most 10,000 per request; a `McritClient` from an earlier release sends all ids in one request and gets `{}` back for more than that.
+- **`MemoryStorage` deletes query samples and families with samples again.** Deleting a query
+  sample raised `KeyError` (it looked in the corpus dicts), and `deleteFamily` removed the family
+  before its samples, so the first sample's count update failed its assertion. MongoDB was not
+  affected ([#94]).
 
 ## [1.14.0] - 2026-10-09
 
@@ -1457,6 +1485,7 @@ date, the version, and what changed.
 [#42]: https://github.com/danielplohmann/mcrit/issues/42
 [#207]: https://github.com/danielplohmann/mcrit/issues/207
 [#210]: https://github.com/danielplohmann/mcrit/issues/210
+[#94]: https://github.com/danielplohmann/mcrit/issues/94
 [#241]: https://github.com/danielplohmann/mcrit/issues/241
 [#93]: https://github.com/danielplohmann/mcrit/issues/93
 [#196]: https://github.com/danielplohmann/mcrit/pull/196
