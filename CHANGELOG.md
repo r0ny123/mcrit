@@ -15,6 +15,42 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /samples/{id}/smda` and `McritClient.getSmdaReportForSample` rebuild a sample's SMDA
+  report from storage.** The report's top-level fields and metadata that `SampleEntry` holds no
+  field for - including smda's whole-binary `xdata_refs_from`/`xdata_refs_to` and `xmetadata` -
+  are kept in new `smda_extras`/`query_smda_extras` collections keyed by sample id, never in the
+  sample document: `SampleEntry.toDict()` is what `/samples`, job results and exports carry, and
+  those extras grow with the binary. They are stored as a JSON blob split into documents of at
+  most 8 MiB, so a report past the 16 MiB document limit still stores (a 25 MB test report takes
+  4 documents, its sample document stays under 1 KB). The disassembly comes from the functions'
+  `xcfg` blobs in one batched fetch, and the example report round-trips byte for byte. smda's
+  `buffer`, the analysed binary itself in a report made with `STORE_BUFFER`, is never kept, so this
+  route can't hand out a binary that `STORAGE_SERVE_SUBMITTED_BINARIES` keeps back. The
+  response is `{"smda_report", "complete", "incomplete_reasons",
+  "num_functions_without_disassembly"}`: `extras_missing` flags a sample stored before this (its
+  extras fall back to an empty report's defaults), `disassembly_missing` counts functions without
+  stored `xcfg` (`STORAGE_DROP_DISASSEMBLY`, or a blob over the limit), which are absent from the
+  rebuilt report. NOTE that exports do not carry the extras, so an imported sample rebuilds as
+  `extras_missing`; deleting a sample, its family or a query sample (also by the query cleanup)
+  deletes its extras, `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP` compacts `query_smda_extras` too,
+  and `STORAGE_DROP_DISASSEMBLY` keeps them ([#94]). Rebuilding a large sample's report takes
+  seconds and hundreds of MiB in the request thread, so a server process runs one rebuild at a
+  time; a request that arrives during one answers 503 with `Retry-After` instead of tying up
+  another thread. `getSmdaReportForSample` waits that long (at most 30 s, and 5 s for a value that
+  isn't a usable number of seconds) and asks again, three requests in all.
+
+### Changed
+
+- Every start creates the `(_pichash, df)` index on `pichash_counts` and the `sample_id` and
+  `first_function_id` indexes on `function_ranges`, the specs their rebuilds create ([#261]). Only
+  the rebuilds created them before, so a database that started empty, and so never needed a
+  rebuild, had neither: the upserts of every add, the cutoff's count lookups and the deletes above
+  each scanned the collection. Since `clearStorage` now drops both collections, that would also
+  have been the state after every respawn. Where a rebuild already ran they exist, and nothing
+  changes.
+
 ### Fixed
 
 - **Deleting a sample left it in the pichash counts and the function-range index** ([#261]).
@@ -38,7 +74,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   decrements once. The field is new in the stored data shape and normally lasts only as long as
   the delete, as the sample document is removed with it; a delete that fails partway leaves it on
   the sample until a retry completes the delete.
-
 - **`recalculatePicHashes` left the pichash counts keyed by the old hashes** ([#261]). It rewrites
   `_pichash` in place and marked the picblockhash index incomplete, but not the counts, which went
   on counting hashes the functions no longer carry and missed the new ones. Under
@@ -50,16 +85,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   until then the cutoff counts from the functions collection, which is correct but pays the cost
   the counts exist to avoid, and adds and deletes leave the counts alone. A run that changes no
   pichash leaves them complete.
-
-### Changed
-
-- Every start creates the `(_pichash, df)` index on `pichash_counts` and the `sample_id` and
-  `first_function_id` indexes on `function_ranges`, the specs their rebuilds create ([#261]). Only
-  the rebuilds created them before, so a database that started empty, and so never needed a
-  rebuild, had neither: the upserts of every add, the cutoff's count lookups and the deletes above
-  each scanned the collection. Since `clearStorage` now drops both collections, that would also
-  have been the state after every respawn. Where a rebuild already ran they exist, and nothing
-  changes.
 - **`McritClient` sent its token and request bodies wherever a redirect pointed.** requests drops
   an `Authorization` header when a redirect leads to another host, but not the `apitoken` header
   MCRIT uses, and on a 307 or 308 it sends the body again, so a redirect from the server, or from
@@ -172,6 +197,51 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   the same offset, since the storage records the last cleanup in UTC, and now reads it as UTC too.
 - **`sort_by=function_id` on sample search is refused with a 400.** Samples have no function id:
   MongoDB sorted every sample as null, and the memory backend answered 500 from the second page on.
+- **`MemoryStorage` deletes query samples and families with samples again.** Deleting a query
+  sample raised `KeyError` (it looked in the corpus dicts), and `deleteFamily` removed the family
+  before its samples, so the first sample's count update failed its assertion. MongoDB was not
+  affected ([#94]).
+
+### Security
+
+- **A search cursor's values reached MongoDB as query operators.** `GET
+  /search/{families,samples,functions}` decoded the `cursor` it hands out and put its values into
+  the query unchecked, so a JSON object there became an operator on the sort field (for example
+  `$regex` on `sort_by=function_name`), evaluated by mongod against every entry. A cursor has to be
+  `[[value, ...], 0 or 1]` now, with one string, number (up to 8 bytes), boolean or null per sort
+  field; anything else is answered 400, as is a cursor with a different number of values than the
+  sort has fields. Cursors the server issues name the sort fields and directions they belong to, and
+  one replayed under another sort field or direction is answered 400 on both storages (before, it
+  gave an arbitrary page on both, or a 500 in memory when the values could not be compared).
+  Cursors an older server issued carry no sort and are accepted as before, checked by the number of
+  values only. The MongoDB scans of a search now have a time limit,
+  `STORAGE_MONGODB_SEARCH_MAX_TIME_MS` (30 s, 0 = none); the lookups of a single id or sha256 do
+  not. A search that runs out is answered 400 with the advice to narrow the search term.
+- **A search query with a few unbalanced parentheses held a server thread for minutes.** The query
+  grammar retried alternatives that began with the same operand, so every nesting level multiplied
+  the work: `((((((a` took about 50 s on `GET /search/families` before it was answered 400, and a
+  handful of such requests occupied every server thread. AND and OR chains are loops now, a NOT
+  whose operand fails is no longer re-read as a search term, and a quoted term no longer matches an
+  escaped quote two ways (an unterminated `"\"\"\"...` cost 2^n steps). Queries parse to the same
+  trees as before, in milliseconds for ordinary queries; the slowest shapes at the new
+  16,384-character limit take about 1.3 s. A query longer than that, or nested deeper than the
+  stack allows (about 47 levels of parentheses, 33 of `(NOT `), is answered 400 instead of 500. A
+  chain of terms used to run out of stack at about 75 terms (implicit AND) or 105 (AND, OR); now
+  chains up to the length limit parse (about 220 OR'd `sha256:` terms, where main stopped at about
+  105). Behaviour change: a query over 16,384 characters is refused even where main answered it,
+  for instance a single very long term. Note that `"a\\\"b"` searches for `a\"b` now; the
+  escaped quote used to be unescaped a second time, into `a"b`.
+- **`GET /functions` loaded the whole corpus, disassembly included, into the server process.**
+  Without `limit` (and `McritClient.getFunctions()` sends 0) every function was read and serialised
+  in one response, about ten times its stored size, and `GET /search/{families,samples,functions}`
+  did the same with `limit=-1` or a very large `limit`. Both answer at most 1,000 entries per
+  request now; page with `start` (a position in the function collection, not a function id) or the
+  `cursor`. `POST /functions` looks each id up once, in one query per collection, and answers 400 for
+  more than 10,000 ids; `McritClient.getFunctionsByIds` sends its ids in requests of at most that
+  many and merges the answers, so it works with any number of ids against old and new servers
+  (with `raw_responses` it still sends one request, and the server's answer is returned as it is).
+  Behaviour change: a caller that relied on either listing to return every entry receives the
+  first 1,000, and one that posts ids to `/functions` itself can send at most 10,000 per request; a `McritClient` from an earlier release sends all ids in one request and gets `{}` back for more than that.
 
 ## [1.15.0] - 2026-10-12
 
@@ -248,30 +318,6 @@ and every new setting is off by default.
   `Worker.addBinarySample` used `getSampleBinary(...) is None` and so streamed the whole file
   to answer a yes/no question; it uses `hasSampleBinary()` now, which reads one metadata
   document. `getSampleBinary()` is unchanged for callers that want the bytes.
-
-- **`GET /samples/{id}/smda` and `McritClient.getSmdaReportForSample` rebuild a sample's SMDA
-  report from storage.** The report's top-level fields and metadata that `SampleEntry` holds no
-  field for - including smda's whole-binary `xdata_refs_from`/`xdata_refs_to` and `xmetadata` -
-  are kept in new `smda_extras`/`query_smda_extras` collections keyed by sample id, never in the
-  sample document: `SampleEntry.toDict()` is what `/samples`, job results and exports carry, and
-  those extras grow with the binary. They are stored as a JSON blob split into documents of at
-  most 8 MiB, so a report past the 16 MiB document limit still stores (a 25 MB test report takes
-  4 documents, its sample document stays under 1 KB). The disassembly comes from the functions'
-  `xcfg` blobs in one batched fetch, and the example report round-trips byte for byte. smda's
-  `buffer`, the analysed binary itself in a report made with `STORE_BUFFER`, is never kept, so this
-  route can't hand out a binary that `STORAGE_SERVE_SUBMITTED_BINARIES` keeps back. The
-  response is `{"smda_report", "complete", "incomplete_reasons",
-  "num_functions_without_disassembly"}`: `extras_missing` flags a sample stored before this (its
-  extras fall back to an empty report's defaults), `disassembly_missing` counts functions without
-  stored `xcfg` (`STORAGE_DROP_DISASSEMBLY`, or a blob over the limit), which are absent from the
-  rebuilt report. NOTE that exports do not carry the extras, so an imported sample rebuilds as
-  `extras_missing`; deleting a sample, its family or a query sample (also by the query cleanup)
-  deletes its extras, `STORAGE_MONGODB_COMPACT_AFTER_CLEANUP` compacts `query_smda_extras` too,
-  and `STORAGE_DROP_DISASSEMBLY` keeps them ([#94]). Rebuilding a large sample's report takes
-  seconds and hundreds of MiB in the request thread, so a server process runs one rebuild at a
-  time; a request that arrives during one answers 503 with `Retry-After` instead of tying up
-  another thread. `getSmdaReportForSample` waits that long (at most 30 s, and 5 s for a value that
-  isn't a usable number of seconds) and asks again, three requests in all.
 
 ### Changed
 
@@ -358,53 +404,6 @@ and every new setting is off by default.
   inserted at once that finished out of order had the disassembly of the one still writing its
   functions deleted under it. Query samples written before this release have no count and hold
   the disassembly judgment back until the last of them has expired.
-
-### Security
-
-- **A search cursor's values reached MongoDB as query operators.** `GET
-  /search/{families,samples,functions}` decoded the `cursor` it hands out and put its values into
-  the query unchecked, so a JSON object there became an operator on the sort field (for example
-  `$regex` on `sort_by=function_name`), evaluated by mongod against every entry. A cursor has to be
-  `[[value, ...], 0 or 1]` now, with one string, number (up to 8 bytes), boolean or null per sort
-  field; anything else is answered 400, as is a cursor with a different number of values than the
-  sort has fields. Cursors the server issues name the sort fields and directions they belong to, and
-  one replayed under another sort field or direction is answered 400 on both storages (before, it
-  gave an arbitrary page on both, or a 500 in memory when the values could not be compared).
-  Cursors an older server issued carry no sort and are accepted as before, checked by the number of
-  values only. The MongoDB scans of a search now have a time limit,
-  `STORAGE_MONGODB_SEARCH_MAX_TIME_MS` (30 s, 0 = none); the lookups of a single id or sha256 do
-  not. A search that runs out is answered 400 with the advice to narrow the search term.
-
-- **A search query with a few unbalanced parentheses held a server thread for minutes.** The query
-  grammar retried alternatives that began with the same operand, so every nesting level multiplied
-  the work: `((((((a` took about 50 s on `GET /search/families` before it was answered 400, and a
-  handful of such requests occupied every server thread. AND and OR chains are loops now, a NOT
-  whose operand fails is no longer re-read as a search term, and a quoted term no longer matches an
-  escaped quote two ways (an unterminated `"\"\"\"...` cost 2^n steps). Queries parse to the same
-  trees as before, in milliseconds for ordinary queries; the slowest shapes at the new
-  16,384-character limit take about 1.3 s. A query longer than that, or nested deeper than the
-  stack allows (about 47 levels of parentheses, 33 of `(NOT `), is answered 400 instead of 500. A
-  chain of terms used to run out of stack at about 75 terms (implicit AND) or 105 (AND, OR); now
-  chains up to the length limit parse (about 220 OR'd `sha256:` terms, where main stopped at about
-  105). Behaviour change: a query over 16,384 characters is refused even where main answered it,
-  for instance a single very long term. Note that `"a\\\"b"` searches for `a\"b` now; the
-  escaped quote used to be unescaped a second time, into `a"b`.
-
-- **`GET /functions` loaded the whole corpus, disassembly included, into the server process.**
-  Without `limit` (and `McritClient.getFunctions()` sends 0) every function was read and serialised
-  in one response, about ten times its stored size, and `GET /search/{families,samples,functions}`
-  did the same with `limit=-1` or a very large `limit`. Both answer at most 1,000 entries per
-  request now; page with `start` (a position in the function collection, not a function id) or the
-  `cursor`. `POST /functions` looks each id up once, in one query per collection, and answers 400 for
-  more than 10,000 ids; `McritClient.getFunctionsByIds` sends its ids in requests of at most that
-  many and merges the answers, so it works with any number of ids against old and new servers
-  (with `raw_responses` it still sends one request, and the server's answer is returned as it is).
-  Behaviour change: a caller that relied on either listing to return every entry receives the
-  first 1,000, and one that posts ids to `/functions` itself can send at most 10,000 per request; a `McritClient` from an earlier release sends all ids in one request and gets `{}` back for more than that.
-- **`MemoryStorage` deletes query samples and families with samples again.** Deleting a query
-  sample raised `KeyError` (it looked in the corpus dicts), and `deleteFamily` removed the family
-  before its samples, so the first sample's count update failed its assertion. MongoDB was not
-  affected ([#94]).
 
 ## [1.14.0] - 2026-10-09
 
