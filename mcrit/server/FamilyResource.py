@@ -4,6 +4,7 @@ import falcon
 
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.server.utils import db_log_msg, get_username, jsonify, timing
+from mcrit.storage.FamilyEntry import FamilyEntry
 
 
 class FamilyResource:
@@ -12,6 +13,7 @@ class FamilyResource:
 
     @timing
     def on_get(self, req, resp, family_id=None):
+        """One family by id, with its samples unless ``with_samples=false``. Unknown ids answer 404."""
         # parse optional request parameters
         with_samples = True
         if "with_samples" in req.params:
@@ -39,6 +41,7 @@ class FamilyResource:
 
     @timing
     def on_post_by_ids(self, req, resp):
+        """The families with the comma-separated ids in the body, keyed by family id, without their sample lists; ids that are not found are left out."""
         if not req.content_length:
             resp.data = jsonify(
                 {
@@ -64,6 +67,7 @@ class FamilyResource:
 
     @timing
     def on_put(self, req, resp, family_id=None):
+        """Modify a family; JSON body with ``family_name`` (alphanumeric, dots, dashes, underscores) and/or ``is_library``. Answers 202 on success, 400 for a malformed body."""
         resp.status = falcon.HTTP_400
         if not req.content_length or not isinstance(req.media, dict):
             resp.data = jsonify({"status": "failed", "data": {"message": "PUT request without body can't be processed."}})
@@ -83,6 +87,17 @@ class FamilyResource:
                 information_update["is_library"] = True
             elif information_update["is_library"] in ["False", "false", "0", 0]:
                 information_update["is_library"] = False
+        if "actors" in information_update:
+            actors = information_update["actors"]
+            if isinstance(actors, str):
+                actors = [actor for actor in actors.split(",")]
+            if not isinstance(actors, list) or not all(FamilyEntry.isValidActor(actor) for actor in actors):
+                resp.data = jsonify(
+                    {"status": "failed", "data": {"message": "actors must be a list of 1-64 character names (letters, digits, spaces, dots, dashes, underscores)."}}
+                )
+                db_log_msg(self.index, req, "FamilyResource.on_put - failed - actors malformed.")
+                return
+            information_update["actors"] = actors
         successful = self.index.modifyFamily(family_id, information_update, force_recalculation=True, username=get_username(req))
         if successful:
             resp.data = jsonify({"status": "successful", "data": {"message": "Family modified."}})
@@ -94,6 +109,7 @@ class FamilyResource:
 
     @timing
     def on_delete(self, req, resp, family_id=None):
+        """Delete a family and its samples; with ``keep_samples=true`` the samples move to the unknown family instead. Unknown ids answer 404."""
         if family_id is None or self.index.getFamily(family_id) is None:
             resp.data = jsonify(
                 {
@@ -121,6 +137,7 @@ class FamilyResource:
 
     @timing
     def on_get_collection(self, req, resp):
+        """All families keyed by id; optional ``start`` (first family id) and ``limit``."""
         db_log_msg(self.index, req, "FamilyResource.on_get_collection")
         # parse optional request parameters
         start_index = 0

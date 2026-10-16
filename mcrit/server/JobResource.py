@@ -1,5 +1,6 @@
 import datetime
 import re
+from typing import Optional
 
 import falcon
 
@@ -18,6 +19,13 @@ def _csv_items(value):
     return [item.strip() for part in parts for item in part.split(",")]
 
 
+def _normalizeObjectId(value: Optional[str]) -> Optional[str]:
+    """A job or result id as both queues store it - an ObjectId in lower-case hex - or None if it is not one."""
+    if value is None or re.fullmatch("[0-9a-fA-F]{24}", value) is None:
+        return None
+    return value.lower()
+
+
 def _parse_int_csv(value):
     """Comma-separated ints; entries that do not parse are ignored, like start/limit."""
     ids = []
@@ -34,6 +42,18 @@ def _parse_int_csv(value):
 def _parse_str_csv(value):
     """Comma-separated ids; blank entries are ignored."""
     return [item for item in _csv_items(value) if item]
+
+
+def _parseJobDate(value) -> Optional[datetime.datetime]:
+    # a repeated parameter arrives as a list, which is no date either
+    if not isinstance(value, str):
+        return None
+    for date_format in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(value, date_format)
+        except ValueError:
+            continue
+    return None
 
 
 class JobResource:
@@ -72,6 +92,7 @@ class JobResource:
 
     @timing
     def on_get_collection(self, req, resp):
+        """The queued jobs, newest first unless ``ascending=true``; ``start``, ``limit``, and the filters ``method`` (job method name), ``state``, ``filter`` (substring of the job descriptor), ``username`` (who requested the job), ``sample_ids`` (comma-separated; jobs of ``method``, which it requires, by their first argument, else a 400) and ``job_ids`` (comma-separated)."""
         # parse optional request parameters
         ascending = False
         if "ascending" in req.params:
@@ -97,6 +118,7 @@ class JobResource:
 
     @timing
     def on_get_stats(self, req, resp):
+        """Queue statistics per method and state; ``with_refresh=true`` recounts instead of answering the cached numbers."""
         query_with_refresh = False
         if "with_refresh" in req.params:
             query_with_refresh = req.params["with_refresh"].lower().strip() == "true"
@@ -106,28 +128,24 @@ class JobResource:
 
     @timing
     def on_delete_collection(self, req, resp):
+        """Delete jobs matching all given filters: ``method``, ``created_before`` and ``finished_before`` (``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM:SS``; any other value answers 400). Answers ``num_deleted``."""
         # parse optional request parameters, to be used as an "AND" query
         method_filter = None
         if "method" in req.params:
             method_filter = req.params["method"]
-        created_before = None
-        if "created_before" in req.params:
-            try:
-                if len(req.params["created_before"]) == 10:
-                    created_before = datetime.datetime.strptime(req.params["created_before"], "%Y-%m-%d")
-                else:
-                    created_before = datetime.datetime.strptime(req.params["created_before"], "%Y-%m-%dT%H:%M:%S")
-            except ValueError:
-                pass
-        finished_before = None
-        if "finished_before" in req.params:
-            try:
-                if len(req.params["finished_before"]) == 10:
-                    finished_before = datetime.datetime.strptime(req.params["finished_before"], "%Y-%m-%d")
-                else:
-                    finished_before = datetime.datetime.strptime(req.params["finished_before"], "%Y-%m-%dT%H:%M:%S")
-            except ValueError:
-                pass
+        # a date that doesn't parse used to be dropped, and with it the only thing keeping the
+        # request from deleting every job and stored result
+        dates = {}
+        for name in ("created_before", "finished_before"):
+            dates[name] = None
+            if name in req.params:
+                dates[name] = _parseJobDate(req.params[name])
+                if dates[name] is None:
+                    resp.status = falcon.HTTP_400
+                    resp.data = jsonify({"status": "failed", "data": {"message": f"{name} has to be a date, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS."}})
+                    db_log_msg(self.index, req, f"JobResource.on_delete_collection - failed - invalid {name}.")
+                    return
+        created_before, finished_before = dates["created_before"], dates["finished_before"]
         # newest first
         result = self.index.deleteQueueData(method=method_filter, created_before=created_before, finished_before=finished_before)
         resp.data = jsonify({"status": "successful", "data": {"num_deleted": result}})
@@ -135,8 +153,9 @@ class JobResource:
 
     @timing
     def on_get(self, req, resp, job_id=None):
-        # validate that we only allow hexstrings with 24 chars
-        if job_id is None or not re.match("[a-fA-F0-9]{24}", job_id):
+        """One job by its 24 hex digit id. Malformed ids answer 400, unknown ones 404."""
+        job_id = _normalizeObjectId(job_id)
+        if job_id is None:
             resp.status = falcon.HTTP_400
             resp.data = jsonify({"status": "failed", "data": {"message": "Valid JobIDs are hexstrings with 24 characters."}})
             db_log_msg(self.index, req, "JobResource.on_get - failed - invalid job_id.")
@@ -149,8 +168,9 @@ class JobResource:
 
     @timing
     def on_delete(self, req, resp, job_id=None):
-        # validate that we only allow hexstrings with 24 chars
-        if job_id is None or not re.match("[a-fA-F0-9]{24}", job_id):
+        """Delete one job (and its result) by id."""
+        job_id = _normalizeObjectId(job_id)
+        if job_id is None:
             resp.status = falcon.HTTP_400
             resp.data = jsonify({"status": "failed", "data": {"message": "Valid JobIDs are hexstrings with 24 characters."}})
             db_log_msg(self.index, req, "JobResource.on_delete - failed - invalid job_id.")
@@ -188,8 +208,9 @@ class JobResource:
 
     @timing
     def on_get_results(self, req, resp, result_id=None):
-        # validate that we only allow hexstrings with 24 chars
-        if result_id is None or not re.match("[a-fA-F0-9]{24}", result_id):
+        """The result stored under a 24 hex digit result id; ``compact=true`` strips the per-function matches."""
+        result_id = _normalizeObjectId(result_id)
+        if result_id is None:
             resp.status = falcon.HTTP_400
             resp.data = jsonify({"status": "failed", "data": {"message": "Valid ResultIDs are hexstrings with 24 characters."}})
             db_log_msg(self.index, req, "JobResource.on_get_results - failed - invalid result_id.")
@@ -204,8 +225,9 @@ class JobResource:
 
     @timing
     def on_get_job_result(self, req, resp, job_id=None):
-        # validate that we only allow hexstrings with 24 chars
-        if job_id is None or not re.match("[a-fA-F0-9]{24}", job_id):
+        """The result of a job by job id, or null while it is not finished; ``compact=true`` strips the per-function matches."""
+        job_id = _normalizeObjectId(job_id)
+        if job_id is None:
             resp.status = falcon.HTTP_400
             resp.data = jsonify({"status": "failed", "data": {"message": "Valid JobIDs are hexstrings with 24 characters."}})
             db_log_msg(self.index, req, "JobResource.on_get_job_result - failed - invalid job_id.")
@@ -219,8 +241,9 @@ class JobResource:
 
     @timing
     def on_get_result_job(self, req, resp, result_id=None):
-        # validate that we only allow hexstrings with 24 chars
-        if result_id is None or not re.match("[a-fA-F0-9]{24}", result_id):
+        """The job that produced the result with the given id."""
+        result_id = _normalizeObjectId(result_id)
+        if result_id is None:
             resp.status = falcon.HTTP_400
             resp.data = jsonify({"status": "failed", "data": {"message": "Valid ResultIDs are hexstrings with 24 characters."}})
             db_log_msg(self.index, req, "JobResource.on_get_job_result - failed - invalid result_id.")

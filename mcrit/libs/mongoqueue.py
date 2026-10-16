@@ -54,6 +54,17 @@ def _useCounter(database, name: str) -> int:
     return result["value"]
 
 
+def _utcNow() -> datetime:
+    """Naive UTC, as pymongo hands datetimes back: comparable across hosts, time zones and DST changes."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _heartbeatFields(consumer_id: str) -> Dict[str, datetime]:
+    # heartbeats_utc is what liveness is judged by; heartbeats keeps the local time that workers of
+    # older releases write and read, so a queue shared during a rolling upgrade judges both alike
+    return {f"heartbeats.{consumer_id}": datetime.now(), f"heartbeats_utc.{consumer_id}": _utcNow()}
+
+
 class MongoQueue:
     """A queue class"""
 
@@ -232,7 +243,7 @@ class MongoQueue:
         if self.consumer_id != "index":
             self._getQueueCounters().find_one_and_update(
                 {"name": "workers"},
-                {"$addToSet": {"workers": self.consumer_id}, "$set": {f"heartbeats.{self.consumer_id}": datetime.now()}},
+                {"$addToSet": {"workers": self.consumer_id}, "$set": _heartbeatFields(self.consumer_id)},
                 upsert=True,
             )
             self._last_heartbeat = time.monotonic()
@@ -267,7 +278,7 @@ class MongoQueue:
         if self.queue_counters is not None:
             self._getQueueCounters().find_one_and_update(
                 {"name": "workers"},
-                {"$pull": {"workers": self.consumer_id}, "$unset": {f"heartbeats.{self.consumer_id}": ""}},
+                {"$pull": {"workers": self.consumer_id}, "$unset": {f"heartbeats.{self.consumer_id}": "", f"heartbeats_utc.{self.consumer_id}": ""}},
                 upsert=True,
             )
 
@@ -279,9 +290,7 @@ class MongoQueue:
             return
         # re-adds the registration as well: a worker judged dead by mistake (paused, a stalled
         # database connection) lost its current job to a reclaim, but must serve the next ones
-        self._getQueueCounters().find_one_and_update(
-            {"name": "workers"}, {"$addToSet": {"workers": self.consumer_id}, "$set": {f"heartbeats.{self.consumer_id}": datetime.now()}}, upsert=True
-        )
+        self._getQueueCounters().find_one_and_update({"name": "workers"}, {"$addToSet": {"workers": self.consumer_id}, "$set": _heartbeatFields(self.consumer_id)}, upsert=True)
         self._last_heartbeat = time.monotonic()
 
     def _live_worker_ids(self, now=None):
@@ -293,20 +302,33 @@ class MongoQueue:
         stamped for it now, so it counts as alive for one timeout and is judged like every
         other worker after that. A worker killed with SIGKILL never unregisters, so
         registration alone is not liveness (#150).
+
+        `now` is naive UTC. Heartbeats are compared in UTC, so that workers on hosts in other
+        time zones, or a DST change, don't make live workers look dead; a worker of an older
+        release only writes local time, which is compared with local time as before.
         """
-        now = now or datetime.now()
-        registration = self._getQueueCounters().find_one({"name": "workers"}, {"workers": 1, "heartbeats": 1, "_id": 0})
+        utc_now = now or _utcNow()
+        local_now = utc_now + (datetime.now() - _utcNow())
+        registration = self._getQueueCounters().find_one({"name": "workers"}, {"workers": 1, "heartbeats": 1, "heartbeats_utc": 1, "_id": 0})
         if not registration:
             return set()
-        heartbeats = registration.get("heartbeats") or {}
+        local_heartbeats = registration.get("heartbeats") or {}
+        utc_heartbeats = registration.get("heartbeats_utc") or {}
         live = set()
         for worker_id in registration.get("workers") or []:
-            last_seen = heartbeats.get(worker_id)
-            if last_seen is None:
+            if worker_id in utc_heartbeats:
+                age = utc_now - utc_heartbeats[worker_id]
+            elif worker_id in local_heartbeats:
+                age = local_now - local_heartbeats[worker_id]
+            else:
                 # only if still absent: two pollers must not keep re-stamping each other's view
-                self._getQueueCounters().update_one({"name": "workers", f"heartbeats.{worker_id}": {"$exists": False}}, {"$set": {f"heartbeats.{worker_id}": now}})
+                self._getQueueCounters().update_one(
+                    {"name": "workers", f"heartbeats.{worker_id}": {"$exists": False}, f"heartbeats_utc.{worker_id}": {"$exists": False}},
+                    {"$set": {f"heartbeats.{worker_id}": local_now, f"heartbeats_utc.{worker_id}": utc_now}},
+                )
                 live.add(worker_id)
-            elif now - last_seen < timedelta(seconds=self.timeout):
+                continue
+            if age < timedelta(seconds=self.timeout):
                 live.add(worker_id)
         return live
 
@@ -322,10 +344,13 @@ class MongoQueue:
         self._getCollection().connection.close()
 
     def clear(self):
-        """Clear the queue."""
-        self._getCollection().database["fs"].drop()
+        """Clear the queue, with the results and file parameters its jobs kept in GridFS."""
         self._getCollection().drop()
         self._ensure_indices()
+        # this used to drop a collection named "fs", which GridFS doesn't use, and left every result
+        # and query binary behind. The GridFS of a database is shared by all its queues, so this
+        # removes what no job of any of them refers to any more, rather than dropping it whole
+        self.delete_orphaned_files()
 
     def size(self):
         """Total size of the queue"""
@@ -395,6 +420,9 @@ class MongoQueue:
             filter={"_id": ObjectId(job_id)},
             update={"$set": {"notify_done": True}},
         )
+        if job is None:
+            # deleted meanwhile, which released its dependents already
+            return
         for job_id_to_notify in job["required_by"]:
             self._getCollection().find_one_and_update(
                 filter={"_id": ObjectId(job_id_to_notify)},
@@ -573,7 +601,20 @@ class MongoQueue:
         if with_result and deletable_job["result"]:
             self._getFs().delete(ObjectId(deletable_job["result"]))
         self._releaseFileParams(deletable_job)
+        self._releaseDependents(deletable_job)
         return 1
+
+    def _releaseDependents(self, job_document):
+        """Let the jobs waiting on a deleted job run, as they do when it fails.
+
+        A cross compare's combine job waits for its child jobs; one deleted before it finished never
+        notified it, and the combine job stayed queued forever while its requester kept polling.
+        Released, it runs, finds the child's result missing and fails like for a failed child.
+        """
+        if job_document.get("notify_done") or not job_document.get("required_by"):
+            return
+        job_id = str(job_document["_id"])
+        self._getCollection().update_many({"_id": {"$in": [ObjectId(dependent) for dependent in job_document["required_by"]]}}, {"$pull": {"unfinished_dependencies": job_id}})
 
     def _releaseFileParams(self, job_document):
         """Unlink a job from the files it was given, and delete those no other job uses any more.
@@ -602,29 +643,16 @@ class MongoQueue:
         return True
 
     def delete_jobs(self, method=None, created_before=None, finished_before=None, with_results=True):
-        filter_count = len([1 for item in [method, created_before, finished_before] if item is not None])
-        combined_filter = {"$and": []} if filter_count > 1 else {}
-        method_filter = {}
-        created_filter = {}
-        finished_filter = {}
+        # every filter given narrows the selection; finished_before used to be dropped whenever
+        # created_before was given as well, which deleted queued and running jobs with the rest
+        conditions = []
         if method is not None:
-            method_filter = {"payload.method": method}
-            if filter_count > 1:
-                combined_filter["$and"].append(method_filter)
-            else:
-                combined_filter = method_filter
+            conditions.append({"payload.method": method})
         if created_before is not None:
-            created_filter = {"created_at": {"$lt": created_before}}
-            if filter_count > 1:
-                combined_filter["$and"].append(created_filter)
-            else:
-                combined_filter = created_filter
-        elif finished_before is not None:
-            finished_filter = {"finished_at": {"$lt": finished_before}}
-            if filter_count > 1:
-                combined_filter["$and"].append(finished_filter)
-            else:
-                combined_filter = finished_filter
+            conditions.append({"created_at": {"$lt": created_before}})
+        if finished_before is not None:
+            conditions.append({"finished_at": {"$lt": finished_before}})
+        combined_filter = {"$and": conditions} if len(conditions) > 1 else (conditions[0] if conditions else {})
         # the ids first, which fixes the selection; each chunk's documents are read when it is deleted
         jobs_to_be_deleted = list(self._getCollection().find(combined_filter, {"_id": 1}))
         num_deleted = 0
@@ -650,6 +678,7 @@ class MongoQueue:
                     self._getFs().delete(ObjectId(deletable_job["result"]))
                 # after the job is gone, so that a file shared with a job outside the selection stays
                 self._releaseFileParams(deletable_job)
+                self._releaseDependents(deletable_job)
         if len(jobs_to_be_deleted) != num_deleted:
             raise Exception("Number of deleted jobs was unequal to number of jobs to delete!")
         return num_deleted
@@ -685,9 +714,9 @@ class MongoQueue:
         self._getFs().delete(oid)
 
     def _grid_to_meta(self, grid):
-        oid = ObjectId(grid)
-        entry = self._getFs().get(oid)
-        return entry.metadata
+        # None for an unknown id, as _grid_to_file answers: GridFS.get raised NoFile, a 500 on /results/{id}
+        entry = self._getFs().find_one({"_id": ObjectId(grid)})
+        return None if entry is None else entry.metadata
 
     def get_cached_job_id(self, payload):
         """The job whose result a repeated request with the same descriptor should reuse.
@@ -876,15 +905,15 @@ class MongoQueue:
         a worker's own error path does. Dead registrations are dropped along the way, so
         the worker list stops accumulating ids of processes that are long gone (#150).
         """
-        now = datetime.now()
-        live_worker_ids = self._live_worker_ids(now)
-        registration = self._getQueueCounters().find_one({"name": "workers"}, {"workers": 1, "_id": 0}) or {}
+        live_worker_ids = self._live_worker_ids()
+        registration = self._getQueueCounters().find_one({"name": "workers"}, {"workers": 1, "heartbeats_utc": 1, "_id": 0}) or {}
         dead_registered = [worker_id for worker_id in registration.get("workers") or [] if worker_id not in live_worker_ids]
-        if dead_registered:
-            self._getQueueCounters().update_one(
-                {"name": "workers"},
-                {"$pull": {"workers": {"$in": dead_registered}}, "$unset": {f"heartbeats.{worker_id}": "" for worker_id in dead_registered}},
-            )
+        # an older release drops only the local heartbeat of a dead worker, and leaves its UTC one
+        stray_heartbeats = [worker_id for worker_id in registration.get("heartbeats_utc") or {} if worker_id not in (registration.get("workers") or [])]
+        if dead_registered or stray_heartbeats:
+            unset = {f"{field}.{worker_id}": "" for worker_id in dead_registered for field in ("heartbeats", "heartbeats_utc")}
+            unset.update({f"heartbeats_utc.{worker_id}": "" for worker_id in stray_heartbeats})
+            self._getQueueCounters().update_one({"name": "workers"}, {"$pull": {"workers": {"$in": dead_registered}}, "$unset": unset})
         holders = set(wid for wid in self._getCollection().distinct("locked_by") if wid)
         orphan_ids = sorted(holders.difference(live_worker_ids))
         if not orphan_ids:
@@ -1021,20 +1050,38 @@ class Job:
 
     ## job control
 
+    def _held(self):
+        """The job as long as whoever took it still holds it and it is not finished.
+
+        complete(), error() and release() only act on that: once a job was released, by its own
+        holder or by a reclaim, it may already run on another worker, which a late write from the
+        first must not finish, unlock or charge another attempt to. A SpawningWorker's job process
+        acts for the worker that took the job, and shares its hold.
+        """
+        return {"_id": self.job_id, "locked_by": self._data["locked_by"], "finished_at": None}
+
     def complete(self, result=None):
         """job has been completed."""
         if result:
             self._data["result"] = result
-        job = self._queue.collection.find_one_and_update(
-            filter={"_id": self.job_id}, update={"$set": {"finished_at": datetime.now(), "progress": 1}}, return_document=ReturnDocument.AFTER
-        )
+        job = self._queue.collection.find_one_and_update(filter=self._held(), update={"$set": {"finished_at": datetime.now(), "progress": 1}}, return_document=ReturnDocument.AFTER)
+        if not job:
+            # finished already by its job process, which may have died before telling the jobs that
+            # wait on it; doing that again is harmless, never doing it leaves them queued forever
+            # (the pulls are idempotent, and notify_done is set before them, so it can't tell)
+            if self._queue.collection.find_one({"_id": self.job_id, "locked_by": self._data["locked_by"], "finished_at": {"$ne": None}}, {"_id": 1}):
+                self._queue._notify_dependent_jobs(str(self.job_id))
+            else:
+                LOGGER.warning("Job %s was released before it completed here, which leaves its queue state as it is.", self.job_id)
+            return
         # job result was not set by another completion before, or if it is forced by argument
-        if (job and job["result"] is None) or result:
+        if job["result"] is None or result:
             job = self._queue.collection.find_one_and_update(filter={"_id": self.job_id}, update={"$set": {"result": self._data["result"]}}, return_document=ReturnDocument.AFTER)
         if not job:
             return
-        self._queue.updateQueueCounters([(self.method, "in_progress", -1), (self.method, "finished", 1)])
+        # the dependents first: a failure in between leaves a counter off, not a job waiting forever
         self._queue._notify_dependent_jobs(str(self.job_id))
+        self._queue.updateQueueCounters([(self.method, "in_progress", -1), (self.method, "finished", 1)])
         return job
 
     def mark_uncacheable(self):
@@ -1045,11 +1092,13 @@ class Job:
     def error(self, message=None):
         """note an error processing a job, and return it to the queue."""
         job = self._queue.collection.find_one_and_update(
-            filter={"_id": self.job_id},
+            filter=self._held(),
             update={"$set": {"locked_by": None, "locked_at": None, "last_error": message}, "$inc": {"attempts_left": -1}},
             return_document=ReturnDocument.AFTER,
         )
         if not job:
+            # the usual case being a SpawningWorker whose job process errored the job already
+            LOGGER.debug("Job %s was released or finished before it failed here, which leaves its queue state as it is.", self.job_id)
             return
         updates = [(self.method, "in_progress", -1), (self.method, "queued", 1)]
         if job["attempts_left"] <= 0:
@@ -1077,7 +1126,7 @@ class Job:
     def release(self):
         """put the job back into_queue."""
         job = self._queue.collection.find_one_and_update(
-            filter={"_id": self.job_id}, update={"$set": {"locked_by": None, "locked_at": None}, "$inc": {"attempts_left": -1}}, return_document=ReturnDocument.AFTER
+            filter=self._held(), update={"$set": {"locked_by": None, "locked_at": None}, "$inc": {"attempts_left": -1}}, return_document=ReturnDocument.AFTER
         )
         if not job:
             return
