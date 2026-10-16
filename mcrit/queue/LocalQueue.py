@@ -623,12 +623,13 @@ class LocalQueue:
     def delete_jobs(self, method=None, created_before=None, finished_before=None):
         delete_list = []
         deleted_count = 0
+        # as MongoQueue.delete_jobs: every filter given narrows the selection
         for d in self._jobs.values():
-            if d["payload"]["method"] is not None and d["payload"]["method"] != method:
+            if method is not None and d["payload"]["method"] != method:
                 continue
-            if d["created_at"] is not None and d["created_at"] >= finished_before:
+            if created_before is not None and not (d["created_at"] is not None and d["created_at"] < created_before):
                 continue
-            if d["finished_at"] is not None and d["finished_at"] >= finished_before:
+            if finished_before is not None and not (d["finished_at"] is not None and d["finished_at"] < finished_before):
                 continue
             delete_list.append(d["_id"])
         for id in delete_list:
