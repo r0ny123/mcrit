@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import hashlib
 import json
@@ -22,7 +23,7 @@ from gridfs.errors import FileExists
 from packaging import version
 from picblocks.blockhasher import BlockHasher
 from pymongo import MongoClient, UpdateMany, UpdateOne
-from pymongo.errors import BulkWriteError, DocumentTooLarge
+from pymongo.errors import BulkWriteError, DocumentTooLarge, ExecutionTimeout
 from smda.common.BinaryInfo import BinaryInfo
 from smda.common.SmdaFunction import SmdaFunction
 from smda.SmdaConfig import SmdaConfig
@@ -3132,6 +3133,21 @@ class MongoDbStorage(StorageInterface):
             entries[entry.family_id] = entry
         return entries
 
+    def getFunctionsByIds(self, function_ids: List[int]) -> Dict[int, "FunctionEntry"]:
+        function_entries = {}
+        # query functions (negative ids) live in their own collection
+        for collection, ids in (
+            (self._getDb().functions, [function_id for function_id in function_ids if function_id >= 0]),
+            (self._getDb().query_functions, [function_id for function_id in function_ids if function_id < 0]),
+        ):
+            if not ids:
+                continue
+            for function_document in collection.find({"function_id": {"$in": ids}}, {"_id": 0}):
+                self._decodeFunction(function_document)
+                function_entry = FunctionEntry.fromDict(function_document)
+                function_entries[function_entry.function_id] = function_entry
+        return function_entries
+
     def getFunctionById(self, function_id: int, with_xcfg=False) -> Optional["FunctionEntry"]:
         field_selection = {"_id": 0}
         if function_id < 0:
@@ -3698,12 +3714,17 @@ class MongoDbStorage(StorageInterface):
 
     def _getDistinctValues(self, collection: str, field: str) -> Optional[List[Any]]:
         """All distinct values of the field, or None when there are more than _DISTINCT_VALUES_CAP
-        of them or they exceed _DISTINCT_VALUES_MAX_BYTES in total. A None is remembered for
+        of them, they exceed _DISTINCT_VALUES_MAX_BYTES in total or the scan runs out of the search time
+        limit (STORAGE_MONGODB_SEARCH_MAX_TIME_MS). A None is remembered for
         _OVER_CAP_TTL seconds, so a large corpus pays for the capped scan once, not per search."""
         found_over_cap = self._over_cap_since.get((collection, field))
         if found_over_cap is not None and time.monotonic() - found_over_cap < self._OVER_CAP_TTL:
             return None
-        values = self._scanDistinctValues(collection, field)
+        try:
+            values = self._scanDistinctValues(collection, field)
+        except ExecutionTimeout:
+            # the same verdict as too many values: the search matches the names in the database instead
+            values = None
         if values is None:
             self._over_cap_since[(collection, field)] = time.monotonic()
         return values
@@ -3712,7 +3733,7 @@ class MongoDbStorage(StorageInterface):
         pipeline = [{"$group": {"_id": "$" + field}}, {"$limit": self._DISTINCT_VALUES_CAP + 1}]
         values = []
         total_bytes = 0
-        for document in self._getDb()[collection].aggregate(pipeline):
+        for document in self._getDb()[collection].aggregate(pipeline, maxTimeMS=self._getSearchMaxTimeMS() or 0):
             value = document["_id"]
             if isinstance(value, str):
                 total_bytes += len(value.encode("utf-8"))
@@ -3753,40 +3774,56 @@ class MongoDbStorage(StorageInterface):
 
     ##### search ####
 
+    def _getSearchMaxTimeMS(self) -> Optional[int]:
+        """The time limit of a search query in milliseconds, None for no limit. Read with a default, as a
+        config module replaced by an older copy does not name the setting."""
+        return int(getattr(self._storage_config, "STORAGE_MONGODB_SEARCH_MAX_TIME_MS", 30000) or 0) or None
+
+    @contextlib.contextmanager
+    def _searchTimeLimit(self):
+        """Answers a search that ran out of its time limit as a ValueError, which the REST layer turns into a 400."""
+        try:
+            yield
+        except ExecutionTimeout as timeout:
+            raise ValueError("The search took too long and was stopped. Narrow the search term.") from timeout
+
     def findFamilyByString(self, search_tree: NodeType, cursor: Optional[FullSearchCursor] = None, max_num_results: int = 100) -> Dict[int, "FamilyEntry"]:
         result_dict = {}
-        search_fields = ["family_name"]
-        query = self._get_search_query(search_fields, search_tree, cursor)
-        sort_list = self._get_sort_list_from_cursor(cursor)
-        for family_document in self._getDb().families.find(query, {"_id": 0}, sort=sort_list, limit=max_num_results):
-            entry = FamilyEntry.fromDict(family_document)
-            result_dict[family_document["family_id"]] = entry
+        with self._searchTimeLimit():
+            search_fields = ["family_name"]
+            query = self._get_search_query(search_fields, search_tree, cursor)
+            sort_list = self._get_sort_list_from_cursor(cursor)
+            for family_document in self._getDb().families.find(query, {"_id": 0}, sort=sort_list, limit=max_num_results, max_time_ms=self._getSearchMaxTimeMS()):
+                entry = FamilyEntry.fromDict(family_document)
+                result_dict[family_document["family_id"]] = entry
         return result_dict
 
     def findSampleByString(self, search_tree: NodeType, cursor: Optional[FullSearchCursor] = None, max_num_results: int = 100) -> Dict[int, "SampleEntry"]:
         result_dict = {}
-        search_fields = [
-            "filename",
-            "family",
-            "component",
-            "version",
-        ]
-        conditional_field = ("sha256", lambda search_term: len(search_term) >= 3)
-        query = self._get_search_query(search_fields, search_tree, cursor, conditional_search_fields=[conditional_field])
-        sort_list = self._get_sort_list_from_cursor(cursor)
-        for sample_document in self._getDb().samples.find(query, {"_id": 0}, sort=sort_list, limit=max_num_results):
-            entry = SampleEntry.fromDict(sample_document)
-            result_dict[entry.sample_id] = entry
+        with self._searchTimeLimit():
+            search_fields = [
+                "filename",
+                "family",
+                "component",
+                "version",
+            ]
+            conditional_field = ("sha256", lambda search_term: len(search_term) >= 3)
+            query = self._get_search_query(search_fields, search_tree, cursor, conditional_search_fields=[conditional_field])
+            sort_list = self._get_sort_list_from_cursor(cursor)
+            for sample_document in self._getDb().samples.find(query, {"_id": 0}, sort=sort_list, limit=max_num_results, max_time_ms=self._getSearchMaxTimeMS()):
+                entry = SampleEntry.fromDict(sample_document)
+                result_dict[entry.sample_id] = entry
         return result_dict
 
     def findFunctionByString(self, search_tree: NodeType, cursor: Optional[FullSearchCursor] = None, max_num_results: int = 100) -> Dict[int, "FunctionEntry"]:
         result_dict = {}
-        # TODO also search through function labels once we have implemented them
-        search_fields = ["function_name"]
-        query = self._get_search_query(search_fields, search_tree, cursor, distinct_fields={"function_name": "functions"})
-        sort_list = self._get_sort_list_from_cursor(cursor)
-        for function_document in self._getDb().functions.find(query, {"_id": 0}, sort=sort_list, limit=max_num_results):
-            self._decodeFunction(function_document)
-            entry = FunctionEntry.fromDict(function_document)
-            result_dict[entry.function_id] = entry
+        with self._searchTimeLimit():
+            # TODO also search through function labels once we have implemented them
+            search_fields = ["function_name"]
+            query = self._get_search_query(search_fields, search_tree, cursor, distinct_fields={"function_name": "functions"})
+            sort_list = self._get_sort_list_from_cursor(cursor)
+            for function_document in self._getDb().functions.find(query, {"_id": 0}, sort=sort_list, limit=max_num_results, max_time_ms=self._getSearchMaxTimeMS()):
+                self._decodeFunction(function_document)
+                entry = FunctionEntry.fromDict(function_document)
+                result_dict[entry.function_id] = entry
         return result_dict

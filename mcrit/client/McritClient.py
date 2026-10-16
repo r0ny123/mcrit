@@ -202,6 +202,9 @@ class _McritSession(requests.Session):
 
 
 class McritClient:
+    # the most function ids one POST /functions is asked for; the server refuses more
+    MAX_FUNCTION_IDS_PER_REQUEST = 10000
+
     def __init__(self, mcrit_server=None, apitoken=None, username=None, raw_responses=False, raise_client_errors=False, raise_server_errors=False, timeout=DEFAULT_TIMEOUT):
         """
         raw_responses: every method answers the requests.Response itself.
@@ -602,7 +605,7 @@ class McritClient:
 
     def getFunctions(self, start=0, limit=0):
         """
-        Get a all FunctionEntries, optionally from sample_id <start> and up to <limit> many
+        Get FunctionEntries, optionally from position <start> in the function collection and up to <limit> many (0 = as many as the server answers at once, 1000)
         Supported by mcritweb API pass-through
         """
         query_string = ""
@@ -621,14 +624,22 @@ class McritClient:
         Supported by mcritweb API pass-through
         """
         query_with_label_only = "?with_label_only=True" if with_label_only else ""
-        function_id_string = ",".join(["%d" % fid for fid in function_ids])
-        response = self._session.post(f"{self.mcrit_server}/functions{query_with_label_only}", data=function_id_string, headers=self.headers, timeout=self.timeout)
         if self.raw:
-            return response
-        data = self._handle(response)
-        if data is not None:
-            return {int(k): FunctionEntry.fromDict(v) for k, v in data.items()}
-        return {}
+            # the response itself is the answer, so all ids go in one request, as the caller sent them
+            function_id_string = ",".join(["%d" % fid for fid in function_ids])
+            return self._session.post(f"{self.mcrit_server}/functions{query_with_label_only}", data=function_id_string, headers=self.headers, timeout=self.timeout)
+        # the server answers at most MAX_FUNCTION_IDS_PER_REQUEST ids at a time, so ask in chunks
+        distinct_ids = list(dict.fromkeys(function_ids))
+        result = {}
+        for chunk_start in range(0, max(len(distinct_ids), 1), self.MAX_FUNCTION_IDS_PER_REQUEST):
+            function_id_string = ",".join(["%d" % fid for fid in distinct_ids[chunk_start : chunk_start + self.MAX_FUNCTION_IDS_PER_REQUEST]])
+            response = self._session.post(f"{self.mcrit_server}/functions{query_with_label_only}", data=function_id_string, headers=self.headers, timeout=self.timeout)
+            data = self._handle(response)
+            if data is None:
+                # a failed chunk fails the call, as a failed request always did, rather than answering part of the ids
+                return {}
+            result.update({int(k): FunctionEntry.fromDict(v) for k, v in data.items()})
+        return result
 
     def isFunctionId(self, function_id):
         """

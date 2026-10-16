@@ -394,6 +394,10 @@ class StorageInterface:
         """
         raise NotImplementedError
 
+    def getFunctionsByIds(self, function_ids: List[int]) -> Dict[int, "FunctionEntry"]:
+        """Given function_ids, return the FunctionEntries (without xcfg) of those that exist, keyed by id, in one lookup."""
+        raise NotImplementedError
+
     def getFunctionById(self, function_id: int, with_xcfg=False) -> Optional["FunctionEntry"]:
         """Given a function_id, return the respective FunctionEntry or None, if function_id is not contained otherwise.
 
