@@ -112,6 +112,38 @@ class PicHashRecalculationStampTest(unittest.TestCase):
         self.assertEqual(0, self._stale_count())
         self.assertEqual(0, self._recalculate()["outdated_samples"])
 
+    def _stored_pichash_counts(self):
+        collection = self.storage._database[self.storage._PICHASH_COUNT_COLLECTION]
+        return {document["_pichash"]: document["df"] for document in collection.find({}, {"_id": 0})}
+
+    def test_a_changed_pichash_marks_the_pichash_counts_incomplete(self):
+        # the counts are keyed by the hash, so a rewritten _pichash leaves them counting the old
+        # one; trusted, a later deleteSample would decrement the new hash instead (#261)
+        entry = self._add("crossarch_intel_a.smda")
+        function_id = self.functions.find_one({"sample_id": entry.sample_id}, sort=[("function_id", 1)])["function_id"]
+        self.functions.update_one({"function_id": function_id}, {"$set": {"_pichash": hex(0x1234)}})
+        self.storage.rebuildPicHashCountIndex()
+        self.assertEqual(1, self._stored_pichash_counts()[hex(0x1234)])
+        self.assertTrue(self.storage.isPicHashCountIndexComplete())
+
+        self.assertEqual(1, self._recalculate()["functions_updated"])
+
+        self.assertFalse(self.storage.isPicHashCountIndexComplete())
+        self.assertIn(hex(0x1234), self._stored_pichash_counts())
+        self.storage.rebuildPicHashCountIndex()
+        self.assertNotIn(hex(0x1234), self._stored_pichash_counts())
+        self.assertTrue(self.storage.isPicHashCountIndexComplete())
+
+    def test_a_run_that_changes_no_pichash_keeps_the_pichash_counts(self):
+        self._add("crossarch_intel_a.smda")
+        self.assertTrue(self.storage.isPicHashCountIndexComplete())
+
+        result = self._recalculate()
+
+        self.assertEqual(1, result["outdated_samples"])
+        self.assertEqual(0, result["functions_updated"])
+        self.assertTrue(self.storage.isPicHashCountIndexComplete())
+
     def test_a_sample_bumped_by_an_earlier_run_is_not_picked(self):
         # the old recalculation marked a changed sample done by overwriting its smda_version
         entry = self._add("crossarch_intel_a.smda")

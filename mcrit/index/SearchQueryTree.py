@@ -1,4 +1,4 @@
-from typing import List, Literal, Union
+from typing import List, Literal, Optional, Union
 
 
 ##### Defining all Node types #####
@@ -76,6 +76,41 @@ class SearchConditionNode(Node):
         else:
             operator_str = ":"
         return f"Condition('{self.field}' {operator_str} '{self.value}')"
+
+    def isNumeric(self) -> bool:
+        return self.field in ("pichash", "offset") or self.field.endswith("_id") or "num_" in self.field
+
+    def numericValue(self) -> Optional[int]:
+        """The value of a condition on a numeric field, as the storages compare it.
+
+        Raises ValueError, which the search routes answer with a 400, for a value that isn't a
+        number or doesn't fit what the field holds: MongoDB refused an integer beyond 64 bits and
+        a pichash that wasn't a number with a 500, and the memory storage compared such a value
+        with numbers and failed the same way.
+        """
+        if self.value is None:
+            # a search cursor's condition for a record without the field
+            return None
+        if isinstance(self.value, int) and not isinstance(self.value, bool):
+            # a condition a search cursor made holds the stored value itself
+            value = self.value
+        else:
+            value = self._parsedNumber()
+        # a pichash and an offset are unsigned 64 bit values; everything else is a signed one
+        lowest, highest = (0, 2**64 - 1) if self.field in ("pichash", "offset") else (-(2**63), 2**63 - 1)
+        if not lowest <= value <= highest:
+            raise ValueError(f"The field '{self.field}' takes a number from {lowest} to {highest}.")
+        return value
+
+    def _parsedNumber(self) -> int:
+        try:
+            return int(self.value, 0)
+        except (TypeError, ValueError):
+            try:
+                # int(_, 0) refuses leading zeros, which a decimal id may well have
+                return int(self.value, 10)
+            except (TypeError, ValueError):
+                raise ValueError(f"The field '{self.field}' takes a number, not '{self.value}'.") from None
 
 
 #### Code operating on trees #####
