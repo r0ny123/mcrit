@@ -58,7 +58,7 @@ def _sends_a_request(method):
             target = node.func.value
             if isinstance(target, ast.Name) and target.id == "requests":
                 return True
-            # self._session.<verb>(...), which every call but getSampleBinary goes through since #254
+            # self._session.<verb>(...), which every call goes through since #254
             if isinstance(target, ast.Attribute) and target.attr == "_session" and isinstance(target.value, ast.Name) and target.value.id == "self":
                 return True
             if isinstance(target, ast.Name) and target.id == "self" and node.func.attr == "_search_request":

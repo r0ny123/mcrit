@@ -1,5 +1,11 @@
 import datetime
+import re
 from typing import Optional
+
+# what PUT /functions/{id} accepts as a name, and so as a label
+_VALID_LABEL = re.compile(r"[ -~]{1,256}")
+# names smda makes up for functions it has no symbol for
+_GENERATED_NAME = re.compile(r"sub_[a-fA-F0-9]{1,16}")
 
 
 class FunctionLabelEntry:
@@ -14,6 +20,22 @@ class FunctionLabelEntry:
         self.username = username
         self.function_id = function_id
         self.timestamp = timestamp if timestamp is not None else datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+
+    @staticmethod
+    def labelFromReport(function_name, checked: bool = False) -> Optional[str]:
+        """The label a submitted report's function name gives, or None for no label.
+
+        A name smda generated says nothing and gives no label. With checked, the name is held to what
+        PUT /functions/{id} accepts, 1 to 256 printable ASCII characters once stripped: a report for
+        a sample that exists already labels functions that may well be someone else's. The first
+        report of a sample keeps every name its disassembly found, long and non-ASCII ones included.
+        """
+        if not isinstance(function_name, str) or not function_name or _GENERATED_NAME.match(function_name):
+            return None
+        if not checked:
+            return function_name
+        label = function_name.strip()
+        return label if _VALID_LABEL.fullmatch(label) else None
 
     def setFunctionId(self, function_id):
         self.function_id = function_id

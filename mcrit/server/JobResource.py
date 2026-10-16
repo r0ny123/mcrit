@@ -44,6 +44,18 @@ def _parse_str_csv(value):
     return [item for item in _csv_items(value) if item]
 
 
+def _parseJobDate(value) -> Optional[datetime.datetime]:
+    # a repeated parameter arrives as a list, which is no date either
+    if not isinstance(value, str):
+        return None
+    for date_format in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(value, date_format)
+        except ValueError:
+            continue
+    return None
+
+
 class JobResource:
     def __init__(self, index: MinHashIndex):
         self.index = index
@@ -116,29 +128,24 @@ class JobResource:
 
     @timing
     def on_delete_collection(self, req, resp):
-        """Delete jobs matching all given filters: ``method``, ``created_before`` and ``finished_before`` (``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM:SS``). Answers ``num_deleted``."""
+        """Delete jobs matching all given filters: ``method``, ``created_before`` and ``finished_before`` (``YYYY-MM-DD`` or ``YYYY-MM-DDTHH:MM:SS``; any other value answers 400). Answers ``num_deleted``."""
         # parse optional request parameters, to be used as an "AND" query
         method_filter = None
         if "method" in req.params:
             method_filter = req.params["method"]
-        created_before = None
-        if "created_before" in req.params:
-            try:
-                if len(req.params["created_before"]) == 10:
-                    created_before = datetime.datetime.strptime(req.params["created_before"], "%Y-%m-%d")
-                else:
-                    created_before = datetime.datetime.strptime(req.params["created_before"], "%Y-%m-%dT%H:%M:%S")
-            except ValueError:
-                pass
-        finished_before = None
-        if "finished_before" in req.params:
-            try:
-                if len(req.params["finished_before"]) == 10:
-                    finished_before = datetime.datetime.strptime(req.params["finished_before"], "%Y-%m-%d")
-                else:
-                    finished_before = datetime.datetime.strptime(req.params["finished_before"], "%Y-%m-%dT%H:%M:%S")
-            except ValueError:
-                pass
+        # a date that doesn't parse used to be dropped, and with it the only thing keeping the
+        # request from deleting every job and stored result
+        dates = {}
+        for name in ("created_before", "finished_before"):
+            dates[name] = None
+            if name in req.params:
+                dates[name] = _parseJobDate(req.params[name])
+                if dates[name] is None:
+                    resp.status = falcon.HTTP_400
+                    resp.data = jsonify({"status": "failed", "data": {"message": f"{name} has to be a date, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS."}})
+                    db_log_msg(self.index, req, f"JobResource.on_delete_collection - failed - invalid {name}.")
+                    return
+        created_before, finished_before = dates["created_before"], dates["finished_before"]
         # newest first
         result = self.index.deleteQueueData(method=method_filter, created_before=created_before, finished_before=finished_before)
         resp.data = jsonify({"status": "successful", "data": {"num_deleted": result}})
