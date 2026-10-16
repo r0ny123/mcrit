@@ -4,7 +4,7 @@ import hashlib
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -208,7 +208,9 @@ class Worker(QueueRemoteCallee):
         compact the collections they lived in (#68)."""
         now = datetime.now()
         delta = timedelta(seconds=self._storage_config.STORAGE_MONGODB_CLEANUP_TTL)
+        # the queue stamps jobs in local time, while smda stamps a sample in UTC
         time_cutoff = now - delta
+        sample_time_cutoff = datetime.now(UTC).replace(tzinfo=None) - delta
         LOGGER.info("Fetching data from the queues.")
         query_jobs = []
         for method in self.QUERY_JOB_METHODS:
@@ -225,7 +227,12 @@ class Worker(QueueRemoteCallee):
                 continue
             if sample_entry.sha256 not in samples_to_be_deleted:
                 samples_to_be_deleted[sample_entry.sha256] = []
-            if sample_entry.timestamp < time_cutoff:
+            # smda run in-process stamps an aware timestamp, which the memory backend keeps as is,
+            # while MongoDB stores the UTC wall time without the zone; compare it the way MongoDB keeps it
+            timestamp = sample_entry.timestamp
+            if timestamp.tzinfo is not None:
+                timestamp = timestamp.astimezone(UTC).replace(tzinfo=None)
+            if timestamp < sample_time_cutoff:
                 samples_to_be_deleted[sample_entry.sha256].append(sample_entry)
         for state, job in query_jobs:
             # a finished job is dated by when it finished, a failed one by when it last ran
@@ -315,9 +322,11 @@ class Worker(QueueRemoteCallee):
     # Reports PROGRESS
     @Remote(progress=True)
     def recalculateMinHashes(self, progress_reporter=NoProgressReporter()):
-        self._storage.deleteAllMinHashes(progress_reporter=progress_reporter)
+        # functions whose disassembly is gone keep their minhashes: this used to drop every minhash
+        # first and lose theirs for good, and then stamp their samples as current anyway
+        kept_sample_ids = self._storage.deleteRehashableMinHashes(progress_reporter=progress_reporter)
         num_updated = self.updateMinHashes(None, progress_reporter=progress_reporter)
-        self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION)
+        self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION, except_sample_ids=kept_sample_ids)
         return num_updated
 
     @staticmethod
@@ -368,10 +377,16 @@ class Worker(QueueRemoteCallee):
             # a sample without functions large enough to hash is repaired too: it simply holds no
             # minhashes afterwards, and is recorded as current like any other (#238)
             minhashes = self.calculateMinHashes(hashable) if hashable else []
+            # a function of the sample whose disassembly is gone keeps its minhash, as in
+            # recalculateMinHashes: dropping the sample's minhashes would take it along for good
+            minhash_bits = self.config.MINHASH_CONFIG.MINHASH_SIGNATURE_BITS
+            kept = [entry.getMinHash(minhash_bits=minhash_bits) for entry in function_entries if not entry.xcfg and entry.minhash]
             report["num_functions_dropped"] += self._storage.deleteMinHashesForSample(sample_id)
-            if minhashes:
-                self._storage.addMinHashes(minhashes)
-            self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION, [sample_id])
+            if minhashes or kept:
+                self._storage.addMinHashes(minhashes + kept)
+            if not kept:
+                # with kept minhashes from an older smda, the sample stays listed as stale
+                self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION, [sample_id])
             report["num_functions_rehashed"] += len(minhashes)
             report["num_samples_repaired"] += 1
             progress_reporter.step()

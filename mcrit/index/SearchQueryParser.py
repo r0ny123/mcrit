@@ -67,7 +67,6 @@ from pyparsing import (
     Forward,
     Group,
     Keyword,
-    OneOrMore,
     ParseBaseException,
     QuotedString,
     StringEnd,
@@ -83,6 +82,10 @@ from mcrit.index.SearchQueryTree import AndNode, NodeType, NotNode, OrNode, Sear
 
 
 class SearchQueryParser:
+    # bounds the parse time, which grows with the query's length; it is set above what the grammar
+    # accepted before AND/OR became loops (about 120 OR'd terms, about 9,000 characters as sha256 terms)
+    MAX_QUERY_LENGTH = 16384
+
     def __init__(self):
         self._methods = {
             "and": self._build_tree_and,
@@ -94,42 +97,45 @@ class SearchQueryParser:
         self._parser = self._get_parser()
 
     def _get_parser(self):
-        search_term = (
-            QuotedString('"', esc_char="\\", esc_quote='\\"') | QuotedString("'", esc_char="\\", esc_quote="\\'") | ZeroOrMore(Suppress(whitespace)) + CharsNotIn(whitespace + "()")
-        )
+        # no esc_quote: the escape character already covers an escaped quote, and offering both made
+        # the generated regex match every \" two ways, so an unterminated "\"\"\"... took 2^n steps
+        search_term = QuotedString('"', esc_char="\\") | QuotedString("'", esc_char="\\") | ZeroOrMore(Suppress(whitespace)) + CharsNotIn(whitespace + "()")
         identifier = Word(identchars, identbodychars + ".")
         operator = one_of("< <= > >= = != ? !?")
         condition_compare = identifier + (":" + operator + search_term).leave_whitespace()
         condition_equal = identifier + (":" + search_term).leave_whitespace()
         one_filter = Group(condition_compare | condition_equal | search_term).set_results_name("one_filter")
 
+        # The grammar must never parse the same input twice: without memoisation every retried
+        # alternative multiplies the work of everything nested inside it, so a few unbalanced
+        # parentheses kept a request thread busy for minutes. AND and OR chains are therefore
+        # loops instead of alternatives that start with the same operand, and NOT commits to its
+        # operand: a NOT followed by anything but the end of the query or ")" is never re-read as
+        # a search term, as that could only ever fail again on the same operand.
         operatorOr = Forward()
 
         operatorParenthesis = Group(Suppress("(") + operatorOr + Suppress(")")).set_results_name("parenthesis") | one_filter
 
         operatorNot = Forward()
-        operatorNot << (Group(Suppress(Keyword("NOT")) + operatorNot).set_results_name("not") | operatorParenthesis)
+        operatorNot << (Group(Suppress(Keyword("NOT")) + ~(StringEnd() | ")") - operatorNot).set_results_name("not") | operatorParenthesis)
 
-        operatorAnd = Forward()
-        operatorAnd << (
-            Group(operatorNot + Suppress(Keyword("AND")) + operatorAnd).set_results_name("and")
-            | Group(operatorNot + OneOrMore(~one_of("AND OR") + operatorAnd)).set_results_name("and")
-            | operatorNot
-        )
+        operatorAnd = Group(operatorNot + ZeroOrMore(Suppress(Keyword("AND")) + operatorNot | ~one_of("AND OR") + operatorNot)).set_results_name("and")
 
-        operatorOr << (Group(operatorAnd + Suppress(Keyword("OR")) + operatorOr).set_results_name("or") | operatorAnd)
+        operatorOr << Group(operatorAnd + ZeroOrMore(Suppress(Keyword("OR")) + operatorAnd)).set_results_name("or")
 
         parser = operatorOr + StringEnd()
         return parser
 
     def _build_tree_or(self, argument) -> NodeType:
-        assert len(argument) == 2
         children = [self._build_tree(child) for child in argument]
+        if len(children) == 1:
+            return children[0]
         return OrNode(children)
 
     def _build_tree_and(self, argument) -> NodeType:
-        assert len(argument) == 2
         children = [self._build_tree(child) for child in argument]
+        if len(children) == 1:
+            return children[0]
         return AndNode(children)
 
     def _build_tree_parenthesis(self, argument) -> NodeType:
@@ -156,6 +162,8 @@ class SearchQueryParser:
     def parse(self, string: str) -> NodeType:
         if string.strip(whitespace) == "":
             return AndNode([])
+        if len(string) > self.MAX_QUERY_LENGTH:
+            raise ValueError(f"Could not parse search query: it is longer than {self.MAX_QUERY_LENGTH} characters")
         try:
             raw_result = self._parser.parse_string(string)
         except ParseBaseException as parse_error:
@@ -163,6 +171,9 @@ class SearchQueryParser:
             # report it as a ValueError, which is what the REST layer already answers with a 400.
             # pyparsing's message names the offending character and its offset, so it is worth keeping.
             raise ValueError(f"Could not parse search query: {parse_error}") from parse_error
+        except RecursionError as recursion_error:
+            # every parenthesis and NOT nests the parse one level deeper, and Python's stack ends somewhere
+            raise ValueError("Could not parse search query: it is nested too deeply") from recursion_error
         assert len(raw_result) == 1
         result = self._build_tree(raw_result[0])
         return result
