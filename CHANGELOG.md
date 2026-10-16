@@ -15,6 +15,52 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deleting a sample left it in the pichash counts and the function-range index** ([#261]).
+  `deleteSample` took the sample out of the bands and the picblockhash index but not out of
+  `pichash_counts` or `function_ranges`, which adding a sample fills, so a deleted sample stayed
+  counted and a deleted and re-added one was counted twice. Measured on a 7,244-sample corpus after
+  475 samples were deleted and added back: the counts summed to 9,050,959 for 8,657,357 functions,
+  306 of 5,000 sampled counts wrong. Only `MINHASH_PICHASH_MAX_MATCHES` reads the counts, so a
+  deployment that leaves it at 0, the default, saw nothing; one that sets it could lose exact
+  matches whose pichash an inflated count pushed over the cap. A corpus that deleted samples
+  before this release still carries the surplus. `MongoDbStorage.rebuildPicHashCountIndex()`
+  clears it, though no route or client method runs it yet; `rebuild_function_range_index`
+  (`McritClient.rebuildFunctionRangeIndex()`) drops the stale ranges, which are harmless after a
+  delete since function ids are never reused. `clearStorage` (`POST /respawn`,
+  `McritClient.respawn()`) left both collections behind too, and there they did harm: it resets
+  the id counters and vouches for both indexes on the emptied database, so re-added samples were
+  counted twice, and with the matching shortlist on (`MINHASH_MATCHING_SHORTLIST_SIZE`, off by
+  default) their function ids could resolve to a cleared sample's range. It now drops both.
+  Deleting a sample now first sets `pichash_counts_removed: true` on its sample document and takes
+  it out of the counts only if that set changed the document, so a retried or overlapping delete
+  decrements once. The field is new in the stored data shape and normally lasts only as long as
+  the delete, as the sample document is removed with it; a delete that fails partway leaves it on
+  the sample until a retry completes the delete.
+
+- **`recalculatePicHashes` left the pichash counts keyed by the old hashes** ([#261]). It rewrites
+  `_pichash` in place and marked the picblockhash index incomplete, but not the counts, which went
+  on counting hashes the functions no longer carry and missed the new ones. Under
+  `MINHASH_PICHASH_MAX_MATCHES` a hash without a count document is dropped, so a rehashed function
+  whose new hash no other function held lost its exact matches; and with the decrement above,
+  deleting a rehashed sample would take its new hashes away from other samples holding them. A
+  recalculation that changes any pichash now marks the count index incomplete before it writes,
+  and logs that it did. **Run `MongoDbStorage.rebuildPicHashCountIndex()` afterwards**;
+  until then the cutoff counts from the functions collection, which is correct but pays the cost
+  the counts exist to avoid, and adds and deletes leave the counts alone. A run that changes no
+  pichash leaves them complete.
+
+### Changed
+
+- Every start creates the `(_pichash, df)` index on `pichash_counts` and the `sample_id` and
+  `first_function_id` indexes on `function_ranges`, the specs their rebuilds create ([#261]). Only
+  the rebuilds created them before, so a database that started empty, and so never needed a
+  rebuild, had neither: the upserts of every add, the cutoff's count lookups and the deletes above
+  each scanned the collection. Since `clearStorage` now drops both collections, that would also
+  have been the state after every respawn. Where a rebuild already ran they exist, and nothing
+  changes.
+
 ## [1.15.0] - 2026-10-12
 
 **Minor release: a cheaper PicHash recalculation, client fixes, family actors, an optional binary
@@ -1270,6 +1316,7 @@ date, the version, and what changed.
 [#202]: https://github.com/danielplohmann/mcrit/issues/202
 [#203]: https://github.com/danielplohmann/mcrit/issues/203
 [#215]: https://github.com/danielplohmann/mcrit/issues/215
+[#261]: https://github.com/danielplohmann/mcrit/issues/261
 [#257]: https://github.com/danielplohmann/mcrit/issues/257
 [#252]: https://github.com/danielplohmann/mcrit/issues/252
 [#249]: https://github.com/danielplohmann/mcrit/issues/249

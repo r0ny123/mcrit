@@ -371,6 +371,13 @@ class MongoDbStorage(StorageInterface):
             self._getDb()["samples"].create_index([(field, 1), ("sample_id", 1)])
         for field in ("family_id", "sample_id", "function_name", "offset", "num_instructions", "num_blocks"):
             self._getDb()["functions"].create_index([(field, 1), ("function_id", 1)])
+        # the pichash counts and the function ranges, with the specs their rebuilds create. Adds
+        # upsert into both by these keys, the MINHASH_PICHASH_MAX_MATCHES cutoff reads the counts by
+        # them and deleteSample removes from both by them (#261). Only the rebuilds created them
+        # before, so a fresh or cleared database, which never needed one, scanned on every write.
+        self._getDb()[self._PICHASH_COUNT_COLLECTION].create_index([("_pichash", 1), ("df", 1)])
+        self._getDb()[self._FUNCTION_RANGE_COLLECTION].create_index("sample_id")
+        self._getDb()[self._FUNCTION_RANGE_COLLECTION].create_index("first_function_id")
         # stored without guarantee of existence
         self._getDb()["query_samples"].create_index("sample_id")
         self._getDb()["query_samples"].create_index("sha256")
@@ -836,6 +843,19 @@ class MongoDbStorage(StorageInterface):
         self._pullBandEntries(function_minhashes)
         # drop this sample from the picblockhash index while its functions still exist to be read
         self._removeSampleFromPicBlockHashIndex(sample_id)
+        # and from the pichash counts and the function ranges, which addSmdaReport maintains as
+        # well; left in, a deleted and re-added sample was counted twice (#261). The counts are
+        # taken out at most once per sample: the queue runs a failed delete job again and two
+        # deletes of one sample can overlap, and a second decrement would leave other samples'
+        # hashes undercounted or without a count document, which drops their exact matches
+        # under MINHASH_PICHASH_MAX_MATCHES. A delete that dies after the claim but before the
+        # decrement leaves the counts too high, as before this fix, until rebuildPicHashCountIndex
+        # runs. One that dies after the decrement leaves them too low, since the sample's functions
+        # are still stored but no longer counted, until a retry completes the delete.
+        claim = self._getDb().samples.update_one({"sample_id": sample_id, "pichash_counts_removed": {"$ne": True}}, {"$set": {"pichash_counts_removed": True}})
+        if claim.modified_count:
+            self._removeSampleFromPicHashCounts(sample_id)
+        self._getDb()[self._FUNCTION_RANGE_COLLECTION].delete_many({"sample_id": sample_id})
 
         # remove functions
         self._deleteXcfgForFunctionIds([function_minhash["function_id"] for function_minhash in function_minhashes])
@@ -1457,6 +1477,10 @@ class MongoDbStorage(StorageInterface):
         # "picblockhashes" is the inverted block-hash index; leaving it behind would keep asserting
         # that hashes are held by samples that no longer exist, and getUniqueBlocks would believe it
         # the "sample_binaries" GridFS bucket holds the raw submissions (#95)
+        # the pichash counts and the function ranges go for the same reason as the picblockhash
+        # index (#261): _ensureIndexAndUnknownFamily vouches for both on the emptied database, so
+        # left behind, the counts would count every re-added function twice and the ranges would
+        # map the reset function ids to samples that no longer exist
         collections = [
             "samples",
             "families",
@@ -1471,6 +1495,8 @@ class MongoDbStorage(StorageInterface):
             "picblockhashes",
             "sample_binaries.files",
             "sample_binaries.chunks",
+            self._PICHASH_COUNT_COLLECTION,
+            self._FUNCTION_RANGE_COLLECTION,
         ]
         for band_id in range(self._storage_config.STORAGE_NUM_BANDS):
             collections.append("band_%d" % band_id)
@@ -2563,6 +2589,28 @@ class MongoDbStorage(StorageInterface):
         operations = [UpdateOne({"_pichash": encoded}, {"$inc": {"df": count}}, upsert=True) for encoded, count in increments.items()]
         self._getDb()[self._PICHASH_COUNT_COLLECTION].bulk_write(operations, ordered=False)
 
+    def _removeSampleFromPicHashCounts(self, sample_id: int) -> None:
+        """Take a sample's functions out of the pichash counts; runs before they are deleted.
+
+        The mirror of _addToPicHashCounts: one negative $inc per distinct hash. A hash that no
+        function holds any more loses its document, as a rebuild would never have written it. The
+        delete matches `df <= 0` per document, so a count raised again by a concurrent insert in
+        between is left alone.
+        """
+        if not self.isPicHashCountIndexComplete():
+            return
+        decrements: Dict[Any, int] = {}
+        for function_document in self._getDb().functions.find({"sample_id": sample_id, "_pichash": {"$ne": None}}, {"_pichash": 1, "_id": 0}):
+            encoded_pichash = function_document["_pichash"]
+            decrements[encoded_pichash] = decrements.get(encoded_pichash, 0) + 1
+        if not decrements:
+            return
+        collection = self._getDb()[self._PICHASH_COUNT_COLLECTION]
+        collection.bulk_write([UpdateOne({"_pichash": encoded}, {"$inc": {"df": -count}}) for encoded, count in decrements.items()], ordered=False)
+        encoded_pichashes = list(decrements)
+        for offset in range(0, len(encoded_pichashes), self._PICHASH_COUNT_WRITE_BATCH):
+            collection.delete_many({"_pichash": {"$in": encoded_pichashes[offset : offset + self._PICHASH_COUNT_WRITE_BATCH]}, "df": {"$lte": 0}})
+
     def rebuildPicHashCountIndex(self, progress_reporter=None) -> int:
         """Count holders per pichash from the functions collection; returns distinct hashes.
 
@@ -3242,10 +3290,12 @@ class MongoDbStorage(StorageInterface):
         xcfg_missing = 0
         samples_skipped = 0
         picblockhash_index_invalidated = False
+        pichash_count_index_invalidated = False
         for sample_id, sample_info in samples_to_be_updated.items():
             pic_hash_updates = []
             sample_xcfg_missing = 0
             picblockhashes_updated_before = picblockhashes_updated
+            functions_updated_before = functions_updated
             sample_function_documents = list(self._getDb().functions.find({"sample_id": sample_id}, {"function_id": 1, "_pichash": 1, "_picblockhashes": 1, "_xcfg": 1, "_id": 0}))
             # one $in for the whole sample rather than a lookup per function (#137); inline
             # `_xcfg` is the fallback for pre-migration documents (see _attachXcfgBlobs)
@@ -3310,6 +3360,14 @@ class MongoDbStorage(StorageInterface):
                     # old against new hashes per function, which is what the rebuild does anyway.
                     self._setPicBlockHashIndexComplete(False)
                     picblockhash_index_invalidated = True
+                if functions_updated > functions_updated_before and not pichash_count_index_invalidated:
+                    # the same for the pichash counts, which are keyed by the hash: left complete,
+                    # they would go on counting the old hashes and miss the new ones, which the
+                    # cutoff then drops, and a later deleteSample would decrement the new ones,
+                    # taking them away from other samples holding them (#261). Until rebuildPicHashCountIndex runs, the MINHASH_PICHASH_MAX_MATCHES
+                    # cutoff counts from the functions collection, slower but correct.
+                    self._setPicHashCountIndexComplete(False)
+                    pichash_count_index_invalidated = True
                 self._getDb().functions.bulk_write(pic_hash_updates, ordered=False)
             # only a sample whose every function was rehashed holds hashes of this smda and picblocks,
             # whether or not any of them changed; smda_version keeps naming the smda of the report
@@ -3334,6 +3392,8 @@ class MongoDbStorage(StorageInterface):
             )
         if picblockhash_index_invalidated:
             LOGGER.warning("picblockhash index invalidated by the recalculation - run rebuildPicBlockHashIndex().")
+        if pichash_count_index_invalidated:
+            LOGGER.warning("pichash count index invalidated by the recalculation - run rebuildPicHashCountIndex().")
         return {
             "outdated_samples": total_samples,
             "stale_picblockhash_samples": num_stale_picblockhash_samples,
