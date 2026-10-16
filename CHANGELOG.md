@@ -125,6 +125,30 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   and others are left out. The first report of a sample keeps every name it holds, long mangled
   and non-ASCII ones included, as before. On MongoDB, a label for a function deleted meanwhile no
   longer recreates it as a document holding only that label.
+- **Search answered 500 for input it couldn't serve.** Only a `ValueError` was answered as a client
+  error, so each of these failed with a traceback, on MongoDB, in memory, or both:
+  - an integer beyond 63 bits for an `_id` or `num_` field, or beyond 64 bits for an `offset`;
+  - a `pichash` that wasn't a number;
+  - a numeric field compared with text;
+  - a query nested fifty levels deep.
+
+  They are 400s now, with a message saying what's wrong. A number in a query may still be `0x`
+  hex, and now also decimal with leading zeros, which was compared as text and found nothing, but
+  no longer a fraction or a negative offset. On MongoDB, an
+  `offset` of 2^63 and above, where 64-bit kernel code sits, now finds the function stored there;
+  it was a 500. MongoDB stores such an offset as a negative number and sorts it below every other
+  one, so a range comparison with one (`offset:>=0xffffffff80000000`) is a 400 there rather than
+  a wrong answer; in memory it works.
+- **`GET /recalculate_minhashes` lost the minhashes it couldn't compute again.** It dropped every
+  minhash first and then hashed the functions that have disassembly, so the minhashes of functions
+  whose disassembly is gone (`STORAGE_DROP_DISASSEMBLY`, or never stored) were gone for good, and their samples were recorded as hashed by the running smda all the same.
+  Those minhashes are now kept and put into the fresh band index, and only the samples hashed
+  again are recorded as current. `repairMinHashes` dropped them the same way for a sample only some
+  of whose functions still have disassembly; it keeps them now, and such a sample stays listed as
+  stale, so each repair hashes its other functions again and `/status` keeps counting it: that
+  count no longer reaches zero while such samples are left. The fresh band index also gets its
+  `(band_hash, df)` and `(band_hash, bucket)` indexes right away; they used to come back only with
+  the next start.
 
 ## [1.15.0] - 2026-10-12
 

@@ -1,7 +1,7 @@
 import datetime
 import logging
 import random
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
 
 from packaging import version
 
@@ -1086,9 +1086,9 @@ class StorageInterface:
         the rest of the index; how many functions had one (#142)."""
         raise NotImplementedError
 
-    def setMinHashVersionForSamples(self, smda_version: str, sample_ids: Optional[List[int]] = None) -> None:
+    def setMinHashVersionForSamples(self, smda_version: str, sample_ids: Optional[List[int]] = None, except_sample_ids: Optional[Iterable[int]] = None) -> None:
         """Record which smda escaped the minhashes of the samples (all when None) (#142), and at
-        which shingler revision they were computed (#238)."""
+        which shingler revision they were computed (#238); except_sample_ids are left as they are."""
         raise NotImplementedError
 
     def getSamplesWithStaleMinHashes(self, threshold_version: str) -> List[int]:
@@ -1116,6 +1116,19 @@ class StorageInterface:
         """How many samples recalculateAllPicHashes found missing disassembly under the running
         smda, and so no longer picks, for /status (#249). None where the backend does not record it."""
         return None
+
+    def deleteRehashableMinHashes(self, progress_reporter=None) -> Set[int]:
+        """Prepare a full minhash recalculation: drop the band index and the minhashes of every
+        function whose disassembly is stored, so they can be computed again.
+
+        A function whose disassembly is gone (STORAGE_DROP_DISASSEMBLY, or never stored) can't be
+        hashed again, so it keeps its minhash and is put into the fresh band index right away.
+        Args:
+            progress_reporter: optional callable invoked with progress updates
+        Returns:
+            the ids of the samples that hold such a kept minhash
+        """
+        raise NotImplementedError
 
     def deleteAllMinHashes(self, progress_reporter=None) -> int:
         """drop every minhash in all function_entries as a preparation for a full rebuild
