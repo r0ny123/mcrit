@@ -1,6 +1,7 @@
 import datetime
 import hashlib
-from typing import Any, Dict
+import string
+from typing import Any, Dict, Tuple
 
 
 def wrap_string(input_str, max_column_length=100, padding=0):
@@ -20,6 +21,21 @@ def wrap_string(input_str, max_column_length=100, padding=0):
     formatted_output = join_char.join(lines)
 
     return formatted_output
+
+
+def coverPreference(block_hash, entry) -> Tuple[int, int]:
+    """How the block cover orders blocks that cover as many samples with the same score (#283).
+
+    Scores tie a lot: with a single sample, every block of 7 to 11 instructions scores 100.0, and
+    the cover used to take whichever of them came last in the dict. Among tied blocks, the one whose
+    YARA string fixes the most bytes now wins, wildcards not counted, so a block that is mostly a
+    call or a short epilogue loses to one with distinctive opcodes and operands. The lowest
+    picblockhash settles what is still equal, so the same input always gives the same cover.
+    MongoDbStorage keys the blocks by their "0x" hex, MemoryStorage by the integer, which a
+    result that went through JSON carries as a decimal string.
+    """
+    fixed_nibbles = sum(1 for char in entry.get("escaped_sequence") or "" if char in string.hexdigits)
+    return fixed_nibbles, -(int(block_hash, 0) if isinstance(block_hash, str) else block_hash)
 
 
 # Dataclass, post init
@@ -95,13 +111,20 @@ class UniqueBlocksResult:
         sample_ids = [int(v) for v in self.statistics["by_sample_id"].keys()]
         sample_coverage = {sample_id: 0 for sample_id in sample_ids}
         samples_covered = set()
+        preferences = {block_hash: coverPreference(block_hash, entry) for block_hash, entry in filtered_blocks.items()}
         while True:
             # calculate block_scores as how much benefit they bring, i.e. how many uncovered samples they can cover at once
             block_candidates = []
             for block_hash, entry in filtered_blocks.items():
                 sample_ids_coverable = set(entry["samples"]).difference(samples_covered)
                 if sample_ids_coverable and block_hash not in yara_rule_blocks:
-                    candidate = {"block_hash": block_hash, "coverable": sample_ids_coverable, "value": len(sample_ids_coverable), "score": entry["score"]}
+                    candidate = {
+                        "block_hash": block_hash,
+                        "coverable": sample_ids_coverable,
+                        "value": len(sample_ids_coverable),
+                        "score": entry["score"],
+                        "preference": preferences[block_hash],
+                    }
                     block_candidates.append(candidate)
             # check if we are done yet, successful or not
             if len(samples_covered) == len(sample_ids):
@@ -113,7 +136,7 @@ class UniqueBlocksResult:
                     block_cover["has_rule"] = True
                 break
             # if not, choose the best block
-            block_candidates.sort(key=lambda i: (i["value"], i["score"]))
+            block_candidates.sort(key=lambda i: (i["value"], i["score"], i["preference"]))
             selected_block: Dict[str, Any] = block_candidates.pop()
             yara_rule_blocks.append(selected_block["block_hash"])
             # and update counters
