@@ -251,7 +251,10 @@ class McritConsole:
             "-l", "--library", action="store_true", help="Set/Override SmdaReport with the library flag (only in modes: file/dir/recursive, default: False)."
         )
         client_submit.add_argument(
-            "-u", "--force_update", action="store_true", help="Force update of family/version/library, even if file is already in MCRIT (only in modes: file/dir, default: False)."
+            "-u",
+            "--force_update",
+            action="store_true",
+            help="Force update of family/version/library, even if file is already in MCRIT (only in modes: file/dir/recursive, default: False).",
         )
         client_submit.add_argument("-x", "--executables_only", action="store_true", help="Only process files that are parsable PE or ELF files (default: False).")
         client_submit.add_argument("-o", "--output", type=str, help="Optionally store SMDA reports in folder OUTPUT, which is created if not existing.")
@@ -475,6 +478,14 @@ class McritConsole:
             print(f"UPDATING: Sample ID {sample_entry.sample_id} with SHA256: {sample_entry.sha256} - updating family/version/library.")
             self.client.modifySample(sample_id, family_name=modified_family, version=modified_version, is_library=modified_is_library)
 
+    def _addReport(self, smda_report, filepath):
+        # a report without functions would only add an empty sample, which dir mode already skipped
+        if not smda_report.xcfg:
+            print(f"SKIPPING: {filepath} - SMDA found no functions.")
+            return
+        print(smda_report)
+        self.client.addReport(smda_report)
+
     def _handle_submit_file(self, args):
         sample_sha256 = sha256(readFileContent(args.filepath))
         sample_entry = self.client.getSampleBySha256(sample_sha256)
@@ -486,8 +497,7 @@ class McritConsole:
             return
         smda_report = getSmdaReportFromFilepath(args, args.filepath)
         if smda_report:
-            print(smda_report)
-            self.client.addReport(smda_report)
+            self._addReport(smda_report, args.filepath)
 
     def _handle_submit_dir(self, args):
         mcrit_sample_entries = self.client.getSamples()
@@ -530,12 +540,11 @@ class McritConsole:
                         if args.force_update:
                             self._update_sample_metadata(sample_entry, args)
                         else:
-                            print(f"SKIPPING: {args.filepath} - already in MCRIT.")
+                            print(f"SKIPPING: {filepath} - already in MCRIT.")
                         continue
                     smda_report = getSmdaReportFromFilepath(args, filepath)
-                    if smda_report and smda_report.xcfg:
-                        print(smda_report)
-                        self.client.addReport(smda_report)
+                    if smda_report:
+                        self._addReport(smda_report, filepath)
 
     def _handle_submit_recursive(self, args):
         mcrit_samples = self.client.getSamples()
@@ -547,13 +556,21 @@ class McritConsole:
             for filename in files:
                 filepath = os.sep.join([root, filename])
                 if os.path.isfile(filepath):
-                    if sha256(readFileContent(filepath)) in mcrit_samples_by_sha256:
-                        print(f"SKIPPING: {filepath} - already in MCRIT.")
-                        continue
                     # a file in the root itself has no family folder, and getFamilyName("") would
                     # answer the first folder of the working directory
                     family_name = getFamilyName(folder_relative_path) if folder_relative_path else ""
                     version = getSampleVersion(folder_relative_path, family_name)
+                    sample_entry = mcrit_samples_by_sha256.get(sha256(readFileContent(filepath)))
+                    if sample_entry:
+                        if args.force_update:
+                            # the folders name family and version, and what none names, MCRIT keeps:
+                            # both for a file in the root, the version for one in a family folder
+                            args.family = family_name or None
+                            args.version = version or None
+                            self._update_sample_metadata(sample_entry, args)
+                        else:
+                            print(f"SKIPPING: {filepath} - already in MCRIT.")
+                        continue
                     print("Processing file: ", filepath, " as ", family_name, "|", version)
                     if args.worker:
                         args.family = family_name
@@ -565,8 +582,7 @@ class McritConsole:
                             smda_report.family = family_name
                             smda_report.version = version
                             print(filepath)
-                            print(smda_report)
-                            self.client.addReport(smda_report)
+                            self._addReport(smda_report, filepath)
 
     def _handle_submit_malpedia(self, args):
         # verify that we have a malpedia root
@@ -613,8 +629,7 @@ class McritConsole:
                         smda_report.family = malpedia_family
                         smda_report.version = malpedia_version
                         print(malpedia_filepath)
-                        print(smda_report)
-                        self.client.addReport(smda_report)
+                        self._addReport(smda_report, malpedia_filepath)
         # warn about files that appear deleted because not present in Malpedia but in MCRIT (based on name schema)
         for filename, mcrit_sample in mcrit_samples_by_filename.items():
             if self._isMalpediaFilename(filename) and filename not in malpedia_samples_by_filename:

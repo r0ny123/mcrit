@@ -29,6 +29,15 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   `continue` after the progress line made the submission unreachable. Now that files are submitted,
   a file directly in the given folder gets no family, where it would have been named after the
   first folder of the working directory.
+- **`client submit` added an empty sample for a file SMDA found no functions in.** Dir mode already
+  skipped it; file, recursive and malpedia mode, and with them every mode run with `--worker`, which
+  submits each file in file mode, now skip it too, and all four say so.
+- **`client submit --mode recursive` ignored `--force_update`.** A file already in MCRIT is now
+  updated to the family and version its folders name, as dir mode updates it to `--family` and
+  `--version`. What no folder names, MCRIT keeps: the version of a file directly in a family folder,
+  and both for a file directly in the given folder.
+- **`client submit --mode dir` named the folder, not the file, when skipping a file already in
+  MCRIT.**
 
 ## [1.16.0] - 2026-10-16
 
