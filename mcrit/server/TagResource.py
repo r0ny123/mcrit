@@ -72,6 +72,7 @@ class TagResource:
 
     @timing
     def on_get_collection(self, req, resp):
+        """The distinct tags on families, samples or functions (``entity``), each with the number of entities carrying it."""
         entity = req.params.get("entity")
         if entity not in TAG_ENTITIES:
             return self._fail(req, resp, falcon.HTTP_400, f"entity must be one of {', '.join(TAG_ENTITIES)}.", "on_get_collection - failed - invalid entity.")

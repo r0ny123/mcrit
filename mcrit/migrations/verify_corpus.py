@@ -66,10 +66,19 @@ class Examples:
 
 def _count_functions(db, expected_minhash_length: int) -> List[Dict[str, Any]]:
     """Functions per (sample, family) with how many hold a MinHash of the wrong length: one pass."""
-    has_string_minhash = {"$eq": [{"$type": "$minhash"}, "string"]}
+    # in hex digits: a minhash is stored as BSON binary since #256, and as hex text before
+    minhash_length = {
+        "$switch": {
+            "branches": [
+                {"case": {"$eq": [{"$type": "$minhash"}, "string"]}, "then": {"$strLenBytes": "$minhash"}},
+                {"case": {"$eq": [{"$type": "$minhash"}, "binData"]}, "then": {"$multiply": [2, {"$binarySize": "$minhash"}]}},
+            ],
+            "default": 0,
+        }
+    }
     pipeline = [
         # projected first: nothing past these three fields leaves the storage engine's documents
-        {"$project": {"_id": 0, "sample_id": 1, "family_id": 1, "minhash_length": {"$cond": [has_string_minhash, {"$strLenBytes": "$minhash"}, 0]}}},
+        {"$project": {"_id": 0, "sample_id": 1, "family_id": 1, "minhash_length": minhash_length}},
         {
             "$group": {
                 "_id": {"sample_id": "$sample_id", "family_id": "$family_id"},

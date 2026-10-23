@@ -174,18 +174,20 @@ class CompleteMinHashes(unittest.TestCase):
         self.assertEqual([], self._stale(index))
         self.assertTrue(all(not f.xcfg for f in self._functions(index, sample_id)))
 
-    def test_a_failed_hashing_finishes_nothing(self):
-        """A function smda cannot rebuild fails the whole job, before any sample is finished."""
+    def test_a_failed_hashing_finishes_only_the_other_samples(self):
+        """A function smda cannot rebuild is skipped and stays unhashed (#266), so its sample stays
+        pending with its disassembly, while the job finishes every other sample."""
         index = self._index()
         sample_id = self._deferred(index)
         other_id = self._deferred(index, AARCH64_REPORT)
-        self._break_xcfg(index, self._unhashed_ids(index, sample_id)[0])
-        with self.assertRaisesRegex(ValueError, "lacks blocks"):
-            index.queue._worker.updateMinHashes(None, finish_samples=True)
-        self.assertEqual([sample_id, other_id], self._pending(index))
-        self.assertEqual([sample_id, other_id], self._stale(index))
+        broken_id = self._unhashed_ids(index, sample_id)[0]
+        self._break_xcfg(index, broken_id)
+        index.queue._worker.updateMinHashes(None, finish_samples=True)
+        self.assertEqual([broken_id], self._unhashed_ids(index, sample_id))
+        self.assertEqual([sample_id], self._pending(index))
+        self.assertEqual([sample_id], self._stale(index))
         self.assertTrue(all(f.xcfg for f in self._functions(index, sample_id)))
-        self.assertTrue(all(f.xcfg for f in self._functions(index, other_id)))
+        self.assertFalse(any(f.xcfg for f in self._functions(index, other_id)))
 
     def test_a_sample_stored_by_an_older_smda_is_finished_after_its_repair(self):
         """repairMinHashes rehashed it with the running smda, so the next complete can finish it."""

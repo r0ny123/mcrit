@@ -2569,9 +2569,22 @@ class MongoDbStorage(StorageInterface):
             # none of them, rather than the ones before the document that failed
             self._discardFunctions(function_ids)
             raise
-        # counted once stored, so that discardImportedSample takes off what it finds stored
-        for family_id, num_functions in Counter(function_dict["family_id"] for function_dict in functions_as_dicts).items():
-            self._updateFamilyStats(family_id, 0, num_functions, 0)
+        # counted once stored, so that discardImportedSample takes off what it finds stored. A count
+        # that fails - a family counter that would overflow - leaves none of them counted nor stored,
+        # or discardImportedSample would take off functions that were never counted
+        counted = []
+        try:
+            for family_id, num_functions in Counter(function_dict["family_id"] for function_dict in functions_as_dicts).items():
+                self._updateFamilyStats(family_id, 0, num_functions, 0)
+                counted.append((family_id, num_functions))
+        except Exception:
+            for family_id, num_functions in counted:
+                try:
+                    self._updateFamilyStats(family_id, 0, -num_functions, 0)
+                except Exception:
+                    LOGGER.exception("Could not take the functions of a failed import off family %d.", family_id)
+            self._discardFunctions(function_ids)
+            raise
         # counted first, so that discardImportedSample can take out the counts of whatever functions it
         # finds stored; the other indexes it undoes whether they were written or not. Counts that fail,
         # in all or in part, it leaves alone, as claimed, and as they may be off now, the cutoff counts

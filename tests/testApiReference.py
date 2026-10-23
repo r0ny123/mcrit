@@ -2,6 +2,7 @@ import ast
 import logging
 import os
 import unittest
+from unittest.mock import MagicMock, patch
 
 from mcrit.server import api_reference
 
@@ -13,9 +14,12 @@ class ApiReferenceTest(unittest.TestCase):
     every responder must carry a docstring for it to describe"""
 
     def setUp(self):
-        from mcrit.server.application_routes import get_app
+        from mcrit.server import application_routes
 
-        self.entries = api_reference.routes(get_app())
+        # the route table only: create_index() would build a MinHashIndex on the default config,
+        # i.e. a MongoDB storage and queue at 127.0.0.1:27017
+        with patch.object(application_routes, "create_index", return_value=MagicMock()):
+            self.entries = api_reference.routes(application_routes.get_app())
 
     def test_every_route_is_documented(self):
         undocumented = ["%s %s" % (entry["method"], entry["path"]) for entry in self.entries if not entry["doc"]]

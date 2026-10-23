@@ -100,16 +100,19 @@ class RebuildPathsTest(unittest.TestCase):
 
     def test_minhashing_skips_a_function_it_cannot_rebuild_or_hash(self):
         num_hashable, broken = self._breakTwoHashableFunctions()
+        # since #265 the shingler reads a function whose offset is no block as one without a prologue,
+        # so of the two only the one smda cannot rebuild stays unhashed
+        incomplete = min(broken)
         for pool in (False, True):
             self.worker._minhash_config.MINHASH_POOL_INDEXING = pool
             with patch("mcrit.Worker.LOGGER") as logger:
                 minhashes = self.worker.calculateMinHashes(self.storage.getUnhashedFunctions(None))
-            self.assertEqual(num_hashable - 2, len(minhashes), pool)
-            self.assertFalse(broken.intersection(minhash.function_id for minhash in minhashes), pool)
+            self.assertEqual(num_hashable - 1, len(minhashes), pool)
+            self.assertEqual(broken - {incomplete}, broken.intersection(minhash.function_id for minhash in minhashes), pool)
             self.assertIn("cannot be rebuilt", logger.warning.call_args.args[0])
         # recalculating every minhash, which drops them first, keeps all the others
-        self.assertEqual(num_hashable - 2, self.worker.recalculateMinHashes())
-        self.assertEqual(num_hashable - 2, sum(1 for entry in self.storage.getFunctions(0, 0) if entry.minhash))
+        self.assertEqual(num_hashable - 1, self.worker.recalculateMinHashes())
+        self.assertEqual(num_hashable - 1, sum(1 for entry in self.storage.getFunctions(0, 0) if entry.minhash))
 
     def test_repairing_minhashes_leaves_a_sample_with_an_unhashable_function_alone(self):
         self.worker._minhash_config.MINHASH_POOL_INDEXING = False

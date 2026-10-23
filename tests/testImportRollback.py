@@ -351,8 +351,14 @@ class MemoryImportRollbackTest(unittest.TestCase):
     def testFunctionCountOverflowingItsFamilyLeavesNothingBehind(self):
         # a count that fits 64 bit, but not added to the family's: MongoDB refuses the increment once
         # the sample is stored, while memory storage's counters do not overflow
+        # since #265 a family counts the functions stored, not the statistics an entry states, so the
+        # counter is set where adding the imported functions takes it beyond 64 bit
         export = copy.deepcopy(self.export)
-        export["sample_entries"][EXISTING_FAMILY_SHA256]["statistics"]["num_functions"] = 2**63 - 1
+        family_id = self.storage.getFamilyId("win.existing")
+        if self.COUNTERS_OVERFLOW:
+            self.storage._getDb().families.update_one({"family_id": family_id}, {"$set": {"num_functions": 2**63 - 1}})
+        else:
+            self.storage._families[family_id].num_functions = 2**63 - 1
         before = self._snapshot()
         if self.COUNTERS_OVERFLOW:
             with self.assertRaises(Exception):
