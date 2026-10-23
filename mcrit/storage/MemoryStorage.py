@@ -23,7 +23,7 @@ from mcrit.storage.FunctionEntry import FunctionEntry
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache, StorageBackedMatchingCache
 from mcrit.storage.SampleEntry import TIMESTAMP_FORMAT, SampleEntry
-from mcrit.storage.StorageInterface import BinaryStream, StorageInterface
+from mcrit.storage.StorageInterface import BinaryStream, StorageInterface, isSha256
 
 if TYPE_CHECKING:  # pragma: no cover
     from smda.common.SmdaFunction import SmdaFunction
@@ -888,6 +888,9 @@ class MemoryStorage(StorageInterface):
             if entry is not None:
                 entries[sample_id] = entry
         return entries
+
+    def getPresentSha256s(self, sha256s: Iterable[str]) -> Set[str]:
+        return {sha256 for sha256 in sha256s if isSha256(sha256) and sha256 in self._sample_by_sha256}
 
     def getSampleBySha256(self, sha256: str, is_query=False) -> Optional["SampleEntry"]:
         sample_entry = None

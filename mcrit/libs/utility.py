@@ -1,6 +1,7 @@
 import base64
 import io
 import zipfile
+import zlib
 
 
 def generate_unique_pairs(data):
@@ -70,15 +71,20 @@ def decompress_decode(compressed_b64):
     zip_buffer = io.BytesIO(de_b64ed)
     decompressed = ""
     max_size = max(MAX_DECOMPRESSION_RATIO * len(compressed_b64), MIN_DECOMPRESSED_SIZE)
-    with zipfile.ZipFile(zip_buffer, "r", zipfile.ZIP_DEFLATED, False) as zip_file:
-        content_info = zip_file.getinfo("content")
-        # only what compress_encode writes: bzip2 and LZMA members are inflated in one piece, which no read size bounds
-        if content_info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
-            raise ValueError("Compressed content must be deflated or stored.")
-        if content_info.file_size > max_size:
-            raise ValueError(f"Compressed content inflates to more than {MAX_DECOMPRESSION_RATIO} times its size and {MIN_DECOMPRESSED_SIZE} bytes.")
-        with zip_file.open(content_info) as content_file:
-            decompressed = content_file.read(max_size + 1)
+    try:
+        with zipfile.ZipFile(zip_buffer, "r", zipfile.ZIP_DEFLATED, False) as zip_file:
+            content_info = zip_file.getinfo("content")
+            # only what compress_encode writes: bzip2 and LZMA members are inflated in one piece, which no read size bounds
+            if content_info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise ValueError("Compressed content must be deflated or stored.")
+            if content_info.file_size > max_size:
+                raise ValueError(f"Compressed content inflates to more than {MAX_DECOMPRESSION_RATIO} times its size and {MIN_DECOMPRESSED_SIZE} bytes.")
+            with zip_file.open(content_info) as content_file:
+                decompressed = content_file.read(max_size + 1)
+    except (zipfile.BadZipFile, KeyError, zlib.error, EOFError, RuntimeError) as error:
+        # no zip, no content member, a corrupt or truncated deflate stream, an encrypted member or one
+        # of a method zipfile lacks (NotImplementedError is a RuntimeError): content that is not readable
+        raise ValueError(f"Compressed content cannot be read ({type(error).__name__}: {error})") from error
     if len(decompressed) > max_size:
         raise ValueError(f"Compressed content inflates to more than {MAX_DECOMPRESSION_RATIO} times its size and {MIN_DECOMPRESSED_SIZE} bytes.")
     return decompressed

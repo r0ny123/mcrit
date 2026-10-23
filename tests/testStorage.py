@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from bson import encode as bson_encode
+from pymongo.collection import Collection
 from smda.common.SmdaReport import SmdaReport
 
 from mcrit.config.McritConfig import McritConfig
@@ -703,6 +704,21 @@ class MemoryStorageTest(_MemoryStorageFixture, TestCase):
         sample_entry = self.storage.addSmdaReport(smda_report)
         self.assertEqual(sample_entry.sample_id, self.storage.getSampleBySha256(smda_report.sha256).sample_id)
         self.assertEqual(None, self.storage.getSampleBySha256(64 * "0"))
+
+    def testGetPresentSha256s(self):
+        self.storage.clearStorage()
+        self.assertEqual(set(), self.storage.getPresentSha256s([]))
+        smda_report = SmdaReport.fromFile(self.example_file_path)
+        self.storage.addSmdaReport(smda_report)
+        absent = [f"{index:064x}" for index in range(25)]
+        self.assertEqual({smda_report.sha256}, self.storage.getPresentSha256s(absent + [smda_report.sha256, smda_report.sha256, 7]))
+        # only what can be a sha256 is looked up: keys this long took one $in query beyond 16 MB
+        self.assertEqual(set(), self.storage.getPresentSha256s(["x" * (9 * 1024 * 1024), "y" * (9 * 1024 * 1024), "zz" * 32]))
+        if isinstance(self.storage, MongoDbStorage):
+            # one query per chunk: 26 values in chunks of 10 take three
+            with patch.object(MongoDbStorage, "_PRESENT_SHA256S_CHUNK", 10), patch.object(Collection, "find", autospec=True, side_effect=Collection.find) as find:
+                self.assertEqual({smda_report.sha256}, self.storage.getPresentSha256s(absent + [smda_report.sha256]))
+            self.assertEqual(3, len([call for call in find.call_args_list if call.args[0].name == "samples"]))
 
     def testFunctionHandling(self):
         self.storage.clearStorage()

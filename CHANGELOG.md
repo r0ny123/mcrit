@@ -17,11 +17,31 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Fixed
 
-- **`POST /import` answers 400 for an export whose version is missing or not a version.** A missing
-  or non-text version was a 500, and any text sorting above `"0.0.0"` was accepted, `latest` and
-  `0.0.0rc1` included, because versions were compared as strings. They are now compared by PEP 440
-  ordering, and an invalid one is answered with 400 ("Import rejected"). The oldest accepted version
-  is still above `0.0.0`, and the shingler and MinHash configuration hashes must still match.
+- **`POST /import` answers 400 for an export it refuses, and stores nothing of it (#266).** An
+  export of another shingler or MinHash configuration, or of a version that is too old, was answered
+  with 200 and `data: null`, which a client could not tell from success (`McritClient` with
+  `raise_client_errors=True` now raises `McritBadRequest` where it returned `None`). A missing or
+  non-text version was a 500, and any text sorting above `"0.0.0"` was accepted, `latest` and
+  `0.0.0rc1` included, because versions were compared as strings; they are now compared by PEP 440
+  ordering. All of these are answered with 400 ("Import rejected: ..."), as is an export whose
+  structure cannot be read: a section missing or no mapping; a sample, present here already or not,
+  whose function count is not a count or whose architecture is neither text nor null; a field
+  missing from the entry of a sample to be stored, or its `is_library` not a boolean; a family id
+  that is no number, or that names two families; a family name other than text or null; family
+  actors that are not a list; a function whose pichash is no number; content that does not inflate
+  (corrupt, truncated, encrypted) or parse; JSON nested too deeply. A refused export stores nothing,
+  its families included, which a malformed export used to leave behind. Function fields are checked
+  only as far as building the entries needs, so some malformed ones still fail while storing, with a
+  500. `MinHashIndex.addImportData` raises `ImportRejected`, a `ValueError`, where it returned
+  `None`.
+
+- **`POST /import`: what an accepted export changes.** A sample whose family the export names null,
+  as older versions export a report without a family, used to land in a family named null and now
+  goes to the default family. An error while storing, a failed MongoDB insert say, is still a 500
+  and as before removes the samples the import had added, but may leave the families it added for
+  them. The actors of families the import found are merged last and only once everything else is
+  stored, so a failure no longer changes them, and an error merging them is logged rather than
+  failing an import that is otherwise complete.
 
 - **Memory storage: deleting a sample left its PicHashes behind.** `deleteSample` and
   `discardImportedSample` emptied a PicHash's set of matches but kept the key, so `isPicHash` stayed
