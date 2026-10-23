@@ -979,7 +979,7 @@ class Worker(QueueRemoteCallee):
             band_df_cutoff=band_df_cutoff,
         )
         match_report = matcher.getMatchesForSample(sample_id, other_sample_id)
-        return match_report
+        return self._asJobResult(matcher, match_report)
 
     # Reports PROGRESS
     @Remote(progress=True, results_version=RESULTS_VERSION, time_limited=True)
@@ -1002,7 +1002,7 @@ class Worker(QueueRemoteCallee):
             band_df_cutoff=band_df_cutoff,
         )
         match_report = matcher.getMatchesForSample(sample_id, other_sample_ids)
-        return match_report
+        return self._asJobResult(matcher, match_report)
 
     @Remote(results_version=RESULTS_VERSION, time_limited=True)
     def combineMatchesToCross(self, sample_to_job_id):
