@@ -28,20 +28,18 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   whose function count is not a count or whose architecture is neither text nor null; a field
   missing from the entry of a sample to be stored, or its `is_library` not a boolean; a family id
   that is no number, or that names two families; a family name other than text or null; family
-  actors that are not a list; a function whose pichash is no number; content that does not inflate
-  (corrupt, truncated, encrypted) or parse; JSON nested too deeply. A refused export stores nothing,
-  its families included, which a malformed export used to leave behind. Function fields are checked
-  only as far as building the entries needs, so some malformed ones still fail while storing, with a
-  500. `MinHashIndex.addImportData` raises `ImportRejected`, a `ValueError`, where it returned
-  `None`.
+  actors that are not a list; a function whose pichash is neither a number nor null; content that
+  does not inflate (corrupt, truncated, encrypted) or parse; JSON nested too deeply; and what the
+  storage cannot hold (#300, below). A refused export stores nothing, its families included, which a
+  malformed export used to leave behind. `MinHashIndex.addImportData` raises `ImportRejected`, a
+  `ValueError`, where it returned `None`.
 
 - **`POST /import`: what an accepted export changes.** A sample whose family the export names null,
   as older versions export a report without a family, used to land in a family named null and now
-  goes to the default family. An error while storing, a failed MongoDB insert say, is still a 500
-  and as before removes the samples the import had added, but may leave the families it added for
-  them. The actors of families the import found are merged last and only once everything else is
-  stored, so a failure no longer changes them, and an error merging them is logged rather than
-  failing an import that is otherwise complete.
+  goes to the default family. An error while storing, a failed MongoDB insert say, is still a 500,
+  and removes everything the import had added (#299, below). The actors of families the import found
+  are merged last and only once everything else is stored, so a failure no longer changes them, and
+  an error merging them is logged rather than failing an import that is otherwise complete.
 
 - **Memory storage: deleting a sample left its PicHashes behind.** `deleteSample` and
   `discardImportedSample` emptied a PicHash's set of matches but kept the key, so `isPicHash` stayed
@@ -51,6 +49,49 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - **Memory storage: `/rebuild_index` held every MinHash of the corpus in one list.** The bands are
   now rebuilt one work package at a time, with the same result, and the progress total is exactly
   the number of work packages (it was one too many when the count divided evenly).
+
+- **`POST /import`: an import that fails while storing leaves nothing behind (#299, #304).** Its
+  MinHashes were added after the rollback, so a failure there left samples stored without band
+  entries, which a retry then skipped as present. They are part of it now, and the rollback also
+  takes out the band entries, PicHash counts, picblockhash index entries and function ranges of the
+  samples it removes, as well as a sample that failed after it was stored but before the import
+  learnt of it (a family counter overflowing on MongoDB, say). The families the import created go
+  too, but only while no sample is filed under them. Every writer now ensures its family's document
+  after filing a sample, and the rollback looks for samples again after deleting the family, so a
+  sample filed meanwhile keeps a family document; that family's counters can then miss it until
+  `/recompute_family_stats` runs. When the document of the family a writer looked up is gone and
+  another id holds its name by then, `addSmdaReport`, `modifySample` and imports file the sample
+  under that family instead. `num_families_imported` counts the families the import created, where
+  it counted every family with a higher id than any before it, another writer's included. On
+  MongoDB, `family_name` gets a unique index and a family is added by an upsert, which the index
+  makes atomic, so two writers adding one name no longer both create it. A database that holds a
+  name twice already cannot get the index: it logs an error at startup naming the duplicates and
+  merges nothing; two writers upserting the same new name at the same moment can still both insert
+  it there, until the duplicates are merged or renamed and the next start creates the index.
+  `/recompute_family_stats` no longer re-creates a missing family document under a name another
+  family carries: it files that id's samples and functions under the family of the name and reports
+  them as `num_families_merged`, not as created. The import still fails with the error that failed
+  it (500), and an error while rolling back is logged. `StorageInterface.ensureFamily(name)` answers
+  the family id and whether the call created it; its default looks the name up and calls
+  `addFamily`, which a backend shared by several writers has to override to decide atomically, as
+  both built-in ones do. Backends implement `discardImportedFamily` too.
+
+- **`POST /import` refuses with 400 what MongoDB cannot store, and caps decompression per import
+  (#300, #304).** An integer beyond signed 64 bit in a sample or function entry (`binary_size`,
+  `statistics`, `num_blocks`, ...), a mapping key holding a NUL, a pichash or picblockhash hash or
+  offset outside unsigned 64 bit, or `picblockhashes` other than a list of mappings holding a
+  numeric `hash` and `offset` passed validation and failed on MongoDB at insert, with a 500 after
+  part of the import was written, while memory storage stored them. Both now refuse them before
+  storing anything; checking costs about 1 s per 210,000 functions. A pichash of null, which failed
+  on MongoDB too, is imported as 0, as a function SMDA reports without one is stored. Compressed
+  content is capped across the whole import as well, at 20 times the size of the request body or 64
+  MiB if that is more: four 70 KB blobs, each under its own cap, inflated to 32 MiB. Exports of the
+  live corpus inflate to at most 11.6 times, so they stay below it. MongoDB storage updates the
+  picblockhash index in one pass over an import's functions instead of one per sample, with the same
+  updates in the same order: 7 s instead of 20 s of Python for 300 samples of 700 functions. Should
+  counting the imported PicHashes fail, the counts are marked as no longer trusted, so the
+  `MINHASH_PICHASH_MAX_MATCHES` cutoff counts holders until `rebuildPicHashCountIndex` runs.
+  `MinHashIndex.addImportData` takes the size of the export as an optional `import_size`.
 
 ### Security
 

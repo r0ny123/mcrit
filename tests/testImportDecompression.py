@@ -5,12 +5,13 @@ import logging
 import os
 import unittest
 import zipfile
+from unittest.mock import patch
 
 import falcon
 import falcon.testing
 from smda.common.SmdaReport import SmdaReport
 
-from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.index.MinHashIndex import ImportRejected, MinHashIndex
 from mcrit.libs.utility import MAX_DECOMPRESSION_RATIO, MIN_DECOMPRESSED_SIZE, compress_encode, decompress_decode
 from mcrit.server.StatusResource import StatusResource
 
@@ -118,6 +119,17 @@ class DecompressionLimitTestSuite(unittest.TestCase):
         with self.assertRaises(ValueError):
             decompress_decode(base64.b85encode(bytes(data)).decode())
 
+    def testContentIsHeldToWhatRemainsOfTheImport(self):
+        content = json.dumps({str(index): {"offset": index} for index in range(1000)}).encode()
+        encoded = compress_encode(content)
+        self.assertEqual(content, decompress_decode(encoded, max_size=len(content)))
+        with self.assertRaisesRegex(ValueError, "left of the import's budget"):
+            decompress_decode(encoded, max_size=len(content) - 1)
+        # beyond the content's own cap, its own cap holds
+        bomb = compress_encode(b"0" * (16 * 1024 * 1024))
+        with self.assertRaisesRegex(ValueError, "times its size"):
+            decompress_decode(bomb, max_size=10**12)
+
     def testContentThatDoesNotInflateIsRefusedAsValueError(self):
         # zlib.error and RuntimeError escaped as they were, and POST /import answered them with 500
         content = json.dumps({str(index): {"offset": index} for index in range(1000)})
@@ -208,6 +220,37 @@ class ImportDecompressionTestSuite(unittest.TestCase):
             self.assertEqual(falcon.HTTP_200, response.status)
             self.assertEqual(2, json.loads(response.data)["data"]["num_samples_imported"])
             self.assertEqual(clean["content"]["num_functions"], len(index.getStorage().getFunctions(0, 0)))
+
+    def testImportIsCappedAsAWhole(self):
+        # each sample's content below its own cap, all of them together beyond the import's (#300):
+        # four 70 KB blobs inflated to 32 MiB, and the cost grew with the number of samples
+        export = self._twoSampleExport()
+        inflated = sum(len(decompress_decode(content)) for content in export["function_entries"].values())
+        with patch("mcrit.index.MinHashIndex.MIN_IMPORT_DECOMPRESSED_SIZE", 0):
+            index = MinHashIndex(config)
+            with self.assertRaisesRegex(ImportRejected, "left of the import's budget"):
+                index.addImportData(json.loads(json.dumps(export)), import_size=(inflated - 1) // MAX_DECOMPRESSION_RATIO)
+            self.assertEqual([], index.getStorage().getSampleIds())
+            report = index.addImportData(json.loads(json.dumps(export)), import_size=-(-inflated // MAX_DECOMPRESSION_RATIO))
+            self.assertEqual(2, report["num_samples_imported"])
+
+    def testExportsInflatingAsTheLiveCorpusDoesPassTheWholeImportCap(self):
+        # each sample's content at 12 times its size, beyond the 11.6 measured at most, and the body as
+        # its size: an import is capped at 20 times that
+        export = self._twoSampleExport()
+        for sha256, content in export["function_entries"].items():
+            function_entries = json.loads(decompress_decode(content))
+            for function_entry in function_entries.values():
+                function_entry["function_name"] = "A" * 100000
+            export["function_entries"][sha256] = deflated_at_ratio(json.dumps(function_entries).encode(), 12)
+        body = json.dumps(export)
+        inflated = sum(len(decompress_decode(content)) for content in export["function_entries"].values())
+        self.assertGreater(inflated, 11.5 * sum(len(content) for content in export["function_entries"].values()))
+        with patch("mcrit.index.MinHashIndex.MIN_IMPORT_DECOMPRESSED_SIZE", 0):
+            index = MinHashIndex(config)
+            response = self._post_import(index, body)
+        self.assertEqual(falcon.HTTP_200, response.status)
+        self.assertEqual(2, json.loads(response.data)["data"]["num_samples_imported"])
 
     def testBodyThatIsNoJsonIsAnsweredAsBadInput(self):
         # b"\xff\xfe{}" is UTF-16 to json.loads, b"\x80{}" no Unicode at all; too deep a nesting is a RecursionError

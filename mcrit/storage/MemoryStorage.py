@@ -410,11 +410,29 @@ class MemoryStorage(StorageInterface):
         return True
 
     def recomputeFamilyStats(self, progress_reporter=None) -> Dict[str, Any]:
-        report: Dict[str, Any] = {"num_families": 0, "num_families_corrected": 0, "num_families_created": 0, "corrections": {}}
+        report: Dict[str, Any] = {"num_families": 0, "num_families_corrected": 0, "num_families_created": 0, "num_families_merged": 0, "corrections": {}}
+        missing_family_names: Dict[int, str] = {}
         for sample_entry in self._samples.values():
             if sample_entry.family_id not in self._families:
-                self._families[sample_entry.family_id] = FamilyEntry(family_name=sample_entry.family, family_id=sample_entry.family_id)
+                missing_family_names.setdefault(sample_entry.family_id, sample_entry.family)
+        for family_id, family_name in missing_family_names.items():
+            other_family_id = self.getFamilyId(family_name)
+            if other_family_id is None:
+                self._families[family_id] = FamilyEntry(family_name=family_name, family_id=family_id)
                 report["num_families_created"] += 1
+                continue
+            # a name is one family, as in MongoDbStorage: its samples and functions are filed there
+            LOGGER.warning("Family %d has no entry, and its name %r is family %d's: its samples and functions are filed there.", family_id, family_name, other_family_id)
+            for sample_entry in self._samples.values():
+                if sample_entry.family_id == family_id:
+                    sample_entry.family_id = other_family_id
+            for function_id, function_entry in self._functions.items():
+                if function_entry.family_id == family_id:
+                    function_entry.family_id = other_family_id
+                    if function_entry.pichash:
+                        self._pichashes[function_entry.pichash].discard((family_id, function_entry.sample_id, function_id))
+                        self._pichashes[function_entry.pichash].add((other_family_id, function_entry.sample_id, function_id))
+            report["num_families_merged"] += 1
         functions_by_family: Dict[int, int] = {}
         for function_entry in self._functions.values():
             functions_by_family[function_entry.family_id] = functions_by_family.get(function_entry.family_id, 0) + 1
@@ -589,7 +607,13 @@ class MemoryStorage(StorageInterface):
             sample_entry.sample_id = sample_id
             self._samples[sample_id] = sample_entry
             self._sample_by_sha256[sample_entry.sha256] = sample_id
-            self._updateFamilyStats(sample_entry.family_id, +1, sample_entry.statistics["num_functions"], int(sample_entry.is_library))
+            # the caller learns of the sample only once this returns, as in MongoDbStorage
+            try:
+                self._updateFamilyStats(sample_entry.family_id, +1, sample_entry.statistics["num_functions"], int(sample_entry.is_library))
+            except Exception:
+                del self._samples[sample_id]
+                self._sample_by_sha256.pop(sample_entry.sha256, None)
+                raise
             return sample_entry
         # not this entry's sample: the entry still carries the id it had in the export, which here may
         # well be another sample's, so the caller must not attach the entry's functions to its sample_id
@@ -604,17 +628,35 @@ class MemoryStorage(StorageInterface):
             return
         for function_id in self._sample_id_to_function_ids.pop(sample_id, []):
             function_entry = self._functions.pop(function_id, None)
-            if function_entry is not None and function_entry.pichash:
+            if function_entry is None:
+                continue
+            if function_entry.pichash:
                 matches = self._pichashes.get(function_entry.pichash)
                 if matches is not None:
                     matches.discard((function_entry.family_id, sample_id, function_id))
                     if not matches:
                         del self._pichashes[function_entry.pichash]
+            # and its band entries, of which a failed addMinHashes may have left none
+            if not self._hasBandableLength(function_entry.minhash):
+                continue
+            for band_number, band_hash in self.getBandHashesForMinHash(function_entry.getMinHash(self._minhash_config.MINHASH_SIGNATURE_BITS)).items():
+                band_function_ids = self._bands[band_number].get(band_hash)
+                if band_function_ids is not None and function_id in band_function_ids:
+                    band_function_ids.remove(function_id)
+                    if not band_function_ids:
+                        del self._bands[band_number][band_hash]
         del self._samples[sample_id]
         self._sample_by_sha256.pop(sample_entry.sha256, None)
         # the mirror of importSampleEntry's increment; the family stays, as in MongoDbStorage
         self._updateFamilyStats(sample_entry.family_id, -1, -sample_entry.statistics["num_functions"], -int(sample_entry.is_library))
         self._updateDbState()
+
+    def discardImportedFamily(self, family_id: int) -> bool:
+        if family_id == 0 or family_id not in self._families or any(sample_entry.family_id == family_id for sample_entry in self._samples.values()):
+            return False
+        del self._families[family_id]
+        self._updateDbState()
+        return True
 
     def importFunctionEntry(self, function_entry: "FunctionEntry") -> Optional["FunctionEntry"]:
         function_entry.function_id = self._useCounter("functions")
@@ -807,11 +849,15 @@ class MemoryStorage(StorageInterface):
         return None
 
     def addFamily(self, family_name: str) -> int:
+        return self.ensureFamily(family_name)[0]
+
+    def ensureFamily(self, family_name: str) -> Tuple[int, bool]:
         family_id = self.getFamilyId(family_name)
-        if family_id is None:
-            family_id = self._useCounter("families")
-            self._families[family_id] = FamilyEntry(family_name=family_name, family_id=family_id)
-        return family_id
+        if family_id is not None:
+            return family_id, False
+        family_id = self._useCounter("families")
+        self._families[family_id] = FamilyEntry(family_name=family_name, family_id=family_id)
+        return family_id, True
 
     def getFunctionsByIds(self, function_ids: List[int]) -> Dict[int, "FunctionEntry"]:
         function_entries = {}
