@@ -34,6 +34,7 @@ from mcrit.queue.QueueRemoteCalls import NoProgressReporter, QueueRemoteCallee, 
 from mcrit.storage.FunctionEntry import smdaFunctionFromXcfg
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
+from mcrit.storage.StorageInterface import StagedUniqueBlocksProgressReporter
 from mcrit.storage.UniqueBlocksResult import blockHashAsInt, blockScore, isGenericBlock, selectBlockCover
 
 if TYPE_CHECKING:
@@ -514,13 +515,12 @@ class Worker(QueueRemoteCallee):
         disassembly: they are left out of unique_blocks and of the cover, having no instructions to
         show and no bytes to match on.
         """
-        # TODO we could propagate this progress reporter into the storage function for more fine grained progress tracking
-        progress_reporter.set_total(1)
+        progress = StagedUniqueBlocksProgressReporter(progress_reporter)
         covers_required = max(1, int(covers_required))
         min_instructions = max(0, int(min_instructions))
         max_blocks_per_function = max(0, int(max_blocks_per_function or 0))
         excluded = {blockHashAsInt(block_hash) for block_hash in exclude_picblockhashes or []}
-        blocks_result_dict = self._storage.getUniqueBlocks(sample_ids, progress_reporter=progress_reporter)
+        blocks_result_dict = self._storage.getUniqueBlocks(sample_ids, progress_reporter=progress)
         blocks_result_dict["statistics"]["has_yara_rule"] = False
         blocks_result_dict["statistics"]["yara_covers"] = 0
         blocks_result_dict["statistics"]["has_complete_yara_rule"] = False
@@ -528,17 +528,31 @@ class Worker(QueueRemoteCallee):
         # instructions to show and no bytes to match on: it is counted rather than returned, since
         # whatever renders the blocks reads their instructions, and it can never join the cover
         found_blocks = blocks_result_dict["unique_blocks"]
-        unique_blocks = {block_hash: entry for block_hash, entry in found_blocks.items() if entry["instructions"]}
-        blocks_result_dict["statistics"]["blocks_without_instructions"] = len(found_blocks) - len(unique_blocks)
-        if min_instructions:
-            unique_blocks = {block_hash: entry for block_hash, entry in unique_blocks.items() if entry["length"] >= min_instructions}
-        num_before_exclusion = len(unique_blocks)
-        if excluded:
-            unique_blocks = {block_hash: entry for block_hash, entry in unique_blocks.items() if blockHashAsInt(block_hash) not in excluded}
+        filter_progress = progress.start_phase("filter", len(found_blocks) * (2 if gentle_length_score else 1))
+        unique_blocks = {}
+        num_without_instructions = 0
+        num_before_exclusion = 0
+        for block_hash, entry in found_blocks.items():
+            if not entry["instructions"]:
+                num_without_instructions += 1
+                filter_progress.step()
+                continue
+            if min_instructions and entry["length"] < min_instructions:
+                filter_progress.step()
+                continue
+            num_before_exclusion += 1
+            if excluded and blockHashAsInt(block_hash) in excluded:
+                filter_progress.step()
+                continue
+            unique_blocks[block_hash] = entry
+            filter_progress.step()
+        blocks_result_dict["statistics"]["blocks_without_instructions"] = num_without_instructions
         if gentle_length_score:
             for entry in unique_blocks.values():
                 # the storage's score with the gentle length share, which differs past 11 instructions
                 entry["score"] = blockScore(len(entry["samples"]), len(sample_ids), entry["length"], gentle=True)
+                filter_progress.step()
+        filter_progress.finish()
         blocks_result_dict["unique_blocks"] = unique_blocks
         blocks_result_dict["statistics"]["covers_required"] = covers_required
         blocks_result_dict["statistics"]["min_instructions"] = min_instructions
@@ -555,6 +569,7 @@ class Worker(QueueRemoteCallee):
             assert sample_entry is not None
             sample_addr_borders[sample_id] = {"lower": sample_entry.base_addr, "upper": sample_entry.base_addr + sample_entry.binary_size}
             sample_escaper[sample_id] = SmdaFunction.getInstructionEscaper(sample_entry.architecture)
+        escape_progress = progress.start_phase("escape", len(unique_blocks))
         for block_hash, entry in unique_blocks.items():
             sample_id = entry["sample_id"]
             escaped_sequences = []
@@ -569,11 +584,24 @@ class Worker(QueueRemoteCallee):
                     )
                 )
             unique_blocks[block_hash]["escaped_sequence"] = " ".join(escaped_sequences)
+            escape_progress.step()
+        escape_progress.finish()
         # greedily produce a multi set cover of picblockhashes for sample_ids, i.e. a YARA rule :)
-        demoted = {block_hash for block_hash, entry in unique_blocks.items() if isGenericBlock(entry)} if demote_generic_blocks else frozenset()
+        cover_progress = progress.start_phase("cover", len(unique_blocks) + max(1, len(unique_blocks) * len(sample_ids) * covers_required))
+        demoted = set()
+        if demote_generic_blocks:
+            for block_hash, entry in unique_blocks.items():
+                if isGenericBlock(entry):
+                    demoted.add(block_hash)
+                cover_progress.step()
+        else:
+            demoted = frozenset()
         if demote_generic_blocks:
             blocks_result_dict["statistics"]["generic_blocks"] = len(demoted)
-        yara_rule, sample_coverage = selectBlockCover(unique_blocks, sample_ids, covers_required, max_blocks_per_function=max_blocks_per_function, demoted=demoted)
+        yara_rule, sample_coverage = selectBlockCover(
+            unique_blocks, sample_ids, covers_required, max_blocks_per_function=max_blocks_per_function, demoted=demoted, progress_reporter=cover_progress
+        )
+        cover_progress.finish()
         samples_covered = {sample_id for sample_id, count in sample_coverage.items() if count >= covers_required}
         # an empty request covers its zero samples vacuously - do not report a rule for it
         if len(samples_covered) == len(sample_ids):
@@ -586,7 +614,7 @@ class Worker(QueueRemoteCallee):
         blocks_result_dict["statistics"]["yara_covers"] = min(sample_coverage.values()) if sample_coverage else 0
         blocks_result_dict["yara_rule"] = yara_rule
         blocks_result_dict["unique_blocks"] = unique_blocks
-        progress_reporter.step()
+        progress.finish()
         return blocks_result_dict
 
     @staticmethod

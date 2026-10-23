@@ -191,7 +191,7 @@ def isGenericBlock(entry) -> bool:
     return None not in roles and "restore" in roles
 
 
-def selectBlockCover(blocks, sample_ids, required_per_sample, max_blocks_per_function=0, demoted=frozenset()) -> Tuple[list, dict]:
+def selectBlockCover(blocks, sample_ids, required_per_sample, max_blocks_per_function=0, demoted=frozenset(), progress_reporter=None) -> Tuple[list, dict]:
     """Greedily pick a multi-set cover of <blocks> for <sample_ids>, i.e. the blocks of a YARA rule.
 
     Each round takes the block that reaches the most samples not yet covered <required_per_sample>
@@ -214,6 +214,8 @@ def selectBlockCover(blocks, sample_ids, required_per_sample, max_blocks_per_fun
         best = None
         best_key = None
         for block_hash, entry in blocks.items():
+            if progress_reporter is not None:
+                progress_reporter.step()
             if block_hash in picked:
                 continue
             function_id = entry.get("function_id")

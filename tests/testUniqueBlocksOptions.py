@@ -221,6 +221,34 @@ class WorkerOptionsTest(unittest.TestCase):
         self.assertEqual(0, default["statistics"]["blocks_excluded"])
         self.assertNotIn("generic_blocks", default["statistics"])
 
+    def test_unique_blocks_progress_is_monotonic_and_finishes_after_covering(self):
+        class RecordingReporter:
+            def __init__(self):
+                self.total = 0
+                self.totals = []
+                self.count = 0
+                self.values = []
+
+            def set_total(self, total):
+                self.total = total
+                self.totals.append(total)
+
+            def step(self):
+                self.count += 1
+                self.values.append(self.count / self.total)
+
+        reporter = RecordingReporter()
+        result = self.worker.getUniqueBlocks([self.sample_id], progress_reporter=reporter)
+        self.assertTrue(result["yara_rule"])
+        self.assertGreater(reporter.total, 0)
+        self.assertEqual([reporter.total], reporter.totals)
+        self.assertEqual(reporter.total, reporter.count)
+        self.assertTrue(reporter.values)
+        self.assertEqual(sorted(reporter.values), reporter.values)
+        self.assertTrue(all(0.0 < value <= 1.0 for value in reporter.values))
+        self.assertLess(reporter.values[0], 1.0)
+        self.assertEqual(1.0, reporter.values[-1])
+
     def test_the_cap_spreads_the_cover_over_functions(self):
         default = self.worker.getUniqueBlocks([self.sample_id])
         blocks = default["unique_blocks"]
@@ -322,11 +350,35 @@ class MongoWorkerOptionsTest(unittest.TestCase):
         pymongo.MongoClient(server, int(port)).drop_database(DB_NAME)
 
     def test_both_backends_pick_the_same_cover_with_every_option(self):
+        class RecordingReporter:
+            def __init__(self):
+                self.total = 0
+                self.totals = []
+                self.count = 0
+                self.values = []
+
+            def set_total(self, total):
+                self.total = total
+                self.totals.append(total)
+
+            def step(self):
+                self.count += 1
+                self.values.append(self.count / self.total)
+
         options = {"covers_required": 12, "gentle_length_score": True, "max_blocks_per_function": 2, "demote_generic_blocks": True}
-        worker, sample_id = self._worker(StorageConfig(STORAGE_METHOD=StorageFactory.STORAGE_METHOD_MEMORY))
-        memory = worker.getUniqueBlocks([sample_id], **options)
-        worker, sample_id = self._worker(self.mongo)
-        mongo = worker.getUniqueBlocks([sample_id], **options)
+        results = []
+        for storage_config in (StorageConfig(STORAGE_METHOD=StorageFactory.STORAGE_METHOD_MEMORY), self.mongo):
+            worker, sample_id = self._worker(storage_config)
+            reporter = RecordingReporter()
+            results.append(worker.getUniqueBlocks([sample_id], progress_reporter=reporter, **options))
+            self.assertEqual([reporter.total], reporter.totals)
+            self.assertEqual(reporter.total, reporter.count)
+            self.assertTrue(reporter.values)
+            self.assertEqual(sorted(reporter.values), reporter.values)
+            self.assertTrue(all(0.0 < value <= 1.0 for value in reporter.values))
+            self.assertLess(reporter.values[0], 1.0)
+            self.assertEqual(1.0, reporter.values[-1])
+        memory, mongo = results
         self.assertEqual(memory["yara_rule"], [blockHashAsInt(block_hash) for block_hash in mongo["yara_rule"]])
 
     def test_a_block_in_several_functions_counts_against_the_lowest(self):

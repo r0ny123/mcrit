@@ -24,7 +24,7 @@ from mcrit.storage.FunctionEntry import FunctionEntry, picBlockHashEntries
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache, StorageBackedMatchingCache
 from mcrit.storage.SampleEntry import TIMESTAMP_FORMAT, SampleEntry
-from mcrit.storage.StorageInterface import BinaryStream, StorageInterface
+from mcrit.storage.StorageInterface import BinaryStream, StorageInterface, _finishProgressPhase, _prepareUniqueBlocksProgress, _startProgressPhase
 from mcrit.storage.UniqueBlocksResult import blockScore
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -1075,6 +1075,7 @@ class MemoryStorage(StorageInterface):
             self._bands[band_number][band_hash].append(minhash.function_id)
 
     def getUniqueBlocks(self, sample_ids: List[int], progress_reporter=None) -> Dict:
+        progress_reporter, owns_progress = _prepareUniqueBlocksProgress(progress_reporter)
         # query once to get all blocks from the functions of our samples
         block_statistics: Dict[str, Any] = {
             "by_sample_id": {sample_id: {"sample_id": sample_id, "total_blocks": 0, "characteristic_blocks": 0, "unique_blocks": 0} for sample_id in sample_ids},
@@ -1083,11 +1084,14 @@ class MemoryStorage(StorageInterface):
         }
         candidate_picblockhashes: Dict[int, Dict[str, Any]] = {}
         wanted_sample_ids = set(sample_ids)
+        collect_progress = _startProgressPhase(progress_reporter, "collect", len(self._functions))
         for function_id, entry in self._functions.items():
             sample_id = entry.sample_id
             # the blocks of the samples asked about only, as MongoDbStorage reads them; a block
             # another sample holds too is removed below
             if sample_id not in wanted_sample_ids:
+                if collect_progress is not None:
+                    collect_progress.step()
                 continue
             for block_entry in entry.picblockhashes:
                 block_hash = block_entry["hash"]
@@ -1103,16 +1107,23 @@ class MemoryStorage(StorageInterface):
                         "score": 0,
                     }
                 candidate_picblockhashes[block_hash]["samples"].add(sample_id)
+            if collect_progress is not None:
+                collect_progress.step()
+        _finishProgressPhase(collect_progress)
         # update statistics based on candidates
         for picblockhash, entry in candidate_picblockhashes.items():
             for sample_id in entry["samples"]:
                 block_statistics["by_sample_id"][sample_id]["total_blocks"] += 1
         LOGGER.info(f"Found {len(candidate_picblockhashes)} candidate picblock hashes")
+        eliminate_progress = _startProgressPhase(progress_reporter, "eliminate", len(self._functions))
         for functiond_id, entry in self._functions.items():
             sample_id = entry.sample_id
             if sample_id not in wanted_sample_ids:
                 for block_entry in entry.picblockhashes:
                     candidate_picblockhashes.pop(block_entry["hash"], None)
+            if eliminate_progress is not None:
+                eliminate_progress.step()
+        _finishProgressPhase(eliminate_progress)
         # update statistics again after having reduced to results
         for picblockhash, entry in candidate_picblockhashes.items():
             if len(entry["samples"]) == 1:
@@ -1124,6 +1135,7 @@ class MemoryStorage(StorageInterface):
         LOGGER.info(f"Reduced to {len(candidate_picblockhashes)} unique picblock hashes")
         # iterate over candidates by function_id and extract instructions
         function_id_to_block_offsets = {}
+        score_progress = _startProgressPhase(progress_reporter, "score", len(candidate_picblockhashes))
         for picblockhash, entry in candidate_picblockhashes.items():
             candidate_picblockhashes[picblockhash]["samples"] = sorted(list(entry["samples"]))
             # we calculate the score for this block as 80% of how well it covers the samples and 20% how far its size is away from an "ideal" signature block
@@ -1131,13 +1143,21 @@ class MemoryStorage(StorageInterface):
             if entry["function_id"] not in function_id_to_block_offsets:
                 function_id_to_block_offsets[entry["function_id"]] = []
             function_id_to_block_offsets[entry["function_id"]].append((entry["offset"], picblockhash))
+            if score_progress is not None:
+                score_progress.step()
+        _finishProgressPhase(score_progress)
+        extract_progress = _startProgressPhase(progress_reporter, "extract", len(self._functions))
         for function_id, entry in self._functions.items():
             if function_id not in function_id_to_block_offsets.keys():
+                if extract_progress is not None:
+                    extract_progress.step()
                 continue
             # an xcfg is None when not loaded and {} once its disassembly was dropped
             # (STORAGE_DROP_DISASSEMBLY, #42); either way its blocks keep no instructions
             blocks = (entry.xcfg or {}).get("blocks")
             if not blocks:
+                if extract_progress is not None:
+                    extract_progress.step()
                 continue
             for block_offset, picblockhash in function_id_to_block_offsets[function_id]:
                 # a live xcfg (from SmdaFunction.toDict()) keys blocks by int, while one that has
@@ -1146,6 +1166,11 @@ class MemoryStorage(StorageInterface):
                 if block_instructions is None:
                     continue
                 candidate_picblockhashes[picblockhash]["instructions"] = block_instructions
+            if extract_progress is not None:
+                extract_progress.step()
+        _finishProgressPhase(extract_progress)
+        if owns_progress:
+            progress_reporter.finish()
         return {"statistics": block_statistics, "unique_blocks": candidate_picblockhashes}
 
     def rebuildPicBlockHashIndex(self, progress_reporter=None) -> int:

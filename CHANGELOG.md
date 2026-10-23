@@ -40,6 +40,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ### Fixed
 
+- **Unique-blocks jobs now report progress through candidate collection, scoring, instruction
+  extraction, and cover selection**, so the job no longer reaches completion before its CPU work.
 - **The unique-blocks cover broke score ties by dict order** ([#283]). A block's score is 80% the
   samples it covers and 20% its length, and with one input sample every unique block of 7 to 11
   instructions scores exactly 100.0. Among those the cover took whichever the storage happened to
