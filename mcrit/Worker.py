@@ -471,8 +471,8 @@ class Worker(QueueRemoteCallee):
         chosen from blocks a caller would keep rather than from ones it discards afterwards - a
         two-instruction block is not worth a YARA string. Both are clamped to sane values. Among
         blocks that cover as many samples with the same score, the cover takes the one whose YARA
-        string fixes the most bytes, then the lowest picblockhash (coverPreference, #283), so the
-        same input always gives the same rule.
+        string has the most fixed hex digits, then the lowest picblockhash (coverPreference, #283),
+        so the same input always gives the same rule.
 
         NOTE: result["yara_rule"] is the cover's selection as a list of picblockhash strings, not
         YARA source - the byte patterns live per block in unique_blocks[hash]["escaped_sequence"].
@@ -506,7 +506,7 @@ class Worker(QueueRemoteCallee):
         blocks_result_dict["statistics"]["covers_required"] = covers_required
         blocks_result_dict["statistics"]["min_instructions"] = min_instructions
         blocks_result_dict["statistics"]["blocks_considered"] = len(unique_blocks)
-        # enrich with escaped sequences, before the cover: it breaks score ties by the bytes they fix (#283)
+        # enrich with escaped sequences, before the cover: it breaks score ties by their fixed hex digits (#283)
         sample_addr_borders = {}
         sample_escaper = {}
         for sample_id in sample_ids:

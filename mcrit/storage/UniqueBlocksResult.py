@@ -28,9 +28,10 @@ def coverPreference(block_hash, entry) -> Tuple[int, int]:
 
     Scores tie a lot: with a single sample, every block of 7 to 11 instructions scores 100.0, and
     the cover used to take whichever of them came last in the dict. Among tied blocks, the one whose
-    YARA string fixes the most bytes now wins, wildcards not counted, so a block that is mostly a
-    call or a short epilogue loses to one with distinctive opcodes and operands. The lowest
-    picblockhash settles what is still equal, so the same input always gives the same cover.
+    YARA string has the most fixed hex digits now wins, wildcards not counted, so a block that is
+    mostly a wildcarded call loses to a longer fixed pattern. That favours length in bytes, not
+    distinctiveness as such. The lowest picblockhash settles what is still equal, so the same input
+    always gives the same cover.
     MongoDbStorage keys the blocks by their "0x" hex, MemoryStorage by the integer, which a
     result that went through JSON carries as a decimal string.
     """

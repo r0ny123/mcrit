@@ -1,8 +1,8 @@
 """Which blocks the unique-blocks cover picks when their scores tie (#283).
 
 With a single sample every unique block of 7 to 11 instructions scores 100.0, and the cover took
-whichever of those came last in the dict. Ties are now broken by the bytes a block's YARA string
-fixes, wildcards not counted, and then by the lowest picblockhash.
+whichever of those came last in the dict. Ties are now broken by the fixed hex digits of a block's
+YARA string, wildcards not counted, and then by the lowest picblockhash.
 """
 
 import json
@@ -25,8 +25,11 @@ def block(escaped_sequence, length=8, score=100.0):
 
 
 class CoverPreferenceTest(unittest.TestCase):
-    def test_wildcards_do_not_count_as_fixed_bytes(self):
+    def test_wildcards_do_not_count_as_fixed_digits(self):
         self.assertEqual(14, coverPreference("0x10", block("e8???????? 488b4c2420 c3"))[0])
+
+    def test_the_lower_hash_ranks_higher_among_equal_patterns(self):
+        self.assertGreater(coverPreference("0x0103", block("c3")), coverPreference("0xfe04", block("c3")))
 
     def test_hex_and_integer_keys_order_alike(self):
         self.assertEqual(coverPreference(0x10, block("c3")), coverPreference("0x10", block("c3")))
@@ -43,7 +46,7 @@ class TiedBlockCoverTest(unittest.TestCase):
         "0xff02": block("488b4c2420 4833cc e8???????? 4883c438 c3"),
         # distinctive: an immediate and a displacement, nothing wildcarded
         "0x0103": block("c7442430efbeadde 488b4c2420 4833cc 4883c438 c3"),
-        # as many fixed bytes as the one above, with a higher hash
+        # as many fixed digits as the one above, with a higher hash
         "0xfe04": block("c7442430efbeadde 488b4c2420 4833cc 4883c438 c3"),
         # longer and lower scored: ties are broken only among equal scores
         "0x0005": block("c7442430efbeadde " * 6, length=14, score=84.0),
@@ -53,7 +56,7 @@ class TiedBlockCoverTest(unittest.TestCase):
         result = UniqueBlocksResult.fromDict({"statistics": {"by_sample_id": {"1": {}}}, "unique_blocks": blocks, "yara_rule": []})
         return result.generateBlockCover(required_per_sample=required)["block_hashes"]
 
-    def test_the_tied_block_fixing_the_most_bytes_comes_first(self):
+    def test_the_tied_block_with_the_most_fixed_digits_comes_first(self):
         self.assertEqual(["0x0103", "0xfe04", "0xff02", "0xff01", "0x0005"], self._cover(self.BLOCKS, required=5))
 
     def test_the_order_of_the_blocks_does_not_change_the_cover(self):
@@ -88,9 +91,11 @@ class WorkerTiedBlockCoverTest(unittest.TestCase):
         self.assertGreater(len(top), 10, "the sample has too few tied blocks to show anything")
         self.assertEqual(forward["yara_rule"], self._result(reverse=True)["yara_rule"])
 
-    def test_the_cover_takes_the_tied_blocks_fixing_the_most_bytes(self):
+    def test_the_cover_takes_the_tied_blocks_with_the_most_fixed_digits(self):
         result = self._result()
         blocks = result["unique_blocks"]
+        # the three with the most fixed digits among the 72 blocks tied at 100.0
+        self.assertEqual([4226965691128322828, 8778206589652380330, 12890166994811963859], result["yara_rule"][:3])
         ranked = sorted(blocks, key=lambda block_hash: (blocks[block_hash]["score"], coverPreference(block_hash, blocks[block_hash])), reverse=True)
         self.assertEqual(ranked[:10], result["yara_rule"])
 
