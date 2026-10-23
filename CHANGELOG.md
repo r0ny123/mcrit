@@ -24,6 +24,46 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   when the committed file no longer matches the code, when a route is undocumented, or when a
   public client method has no docstring or return annotation. Every public `McritClient` method
   is now typed and documented with the route it calls ([#54]).
+
+### Changed
+
+- **Behaviour change: `McritClient(raw_responses=True)` now answers the `requests.Response` from
+  ten more methods** - `respawn`, `addBinarySample`, `modifyFamily`, `deleteFamily`,
+  `modifySample`, `deleteSample`, `getExportData`, `addImportData`,
+  `requestUniqueBlocksForSamples` and `requestUniqueBlocksForFamily` never checked the mode and
+  answered the parsed data, or `None` for a failed request. A caller in raw mode that relied on
+  that gets the response now, like from every other request method. `search_families`,
+  `search_samples` and `search_functions` are unchanged and still answer the parsed data in raw
+  mode; `getSamplesByFamilyId` and `awaitResult` do not work in raw mode. A test reads the
+  client's source and fails for a request method that ignores the mode ([#54]).
+
+## [1.16.0] - 2026-10-16
+
+**Minor release: bounded search and listing, the SMDA report rebuilt from storage, and correct
+bookkeeping when samples are deleted, imported or retried.** Nothing changes matching results at
+default configuration. There are no repair jobs, but the API now caps what one request can ask for.
+
+- **Behaviour changes for API callers (#271):**
+  - `GET /functions` and `GET /search/{families,samples,functions}` answer at most 1,000 entries per
+    request. Page with `start` or the `cursor`.
+  - `POST /functions` takes at most 10,000 ids. `McritClient.getFunctionsByIds` splits larger
+    requests itself; a client from an earlier release gets `{}` back for more than that.
+  - A search query longer than 16,384 characters is refused with 400.
+  - Search cursors name the sort they belong to, and one replayed under another sort is a 400.
+    Cursors from an older server are still accepted.
+- **New setting:** `STORAGE_MONGODB_SEARCH_MAX_TIME_MS` (30 s, 0 = no limit) bounds the MongoDB scans of
+  a search. A deployment that ships its own config modules needs it added; without it the default
+  applies.
+- **New route:** `GET /samples/{id}/smda` rebuilds a sample's SMDA report. Its extras live in two new
+  collections, `smda_extras` and `query_smda_extras`, filled for samples submitted from now on.
+- **First start** creates the indexes of those two collections, and the `pichash_counts` and
+  `function_ranges` indexes where no rebuild had created them yet (#262).
+- **After upgrading:** a corpus that deleted samples before this release still carries surplus pichash
+  counts, which only matter with `MINHASH_PICHASH_MAX_MATCHES` set. `rebuildPicHashCountIndex()`
+  clears them, and is also owed after any `recalculatePicHashes` that changes a pichash (#262).
+
+### Added
+
 - **`GET /samples/{id}/smda` and `McritClient.getSmdaReportForSample` rebuild a sample's SMDA
   report from storage.** The report's top-level fields and metadata that `SampleEntry` holds no
   field for - including smda's whole-binary `xdata_refs_from`/`xdata_refs_to` and `xmetadata` -
@@ -57,15 +97,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   each scanned the collection. Since `clearStorage` now drops both collections, that would also
   have been the state after every respawn. Where a rebuild already ran they exist, and nothing
   changes.
-- **Behaviour change: `McritClient(raw_responses=True)` now answers the `requests.Response` from
-  ten more methods** - `respawn`, `addBinarySample`, `modifyFamily`, `deleteFamily`,
-  `modifySample`, `deleteSample`, `getExportData`, `addImportData`,
-  `requestUniqueBlocksForSamples` and `requestUniqueBlocksForFamily` never checked the mode and
-  answered the parsed data, or `None` for a failed request. A caller in raw mode that relied on
-  that gets the response now, like from every other request method. `search_families`,
-  `search_samples` and `search_functions` are unchanged and still answer the parsed data in raw
-  mode; `getSamplesByFamilyId` and `awaitResult` do not work in raw mode. A test reads the
-  client's source and fails for a request method that ignores the mode ([#54]).
 
 ### Fixed
 
