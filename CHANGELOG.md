@@ -584,6 +584,13 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   instead of returning `None` when a finished job's result is removed before it is read; the
   default client is unchanged there. MCRITweb's `/api` passthrough relays these 404s to its API
   users; its UI is unaffected.
+### Fixed
+
+- **A function entry built with its MinHash dropped the MinHash's shingle composition (#292).**
+  `FunctionEntry.__init__` stored it under a misspelled attribute, so `toDict` fell back to an
+  empty composition: memory storage kept none for functions added with their MinHash, and kept
+  the old one when a sample's MinHashes were deleted. The class-level default that hid the typo
+  (marked "FIXME MongoDbStorage fails without this") is gone.
 
 ## [1.16.0] - 2026-10-16
 
