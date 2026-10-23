@@ -15,6 +15,29 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Added
+
+- **Four opt-in options for the unique-blocks cover** ([#283]), the other directions the issue
+  proposes, so they can be evaluated against the current cover before any of them becomes a default.
+  All are off by default and leave the cover unchanged unless given. `gentle_length_score` lets
+  blocks past 11 instructions lose length score as 11 / length rather than 1 / (length - 10): a
+  12-instruction block's length score is about 92 instead of 50, so it no longer ranks below a
+  4-instruction block (57). `max_blocks_per_function` caps how many blocks one function of one
+  sample adds to the cover. `demote_generic_blocks` ranks function exits (a block ending in a return
+  that only restores registers and the stack, calls, checks the stack cookie or sets the return
+  value to zero, -1, a flag, a register, a small constant or a local) and blocks that are at least
+  half wildcards behind every other block reaching as many samples; the heuristic is Intel-centric.
+  `exclude_picblockhashes` is a negative set, for siblings that are not in the index: it goes in the
+  body of a POST to either `/uniqueblocks` route, the job stores it as a file rather than in its
+  arguments, and `mcrit.storage.UniqueBlocksResult.picBlockHashesOfReport` computes it from an SMDA
+  report locally. The first three are query parameters on both routes, all four are arguments of
+  `McritClient.requestUniqueBlocksForSamples` and `requestUniqueBlocksForFamily`, and the result's
+  statistics always echo the first three, even when off, and count the blocks the negative set
+  removed. Over the REST API and `McritClient`, an empty negative set and a cap of 0 make the same
+  job as leaving them out. `UniqueBlocksResult.generateBlockCover` takes the cap and the demotion
+  from those statistics, so given the job's `covers_required` and no size filters, the rule MCRITweb
+  renders is the one the job picked.
+
 ### Fixed
 
 - **The unique-blocks cover broke score ties by dict order** ([#283]). A block's score is 80% the
@@ -24,11 +47,20 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   wildcards not counted, and then by the lowest picblockhash, in both `Worker.getUniqueBlocks` and
   `UniqueBlocksResult.generateBlockCover`. The same input now always gives the same cover. Scores,
   the length scoring and every default are unchanged. This prefers longer fixed patterns, not
-  necessarily more distinctive ones: whether it makes rules better, and the issue's other
-  directions (reshaping the length score, one block per function, down-weighting epilogues, a
-  negative sample set), still need the evaluation the issue proposes. `RESULTS_VERSION` is now 3,
-  and since every report job is keyed on it, cached match and unique-blocks reports alike are
-  recomputed once on their next request.
+  necessarily more distinctive ones: whether it makes rules better, and whether any of the issue's
+  other directions, opt-in above, should become a default, still need the evaluation the issue
+  proposes. `RESULTS_VERSION` is now 3, and since every report job is keyed on it, cached match and
+  unique-blocks reports alike are recomputed once on their next request.
+- **On MongoDB, a unique block found in several functions was represented by whichever one the
+  query answered first** ([#283]). It now takes the lowest `function_id`, as memory storage did, so
+  its function, sample and offset, and with `max_blocks_per_function` the cover, no longer depend
+  on document order.
+- **A unique-blocks job for samples listed its first option as its family** ([#283]).
+  `Job.family_id` read the job's second argument, which for a samples request is whichever option
+  came first, such as `covers_required`; it now reads `family_id` by name.
+- **`UniqueBlocksResult.generateBlockCover` stopped after one block for `required_per_sample=0`**
+  ([#283]). It now clamps it to 1, as `Worker.getUniqueBlocks` already did with `covers_required`,
+  and answers the same 1-of-1 cover as the job.
 
 ## [1.16.0] - 2026-10-16
 

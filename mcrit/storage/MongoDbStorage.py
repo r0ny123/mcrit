@@ -44,11 +44,12 @@ from mcrit.libs.utility import decode_two_complement, encode_two_complement
 from mcrit.minhash.MinHash import MinHash
 from mcrit.minhash.MinHasher import MINHASH_SHINGLER_REVISION, SHINGLER_REVISION_SINCE
 from mcrit.storage.FamilyEntry import FamilyEntry
-from mcrit.storage.FunctionEntry import FunctionEntry, smdaFunctionFromXcfg
+from mcrit.storage.FunctionEntry import FunctionEntry, picBlockHashEntries, smdaFunctionFromXcfg
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.StorageInterface import BinaryStream, StorageInterface
+from mcrit.storage.UniqueBlocksResult import blockScore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -3055,12 +3056,7 @@ class MongoDbStorage(StorageInterface):
         # calculate block hashes and add separately
         image_lower = sample_entry.base_addr
         image_upper = image_lower + sample_entry.binary_size
-        picblockhashes = []
-        for hash_entry in self.blockhasher.getBlockhashesForFunction(smda_function, image_lower, image_upper, hash_size=8):
-            for block_entry in hash_entry["offset_tuples"]:
-                block_entry["hash"] = hash_entry["hash"]
-                picblockhashes.append(block_entry)
-        function_entry.picblockhashes = picblockhashes
+        function_entry.picblockhashes = picBlockHashEntries(self.blockhasher, smda_function, image_lower, image_upper)
         # convert for persistance
         function_dict = function_entry.toDict()
         self._encodeFunction(function_dict)
@@ -3509,11 +3505,7 @@ class MongoDbStorage(StorageInterface):
                     functions_updated += 1
                     update_document["pichash"] = new_pichash
                 # check if any blockhashes changed and possibly stage for update
-                picblockhashes = []
-                for hash_entry in self.blockhasher.getBlockhashesForFunction(smda_function, binary_info.base_addr, binary_info.base_addr + binary_info.binary_size, hash_size=8):
-                    for block_entry in hash_entry["offset_tuples"]:
-                        block_entry["hash"] = hash_entry["hash"]
-                        picblockhashes.append(block_entry)
+                picblockhashes = picBlockHashEntries(self.blockhasher, smda_function, binary_info.base_addr, binary_info.base_addr + binary_info.binary_size)
                 set_old = set([(pbh["offset"], pbh["hash"]) for pbh in old_blockhashes])
                 set_new = set([(pbh["offset"], pbh["hash"]) for pbh in picblockhashes])
                 if len(set_new) != len(set_old.intersection(set_new)):
@@ -3717,9 +3709,12 @@ class MongoDbStorage(StorageInterface):
             sample_id = entry["sample_id"]
             for block_entry in entry["_picblockhashes"]:
                 block_hash = block_entry["hash"]
-                if block_hash not in candidate_picblockhashes:
+                candidate = candidate_picblockhashes.get(block_hash)
+                # a block in several functions is represented by the lowest function_id, as
+                # MemoryStorage has it, whatever order find() answers in (#283)
+                if candidate is None or entry["function_id"] < candidate["function_id"]:
                     candidate_picblockhashes[block_hash] = {
-                        "samples": set(),
+                        "samples": candidate["samples"] if candidate is not None else set(),
                         "length": block_entry["length"],
                         "function_id": entry["function_id"],
                         "sample_id": sample_id,
@@ -3761,13 +3756,7 @@ class MongoDbStorage(StorageInterface):
         for picblockhash, entry in candidate_picblockhashes.items():
             candidate_picblockhashes[picblockhash]["samples"] = sorted(list(entry["samples"]))
             # we calculate the score for this block as 80% of how well it covers the samples and 20% how far its size is away from an "ideal" signature block
-            sample_score = 100.0 * len(entry["samples"]) / len(sample_ids)
-            length_score = 100.0
-            if entry["length"] < 7:
-                length_score = 100.0 - (100.0 * (7 - entry["length"]) / 7)
-            elif entry["length"] > 10:
-                length_score = 100.0 * (1 / (entry["length"] - 10))
-            candidate_picblockhashes[picblockhash]["score"] = 0.8 * sample_score + 0.2 * length_score
+            candidate_picblockhashes[picblockhash]["score"] = blockScore(len(entry["samples"]), len(sample_ids), entry["length"])
             if entry["function_id"] not in function_id_to_block_offsets:
                 function_id_to_block_offsets[entry["function_id"]] = []
             function_id_to_block_offsets[entry["function_id"]].append((entry["offset"], picblockhash))

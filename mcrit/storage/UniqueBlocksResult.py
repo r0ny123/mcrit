@@ -1,7 +1,12 @@
 import datetime
 import hashlib
+import re
 import string
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
+
+from picblocks.blockhasher import BlockHasher
+
+from mcrit.storage.FunctionEntry import picBlockHashEntries
 
 
 def wrap_string(input_str, max_column_length=100, padding=0):
@@ -36,7 +41,216 @@ def coverPreference(block_hash, entry) -> Tuple[int, int]:
     result that went through JSON carries as a decimal string.
     """
     fixed_nibbles = sum(1 for char in entry.get("escaped_sequence") or "" if char in string.hexdigits)
-    return fixed_nibbles, -(int(block_hash, 0) if isinstance(block_hash, str) else block_hash)
+    return fixed_nibbles, -blockHashAsInt(block_hash)
+
+
+def blockHashAsInt(block_hash) -> int:
+    """A storage key as the picblockhash: an int, a "0x" hex string (MongoDbStorage) or decimal (JSON)."""
+    return int(block_hash, 0) if isinstance(block_hash, str) else int(block_hash)
+
+
+def parseBlockHash(value) -> int:
+    """A picblockhash a caller gave, as an integer: an int, or a string of decimal or "0x" hex digits.
+
+    Stricter than blockHashAsInt, which reads storage's own keys: a bool, a sign, spaces,
+    underscores, leading zeros in decimal, and anything outside 64 bits are refused with a
+    ValueError, by the server and the client alike (#283).
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        number = value
+    # bounded before int() reads it: no more digits than 64 bits take
+    elif isinstance(value, str) and re.fullmatch(r"0[xX][0-9a-fA-F]{1,16}|0|[1-9][0-9]{0,19}", value):
+        number = int(value, 0)
+    else:
+        number = -1
+    if not 0 <= number < 2**64:
+        shown = repr(value) if len(repr(value)) <= 40 else repr(value)[:37] + "..."
+        raise ValueError(f"not a picblockhash: {shown}")
+    return number
+
+
+def lengthScore(length, gentle=False) -> float:
+    """How close a block of <length> instructions is to an "ideal" signature block, from 0 to 100.
+
+    7 to 11 instructions score 100 and shorter blocks lose a seventh per missing instruction. Past
+    11, the default drops as 1 / (length - 10), so 12 instructions score 50 and 20 score 10. With
+    <gentle> it drops as 11 / length instead, so 12 score about 92 and 20 score 55 (#283).
+    """
+    if length < 7:
+        return 100.0 - (100.0 * (7 - length) / 7)
+    if length > 10:
+        return 100.0 * (11 / length) if gentle else 100.0 * (1 / (length - 10))
+    return 100.0
+
+
+def blockScore(num_block_samples, num_samples, length, gentle=False) -> float:
+    """A unique block's score: 80% the share of the samples it covers, 20% its lengthScore."""
+    sample_score = 100.0 * num_block_samples / num_samples
+    return 0.8 * sample_score + 0.2 * lengthScore(length, gentle=gentle)
+
+
+_RETURN_MNEMONICS = {"ret", "retn", "retf"}
+# a prefix becomes part of the mnemonic, e.g. GCC's "repz ret" or "bnd ret"
+_RETURN_PREFIXES = {"rep", "repz", "bnd", "notrack"}
+# padding, and the call of a stack-cookie check
+_PASSIVE_MNEMONICS = {"nop", "int3", "endbr32", "endbr64", "call"}
+_STACK_POINTER = {"sp", "esp", "rsp"}
+_STACK_OR_FRAME_POINTER = _STACK_POINTER | {"bp", "ebp", "rbp", "x29", "fp"}
+_RETURN_REGISTERS = {"al", "ax", "eax", "rax"}
+_STACK_MEMORY = re.compile(r"\[(?:[re]?[sb]p|x29|fp)\b")
+_REGISTER = re.compile(r"[a-z][a-z0-9]*")
+
+
+def _exitRole(mnemonic, operands):
+    """What an instruction does in a function exit: "restore", "neutral", or None if it has no place there."""
+    parts = [part.strip() for part in operands.split(",")] if operands else []
+    destination = parts[0] if parts else ""
+    if mnemonic in ("pop", "leave"):
+        return "restore"
+    # AArch64 restores registers from the stack with ldp/ldr, e.g. ldp x29, x30, [sp], #0x10
+    if mnemonic in ("ldp", "ldr") and any(part.startswith("[sp") for part in parts):
+        return "restore"
+    if destination in _STACK_POINTER and mnemonic in ("add", "sub", "lea", "mov"):
+        return "restore"
+    # MSVC's x86 SEH frame unlinked: mov dword ptr fs:[0], ecx
+    if mnemonic == "mov" and destination.replace(" ", "").endswith("fs:[0]"):
+        return "restore"
+    # MSVC x64 restores non-volatile xmm registers: movaps xmm6, xmmword ptr [rsp + 0x30]
+    if mnemonic in ("movaps", "movups", "movdqa", "movdqu") and destination.startswith("xmm") and any(_STACK_MEMORY.search(part) for part in parts[1:]):
+        return "restore"
+    if mnemonic in _PASSIVE_MNEMONICS:
+        return "neutral"
+    # the return value set to a flag: seta al
+    if mnemonic.startswith("set") and parts == [destination] and destination in _RETURN_REGISTERS:
+        return "neutral"
+    if len(parts) != 2:
+        return None
+    source = parts[1]
+    # any register but the return value reloaded from the frame, e.g. a callee-saved one or the
+    # cookie: mov rbx, qword ptr [rsp + 0x30]
+    if mnemonic == "mov" and destination not in _RETURN_REGISTERS and _STACK_MEMORY.search(source):
+        return "neutral"
+    # the stack-cookie check: xor rcx, rsp
+    if mnemonic == "xor" and source in _STACK_OR_FRAME_POINTER:
+        return "neutral"
+    if destination in _RETURN_REGISTERS:
+        # the return value set to zero, -1, another register, a small constant or a local
+        if mnemonic in ("xor", "sub") and source == destination:
+            return "neutral"
+        if mnemonic == "or" and _isAllOnes(source):
+            return "neutral"
+        if mnemonic in ("mov", "movzx") and (_REGISTER.fullmatch(source) or _STACK_MEMORY.search(source) or _isSmallImmediate(source) or _isAllOnes(source)):
+            return "neutral"
+    return None
+
+
+def _immediate(operand):
+    try:
+        return int(operand, 0)
+    except ValueError:
+        return None
+
+
+def _isSmallImmediate(operand) -> bool:
+    value = _immediate(operand)
+    return value is not None and 0 <= value <= 0xFF
+
+
+def _isAllOnes(operand) -> bool:
+    """-1, as an immediate of any width: or eax, 0xffffffff."""
+    return _immediate(operand) in (-1, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF)
+
+
+def _isReturn(mnemonic) -> bool:
+    *prefixes, base = mnemonic.split() or [""]
+    return base in _RETURN_MNEMONICS and set(prefixes) <= _RETURN_PREFIXES
+
+
+def isGenericBlock(entry) -> bool:
+    """Whether a block is compiler boilerplate rather than code of its own (#283).
+
+    That is a block whose YARA string is at least half wildcards, or a function exit: a block that
+    ends in a return, restores something (a pop, leave, a write to the stack pointer such as
+    "add rsp, 0x28", AArch64's ldp/ldr from [sp], MSVC x64's xmm registers from the stack, or
+    unlinking MSVC's x86 SEH frame from fs:[0]) and otherwise holds only padding, calls (their
+    targets are wildcards anyway), "xor rcx, rsp" of a stack-cookie check, registers other than
+    the return value reloaded from the frame, and the return value set to zero, -1, a flag,
+    another register, a constant up to 0xff or a local. Other arithmetic or a larger constant keeps
+    a block out, so does a block without a restore, such as a leaf function that reads its
+    arguments through esp. The return-value rules are Intel's, and an AArch64 stack-cookie check
+    is not recognised. A heuristic, not a classification: it is only used to demote blocks.
+    """
+    escaped_sequence = entry.get("escaped_sequence") or ""
+    digits = sum(1 for char in escaped_sequence if char in string.hexdigits or char == "?")
+    if digits and escaped_sequence.count("?") * 2 >= digits:
+        return True
+    instructions = entry.get("instructions") or []
+    if not instructions or not _isReturn(instructions[-1][2]):
+        return False
+    roles = [_exitRole(instruction[2], instruction[3]) for instruction in instructions[:-1]]
+    return None not in roles and "restore" in roles
+
+
+def selectBlockCover(blocks, sample_ids, required_per_sample, max_blocks_per_function=0, demoted=frozenset()) -> Tuple[list, dict]:
+    """Greedily pick a multi-set cover of <blocks> for <sample_ids>, i.e. the blocks of a YARA rule.
+
+    Each round takes the block that reaches the most samples not yet covered <required_per_sample>
+    times, then the highest score, then coverPreference. <max_blocks_per_function> caps how many
+    blocks one function contributes, 0 for no cap; a block without a function_id is not capped. A
+    function is one function of one sample: a block that storage found in several functions
+    carries the lowest function_id among them, so in a cover over several samples a helper they
+    share can still contribute up to the cap per function id. The block hashes in <demoted> rank
+    behind all other blocks that reach as many samples. Both are off by default (#283). Answers the
+    picked block hashes in the order they were picked and how many of them reach each sample.
+    """
+    selected: list = []
+    picked = set()
+    sample_coverage = {sample_id: 0 for sample_id in sample_ids}
+    samples_covered = set()
+    function_picks: Dict[Any, int] = {}
+    preferences = {block_hash: coverPreference(block_hash, entry) for block_hash, entry in blocks.items()}
+    while len(samples_covered) < len(sample_ids):
+        # how much benefit each block brings, i.e. how many uncovered samples it can cover at once
+        best = None
+        best_key = None
+        for block_hash, entry in blocks.items():
+            if block_hash in picked:
+                continue
+            function_id = entry.get("function_id")
+            if max_blocks_per_function and function_id is not None and function_picks.get(function_id, 0) >= max_blocks_per_function:
+                continue
+            coverable = set(entry["samples"]).difference(samples_covered)
+            if not coverable:
+                continue
+            key = (len(coverable), block_hash not in demoted, entry["score"], preferences[block_hash])
+            if best_key is None or key > best_key:
+                best, best_key = (block_hash, coverable), key
+        if best is None:
+            break
+        block_hash, coverable = best
+        selected.append(block_hash)
+        picked.add(block_hash)
+        function_id = blocks[block_hash].get("function_id")
+        function_picks[function_id] = function_picks.get(function_id, 0) + 1
+        for sample_id in coverable:
+            sample_coverage[sample_id] += 1
+        samples_covered = {sample_id for sample_id, count in sample_coverage.items() if count >= required_per_sample}
+    return selected, sample_coverage
+
+
+def picBlockHashesOfReport(smda_report) -> List[int]:
+    """The picblockhashes of an SMDA report's blocks, as storage computes them when adding it.
+
+    Meant for the negative set of a unique-blocks request (#283): the blocks of a sibling that is
+    not, and should not be, in the index, hashed locally and sent instead of the report.
+    """
+    blockhasher = BlockHasher()
+    lower_addr = smda_report.base_addr
+    upper_addr = lower_addr + smda_report.binary_size
+    hashes = set()
+    for smda_function in smda_report.getFunctions():
+        hashes.update(entry["hash"] for entry in picBlockHashEntries(blockhasher, smda_function, lower_addr, upper_addr))
+    return sorted(hashes)
 
 
 # Dataclass, post init
@@ -51,8 +265,27 @@ class UniqueBlocksResult:
     def __init__(self) -> None:
         pass
 
-    def generateYaraRule(self, min_ins=None, max_ins=None, min_bytes=None, max_bytes=None, required_per_sample=10, condition_required=7, wrap_at=80):
-        cover = self.generateBlockCover(min_ins=min_ins, max_ins=max_ins, min_bytes=min_bytes, max_bytes=max_bytes, required_per_sample=required_per_sample)
+    def generateYaraRule(
+        self,
+        min_ins=None,
+        max_ins=None,
+        min_bytes=None,
+        max_bytes=None,
+        required_per_sample=10,
+        condition_required=7,
+        wrap_at=80,
+        max_blocks_per_function=None,
+        demote_generic_blocks=None,
+    ):
+        cover = self.generateBlockCover(
+            min_ins=min_ins,
+            max_ins=max_ins,
+            min_bytes=min_bytes,
+            max_bytes=max_bytes,
+            required_per_sample=required_per_sample,
+            max_blocks_per_function=max_blocks_per_function,
+            demote_generic_blocks=demote_generic_blocks,
+        )
         return self.renderRule(cover, condition_required, wrap_at=wrap_at)
 
     def renderRule(self, block_cover, condition_required, wrap_at=80):
@@ -90,7 +323,14 @@ class UniqueBlocksResult:
         yara_rule += "}\n"
         return yara_rule
 
-    def generateBlockCover(self, min_ins=None, max_ins=None, min_bytes=None, max_bytes=None, required_per_sample=10):
+    def generateBlockCover(self, min_ins=None, max_ins=None, min_bytes=None, max_bytes=None, required_per_sample=10, max_blocks_per_function=None, demote_generic_blocks=None):
+        """Pick the blocks of a YARA rule from this result, after filtering them by size.
+
+        <max_blocks_per_function> is as in selectBlockCover, and <demote_generic_blocks> demotes the
+        blocks isGenericBlock flags; left at None, both take the values the job ran with, as its
+        statistics record them. Given the job's covers_required and no size filters, the cover is
+        the job's own.
+        """
         block_cover: Dict[str, Any] = {"block_hashes": [], "num_samples_covered": 0, "has_rule": False, "is_complete_cover": False}
         # we need to filter first, according to the desired parameters
         filtered_blocks: Dict[int, Dict[str, Any]] = {}
@@ -108,43 +348,24 @@ class UniqueBlocksResult:
             if max_bytes and bytes_length > max_bytes:
                 continue
             filtered_blocks[block_hash] = entry
-        yara_rule_blocks = []
         sample_ids = [int(v) for v in self.statistics["by_sample_id"].keys()]
-        sample_coverage = {sample_id: 0 for sample_id in sample_ids}
-        samples_covered = set()
-        preferences = {block_hash: coverPreference(block_hash, entry) for block_hash, entry in filtered_blocks.items()}
-        while True:
-            # calculate block_scores as how much benefit they bring, i.e. how many uncovered samples they can cover at once
-            block_candidates = []
-            for block_hash, entry in filtered_blocks.items():
-                sample_ids_coverable = set(entry["samples"]).difference(samples_covered)
-                if sample_ids_coverable and block_hash not in yara_rule_blocks:
-                    candidate = {
-                        "block_hash": block_hash,
-                        "coverable": sample_ids_coverable,
-                        "value": len(sample_ids_coverable),
-                        "score": entry["score"],
-                        "preference": preferences[block_hash],
-                    }
-                    block_candidates.append(candidate)
-            # check if we are done yet, successful or not
-            if len(samples_covered) == len(sample_ids):
-                block_cover["has_rule"] = True
-                block_cover["is_complete_cover"] = True
-                break
-            if len(block_candidates) == 0:
-                if len(yara_rule_blocks) > 0:
-                    block_cover["has_rule"] = True
-                break
-            # if not, choose the best block
-            block_candidates.sort(key=lambda i: (i["value"], i["score"], i["preference"]))
-            selected_block: Dict[str, Any] = block_candidates.pop()
-            yara_rule_blocks.append(selected_block["block_hash"])
-            # and update counters
-            for sample_id in selected_block["coverable"]:
-                sample_coverage[sample_id] += 1
-            samples_covered = set([sample_id for sample_id, count in sample_coverage.items() if count >= required_per_sample])
-            block_cover["num_samples_covered"] = len(samples_covered)
+        # as Worker.getUniqueBlocks clamps it: no samples need 0 blocks, so 0 is no cover
+        required_per_sample = max(1, int(required_per_sample))
+        # the job's own options, so the cover rebuilt here is the one the job picked (#283)
+        if max_blocks_per_function is None:
+            max_blocks_per_function = self.statistics.get("max_blocks_per_function", 0)
+        # as Worker.getUniqueBlocks reads it: below 1 is no cap
+        max_blocks_per_function = max(0, int(max_blocks_per_function or 0))
+        if demote_generic_blocks is None:
+            demote_generic_blocks = self.statistics.get("demote_generic_blocks", False)
+        demoted = {block_hash for block_hash, entry in filtered_blocks.items() if isGenericBlock(entry)} if demote_generic_blocks else frozenset()
+        yara_rule_blocks, sample_coverage = selectBlockCover(filtered_blocks, sample_ids, required_per_sample, max_blocks_per_function=max_blocks_per_function, demoted=demoted)
+        block_cover["num_samples_covered"] = sum(1 for count in sample_coverage.values() if count >= required_per_sample)
+        if block_cover["num_samples_covered"] == len(sample_ids):
+            block_cover["has_rule"] = True
+            block_cover["is_complete_cover"] = True
+        elif yara_rule_blocks:
+            block_cover["has_rule"] = True
         block_cover["block_hashes"] = yara_rule_blocks
         return block_cover
 

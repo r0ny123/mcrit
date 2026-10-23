@@ -20,11 +20,12 @@ from mcrit.index.SearchQueryTree import AndNode, BaseVisitor, FilterSingleElemen
 from mcrit.minhash.MinHash import MinHash
 from mcrit.minhash.MinHasher import MINHASH_SHINGLER_REVISION
 from mcrit.storage.FamilyEntry import FamilyEntry
-from mcrit.storage.FunctionEntry import FunctionEntry
+from mcrit.storage.FunctionEntry import FunctionEntry, picBlockHashEntries
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache, StorageBackedMatchingCache
 from mcrit.storage.SampleEntry import TIMESTAMP_FORMAT, SampleEntry
 from mcrit.storage.StorageInterface import BinaryStream, StorageInterface
+from mcrit.storage.UniqueBlocksResult import blockScore
 
 if TYPE_CHECKING:  # pragma: no cover
     from smda.common.SmdaFunction import SmdaFunction
@@ -658,12 +659,7 @@ class MemoryStorage(StorageInterface):
             function_entry = FunctionEntry(sample_entry, smda_function, self._useCounter("functions"), minhash=minhash)
         image_lower = sample_entry.base_addr
         image_upper = image_lower + sample_entry.binary_size
-        picblockhashes = []
-        for hash_entry in self.blockhasher.getBlockhashesForFunction(smda_function, image_lower, image_upper, hash_size=8):
-            for block_entry in hash_entry["offset_tuples"]:
-                block_entry["hash"] = hash_entry["hash"]
-                picblockhashes.append(block_entry)
-        function_entry.picblockhashes = picblockhashes
+        function_entry.picblockhashes = picBlockHashEntries(self.blockhasher, smda_function, image_lower, image_upper)
         self._functions[function_entry.function_id] = function_entry
         if minhash and minhash.hasMinHash():
             minhash.function_id = function_entry.function_id
@@ -1131,13 +1127,7 @@ class MemoryStorage(StorageInterface):
         for picblockhash, entry in candidate_picblockhashes.items():
             candidate_picblockhashes[picblockhash]["samples"] = sorted(list(entry["samples"]))
             # we calculate the score for this block as 80% of how well it covers the samples and 20% how far its size is away from an "ideal" signature block
-            sample_score = 100.0 * len(entry["samples"]) / len(sample_ids)
-            length_score = 100.0
-            if entry["length"] < 7:
-                length_score = 100.0 - (100.0 * (7 - entry["length"]) / 7)
-            elif entry["length"] > 10:
-                length_score = 100.0 * (1 / (entry["length"] - 10))
-            candidate_picblockhashes[picblockhash]["score"] = 0.8 * sample_score + 0.2 * length_score
+            candidate_picblockhashes[picblockhash]["score"] = blockScore(len(entry["samples"]), len(sample_ids), entry["length"])
             if entry["function_id"] not in function_id_to_block_offsets:
                 function_id_to_block_offsets[entry["function_id"]] = []
             function_id_to_block_offsets[entry["function_id"]].append((entry["offset"], picblockhash))
