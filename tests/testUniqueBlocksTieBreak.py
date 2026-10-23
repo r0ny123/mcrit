@@ -7,13 +7,15 @@ YARA string, wildcards not counted, and then by the lowest picblockhash.
 
 import json
 import os
+import random
 import unittest
+from typing import Any, Dict
 from unittest.mock import patch
 
 from smda.common.SmdaReport import SmdaReport
 
 from mcrit.index.MinHashIndex import MinHashIndex
-from mcrit.storage.UniqueBlocksResult import UniqueBlocksResult, coverPreference
+from mcrit.storage.UniqueBlocksResult import UniqueBlocksResult, coverPreference, selectBlockCover
 
 from .context import config
 
@@ -22,6 +24,41 @@ EXAMPLE_REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examp
 
 def block(escaped_sequence, length=8, score=100.0):
     return {"samples": [1], "length": length, "score": score, "instructions": [[0, "90", "nop", ""]] * length, "escaped_sequence": escaped_sequence}
+
+
+def test_heap_cover_preserves_greedy_order_with_optional_constraints():
+    rng = random.Random(7319)
+    for _ in range(300):
+        sample_ids = list(range(rng.randint(1, 5)))
+        blocks: Dict[int, Dict[str, Any]] = {
+            key: {
+                "samples": rng.sample(sample_ids, rng.randint(1, len(sample_ids))),
+                "score": rng.choice([80, 100]),
+                "escaped_sequence": "90" * rng.randint(1, 5),
+                "function_id": rng.randrange(4),
+            }
+            for key in range(rng.randrange(25))
+        }
+        demoted = {key for key in blocks if rng.choice([False, True])}
+        cap, required = rng.randrange(3), rng.randint(1, 4)
+        coverage = dict.fromkeys(sample_ids, 0)
+        selected, counts = [], {}
+        while any(value < required for value in coverage.values()):
+            candidates = []
+            for key, entry in blocks.items():
+                reachable = {sample for sample in entry["samples"] if coverage[sample] < required}
+                if key in selected or not reachable or (cap and counts.get(entry["function_id"], 0) >= cap):
+                    continue
+                candidates.append(((len(reachable), key not in demoted, entry["score"], coverPreference(key, entry)), key, reachable))
+            if not candidates:
+                break
+            _, key, reachable = max(candidates)
+            selected.append(key)
+            function = blocks[key]["function_id"]
+            counts[function] = counts.get(function, 0) + 1
+            for sample in reachable:
+                coverage[sample] += 1
+        assert (selected, coverage) == selectBlockCover(blocks, sample_ids, required, max_blocks_per_function=cap, demoted=demoted)
 
 
 class CoverPreferenceTest(unittest.TestCase):

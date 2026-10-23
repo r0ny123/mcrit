@@ -1,5 +1,6 @@
 import datetime
 import hashlib
+import heapq
 import re
 import string
 from typing import Any, Dict, List, Tuple
@@ -204,34 +205,41 @@ def selectBlockCover(blocks, sample_ids, required_per_sample, max_blocks_per_fun
     picked block hashes in the order they were picked and how many of them reach each sample.
     """
     selected: list = []
-    picked = set()
     sample_coverage = {sample_id: 0 for sample_id in sample_ids}
     samples_covered = set()
     function_picks: Dict[Any, int] = {}
-    preferences = {block_hash: coverPreference(block_hash, entry) for block_hash, entry in blocks.items()}
+    candidates = []
+    for position, (block_hash, entry) in enumerate(blocks.items()):
+        fixed, negative_hash = coverPreference(block_hash, entry)
+        candidates.append((-len(set(entry["samples"])), -(block_hash not in demoted), -entry["score"], -fixed, -negative_hash, position, block_hash))
+        if progress_reporter is not None:
+            progress_reporter.step()
+    heapq.heapify(candidates)
     while len(samples_covered) < len(sample_ids):
-        # how much benefit each block brings, i.e. how many uncovered samples it can cover at once
+        # Reach only shrinks. Revalidate the heap's best upper bound until its key is current;
+        # this preserves the greedy ordering without rescanning every block after every pick.
         best = None
-        best_key = None
-        for block_hash, entry in blocks.items():
+        while candidates:
+            candidate = heapq.heappop(candidates)
+            block_hash = candidate[-1]
+            entry = blocks[block_hash]
             if progress_reporter is not None:
                 progress_reporter.step()
-            if block_hash in picked:
-                continue
             function_id = entry.get("function_id")
             if max_blocks_per_function and function_id is not None and function_picks.get(function_id, 0) >= max_blocks_per_function:
                 continue
             coverable = set(entry["samples"]).difference(samples_covered)
             if not coverable:
                 continue
-            key = (len(coverable), block_hash not in demoted, entry["score"], preferences[block_hash])
-            if best_key is None or key > best_key:
-                best, best_key = (block_hash, coverable), key
+            if len(coverable) != -candidate[0]:
+                heapq.heappush(candidates, (-len(coverable), *candidate[1:]))
+                continue
+            best = (block_hash, coverable)
+            break
         if best is None:
             break
         block_hash, coverable = best
         selected.append(block_hash)
-        picked.add(block_hash)
         function_id = blocks[block_hash].get("function_id")
         function_picks[function_id] = function_picks.get(function_id, 0) + 1
         for sample_id in coverable:
