@@ -1,8 +1,9 @@
-"""Binary sample submission refuses query values it used to misread, before scheduling a job."""
+"""Binary sample submission refuses query values it used to misread or store unchecked, before scheduling a job."""
 
 import json
 import unittest
 from unittest.mock import MagicMock
+from urllib.parse import quote
 
 import falcon
 import falcon.testing
@@ -52,8 +53,26 @@ class SampleInputValidationTest(unittest.TestCase):
                 self.assertEqual(falcon.HTTP_202, self.submit(f"bitness={value}").status)
                 self.assertEqual(value, self.index.addBinarySample.call_args.args[6])
 
+    def test_names_with_unicode_and_punctuation_are_accepted(self):
+        response = self.submit("filename=%E6%A0%B7%E6%9C%AC%20%5B1%5D.dll&family=win.cobalt_strike&version=" + "v" * 64)
+        self.assertEqual(falcon.HTTP_202, response.status)
+        self.assertEqual(("\u6837\u672c [1].dll", "win.cobalt_strike", "v" * 64), self.index.addBinarySample.call_args.args[1:4])
+        # a joiner, a no-break space, a combining accent and a right-to-left override are all text
+        for filename in ("\u0915\u094d\u200d\u0937.exe", "invoice\u00a02024.exe", "re\u0301sume\u0301.doc", "photo\u202egpj.exe"):
+            with self.subTest(filename=filename):
+                self.assertEqual(falcon.HTTP_202, self.submit("filename=" + quote(filename)).status)
+                self.assertEqual(filename, self.index.addBinarySample.call_args.args[1])
+
     def test_unreadable_values_are_refused_and_logged_without_scheduling_a_job(self):
         for query_string in (
+            "filename=a%0Ab.exe",
+            "filename=a%09b.exe",
+            "filename=a%E2%80%A8b.exe",
+            "filename=" + "a" * 256,
+            "family=emotet%00",
+            "family=" + "f" * 65,
+            "version=1.0%1B%5B31m",
+            "version=" + "v" * 65,
             "is_dump=yes",
             "is_dump=maybe",
             "is_dump=TRUE",

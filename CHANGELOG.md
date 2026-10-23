@@ -67,8 +67,11 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   became 32 and an unparsable `base_addr` became 0, each without a word. They are now answered with
   400 and nothing is enqueued. `is_dump` takes `true`/`True`/`1` or `false`/`False`/`0`, `bitness`
   32 or 64, `base_addr` a hexadecimal address from 0 to 2**64 - 1, and a blank value (`is_dump=`)
-  still means the parameter is absent. A client that sent such a value and got a sample anyway now
-  has to correct it.
+  still means the parameter is absent. A `filename` longer than 255 characters, a `family` or
+  `version` longer than 64, or any of them with a control character (a newline, a tab, a NUL, an
+  escape sequence) or a line separator, is refused the same way; other characters, spaces and
+  non-ASCII included, are stored as given, as before. A client that sent such a value and got a
+  sample anyway now has to correct it.
 
 ## [1.16.0] - 2026-10-16
 
