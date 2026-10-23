@@ -3268,8 +3268,7 @@ class MongoDbStorage(StorageInterface):
             num_unique_pichashes = result["Total"]
         return num_unique_pichashes
 
-    # TODO add types
-    def getStats(self, with_pichash=True) -> Dict:
+    def getStats(self, with_pichash: bool = True) -> Dict[str, Union[int, str, None]]:
         # None signals "not computed", so that consumers can distinguish it from an actual count of 0
         num_unique_pichashes = None
         if with_pichash:
