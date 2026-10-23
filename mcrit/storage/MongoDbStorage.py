@@ -49,7 +49,7 @@ from mcrit.storage.FunctionEntry import FunctionEntry, smdaFunctionFromXcfg
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache
 from mcrit.storage.SampleEntry import SampleEntry
-from mcrit.storage.StorageInterface import BinaryStream, StorageInterface
+from mcrit.storage.StorageInterface import BinaryStream, StorageInterface, isSha256
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1569,6 +1569,19 @@ class MongoDbStorage(StorageInterface):
         # an emptied corpus is under every cap again; other processes simply wait out the TTL
         self._over_cap_since.clear()
         self._ensureIndexAndUnknownFamily()
+
+    # sha256 values per $in query: 64 characters each keeps a query well below the 16 MB BSON limit
+    _PRESENT_SHA256S_CHUNK = 10000
+
+    def getPresentSha256s(self, sha256s: Iterable[str]) -> Set[str]:
+        # only what can be a sha256: anything else matches no sample, and a long one would take the
+        # $in query beyond the 16 MB BSON limit
+        candidates = list({sha256 for sha256 in sha256s if isSha256(sha256)})
+        present = set()
+        for start in range(0, len(candidates), self._PRESENT_SHA256S_CHUNK):
+            chunk = candidates[start : start + self._PRESENT_SHA256S_CHUNK]
+            present.update(document["sha256"] for document in self._getDb().samples.find({"sha256": {"$in": chunk}}, {"_id": 0, "sha256": 1}))
+        return present
 
     def getSampleBySha256(self, sha256: str, is_query=False) -> Optional["SampleEntry"]:
         target_sample = None

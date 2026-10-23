@@ -43,6 +43,26 @@ def deflated_at_ratio(content, ratio):
     return build(max(0, int((len(content) / ratio - len(build(0))) / 1.25) + 64))
 
 
+def corrupted(encoded):
+    """encoded content with the start of its deflate stream flipped, so that inflating it fails"""
+    data = bytearray(base64.b85decode(encoded))
+    with zipfile.ZipFile(io.BytesIO(bytes(data))) as zip_file:
+        info = zip_file.getinfo("content")
+    start = info.header_offset + 30 + len(info.filename) + len(info.extra)
+    for offset in range(start, start + 40):
+        data[offset] ^= 0xFF
+    return base64.b85encode(bytes(data)).decode()
+
+
+def encrypted(encoded):
+    """encoded content with its member flagged as encrypted, which zipfile asks a password for"""
+    data = bytearray(base64.b85decode(encoded))
+    # general purpose flags of the local file header (offset 6) and central directory entry (offset 8)
+    data[6] |= 1
+    data[bytes(data).rfind(b"PK\x01\x02") + 8] |= 1
+    return base64.b85encode(bytes(data)).decode()
+
+
 class DecompressionLimitTestSuite(unittest.TestCase):
     """Compressed import content was inflated without a limit in the server process: a 1,773 byte
     POST /import with a bzip2 member grew the server by 1 GiB, and a few KB more exhausted any host"""
@@ -95,8 +115,15 @@ class DecompressionLimitTestSuite(unittest.TestCase):
         data[info.header_offset + 22 : info.header_offset + 26] = stated_size
         central_directory = bytes(data).rfind(b"PK\x01\x02")
         data[central_directory + 24 : central_directory + 28] = stated_size
-        with self.assertRaises((ValueError, zipfile.BadZipFile)):
+        with self.assertRaises(ValueError):
             decompress_decode(base64.b85encode(bytes(data)).decode())
+
+    def testContentThatDoesNotInflateIsRefusedAsValueError(self):
+        # zlib.error and RuntimeError escaped as they were, and POST /import answered them with 500
+        content = json.dumps({str(index): {"offset": index} for index in range(1000)})
+        for unreadable in (corrupted(compress_encode(content)), encrypted(compress_encode(content)), compress_encode(content)[:-40]):
+            with self.assertRaises(ValueError):
+                decompress_decode(unreadable)
 
 
 class ImportDecompressionTestSuite(unittest.TestCase):
@@ -183,8 +210,11 @@ class ImportDecompressionTestSuite(unittest.TestCase):
             self.assertEqual(clean["content"]["num_functions"], len(index.getStorage().getFunctions(0, 0)))
 
     def testBodyThatIsNoJsonIsAnsweredAsBadInput(self):
-        response = self._post_import(MinHashIndex(config), "{not json")
-        self.assertEqual(falcon.HTTP_400, response.status)
+        # b"\xff\xfe{}" is UTF-16 to json.loads, b"\x80{}" no Unicode at all; too deep a nesting is a RecursionError
+        for body in ("{not json", b"\xff\xfe{}", b"\x80{}", "[" * 100000):
+            with self.subTest(body=body):
+                response = self._post_import(MinHashIndex(config), body)
+                self.assertEqual(falcon.HTTP_400, response.status)
 
 
 if __name__ == "__main__":

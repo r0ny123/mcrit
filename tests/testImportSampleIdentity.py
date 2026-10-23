@@ -125,14 +125,8 @@ class MemoryImportSampleIdentityTest(unittest.TestCase):
             assert imported is not None
             self.assertNotEqual(self.other.sample_id, imported.sample_id)
             counts = self._function_counts(target_storage)
-            real_lookup = target_storage.getSampleBySha256
-            lookups = [None]
-
-            def lookup_after_the_other_import(*args, **kwargs):
-                # the key check of the second import ran before the first one had added the sample
-                return lookups.pop() if lookups else real_lookup(*args, **kwargs)
-
-            with patch.object(target_storage, "getSampleBySha256", side_effect=lookup_after_the_other_import):
+            # the key check of the second import ran before the first one had added the sample
+            with patch.object(target_storage, "getPresentSha256s", return_value=set()):
                 report = target.addImportData(self.export)
             self.assertEqual((0, 1), (report["num_samples_imported"], report["num_samples_skipped"]))
             self.assertEqual(counts, self._function_counts(target_storage))

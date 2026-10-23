@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from smda.common.SmdaReport import SmdaReport
 
-from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.index.MinHashIndex import ImportRejected, MinHashIndex
 from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.libs.utility import generate_unique_pairs
 from mcrit.minhash.EscaperFingerprint import getEscaperFingerprint, getEscaperFingerprints
@@ -335,7 +335,8 @@ class EscaperProvenanceTestSuite(unittest.TestCase):
         index = MinHashIndex(config)
         # the floor is 0.0.0: a prerelease of it is older, and 0.0.10 is newer although "0.0.10" < "0.0.9" as strings
         for version in ("0.0.0rc1", "0.0.0"):
-            self.assertIsNone(index.addImportData(self._minimalExport(index, version=version)))
+            with self.assertRaises(ImportRejected):
+                index.addImportData(self._minimalExport(index, version=version))
         for version in ("0.0.10", "0.0.9"):
             self.assertIsNotNone(index.addImportData(self._minimalExport(index, version=version)))
 

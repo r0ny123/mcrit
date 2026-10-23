@@ -1,6 +1,7 @@
 import datetime
 import logging
 import random
+import re
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
 
 from packaging import version
@@ -43,6 +44,14 @@ BAND_DF_REFERENCE_CUTOFFS = (50, 100, 200, 500, 1000)
 # The largest cutoff a coverage report can be asked about: it is compared against df inside a
 # MongoDB aggregation, and BSON integers are signed 64-bit, so a larger one cannot be encoded.
 BAND_DF_CUTOFF_MAX = 2**63 - 1
+
+
+_SHA256_PATTERN = re.compile("[0-9a-fA-F]{64}")
+
+
+def isSha256(value) -> bool:
+    """Whether value has the shape of a SHA256, 64 hex digits"""
+    return isinstance(value, str) and _SHA256_PATTERN.fullmatch(value) is not None
 
 
 class BinaryStream(Protocol):
@@ -165,6 +174,19 @@ class StorageInterface:
 
         Returns:
             A SampleEntry with the specified SHA256 or None, if no such SampleEntry exists.
+        """
+        raise NotImplementedError
+
+    def getPresentSha256s(self, sha256s: Iterable[str]) -> Set[str]:
+        """Which of the given SHA256 values a stored sample (not a query sample) has, in as few round
+        trips as the storage allows - an import checks every sample of an export at once.
+
+        Args:
+            sha256s: The SHA256 values to look up. Any that is not 64 hex digits matches nothing and
+                is not looked up, so that no value can make a lookup too large to send.
+
+        Returns:
+            The subset of sha256s that samples are stored under.
         """
         raise NotImplementedError
 
