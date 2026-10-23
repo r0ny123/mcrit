@@ -509,6 +509,12 @@ class UniqueBlocksRequestTest(unittest.TestCase):
         self.assertEqual(1, client._session.post.call_count)
         self.assertEqual({}, client._session.get.call_args.kwargs["params"])
 
+    def test_raw_unique_block_requests_return_the_http_response(self):
+        client = McritClient(mcrit_server="http://mcrit", raw_responses=True)
+        client._session = MagicMock()
+        self.assertIs(client._session.get.return_value, client.requestUniqueBlocksForSamples([1]))
+        self.assertIs(client._session.post.return_value, client.requestUniqueBlocksForFamily(4, exclude_picblockhashes=[17]))
+
     def test_the_client_refuses_what_the_server_would(self):
         client = McritClient(mcrit_server="http://mcrit")
         client._session = MagicMock()
