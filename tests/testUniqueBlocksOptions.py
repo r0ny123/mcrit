@@ -8,6 +8,7 @@ import json
 import os
 import random
 import unittest
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import falcon
@@ -23,10 +24,20 @@ from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.queue.LocalQueue import Job
 from mcrit.queue.QueueFactory import QueueFactory
+from mcrit.queue.QueueRemoteCalls import JobProgressReporter
 from mcrit.server.BlocksResource import BlocksResource
 from mcrit.server.utils import getExcludedPicBlockHashes, getUniqueBlocksParams
 from mcrit.storage.StorageFactory import StorageFactory
-from mcrit.storage.UniqueBlocksResult import UniqueBlocksResult, blockHashAsInt, coverPreference, isGenericBlock, lengthScore, picBlockHashesOfReport, selectBlockCover
+from mcrit.storage.UniqueBlocksResult import (
+    UniqueBlocksProgressReporter,
+    UniqueBlocksResult,
+    blockHashAsInt,
+    coverPreference,
+    isGenericBlock,
+    lengthScore,
+    picBlockHashesOfReport,
+    selectBlockCover,
+)
 
 from .context import config, getTestMongoServerAndPort
 
@@ -48,6 +59,69 @@ LOCALS = [[0, "8b45fc", "mov", "eax, dword ptr [ebp - 4]"], [3, "0345f8", "add",
 
 def block(instructions, escaped_sequence, function_id=1, score=100.0):
     return {"samples": [1], "length": len(instructions), "score": score, "function_id": function_id, "instructions": instructions, "escaped_sequence": escaped_sequence}
+
+
+class RecordingReporter:
+    def __init__(self):
+        self.total = 0
+        self.totals = []
+        self.count = 0
+        self.values = []
+        self.polls = 0
+
+    def set_total(self, total):
+        self.total = total
+        self.totals.append(total)
+
+    def step(self):
+        self.count += 1
+        self.values.append(self.count / self.total)
+
+    def poll(self):
+        self.polls += 1
+
+
+def assertProgressFinished(test, reporter):
+    """One total, set once and reached exactly, in more than one step."""
+    test.assertEqual([reporter.total], reporter.totals)
+    test.assertEqual(reporter.total, reporter.count)
+    test.assertLess(reporter.values[0], 1.0)
+
+
+class PhaseRecordingReporter(UniqueBlocksProgressReporter):
+    """Records the phases in the order they start, each with the progress it starts at and after each of its steps."""
+
+    def __init__(self):
+        self.recorder = RecordingReporter()
+        super().__init__(self.recorder)
+        self.phases = []
+
+    def start_phase(self, name, total):
+        super().start_phase(name, total)
+        self.phases.append((name, [self.recorder.count]))
+
+    def step(self, count=1):
+        super().step(count)
+        self.phases[-1][1].append(self.recorder.count)
+
+
+def assertPhasesProgress(test, progress, names, increments, exact=frozenset()):
+    """<names> started in order, each where the earlier ones' shares end, and moving its progress in at least <increments>[name] increments.
+
+    Each phase of <exact> expects as many steps as it takes, so it reaches its share on its last step and not before.
+    """
+    units = UniqueBlocksProgressReporter._PHASE_UNITS
+    test.assertEqual(names, [name for name, _ in progress.phases])
+    start = 0
+    for name, counts in progress.phases:
+        with test.subTest(phase=name):
+            test.assertEqual(start, counts[0])
+            test.assertLessEqual(max(counts), start + units[name])
+            test.assertGreaterEqual(len(set(counts)) - 1, increments.get(name, 0))
+            if name in exact:
+                test.assertEqual(start + units[name], counts[-1])
+                test.assertLess(counts[-2], start + units[name])
+        start += units[name]
 
 
 class LengthScoreTest(unittest.TestCase):
@@ -135,20 +209,25 @@ class GenericBlockTest(unittest.TestCase):
         self.assertFalse(isGenericBlock(block(leaf, "8b442404 03442408 c3")))
 
 
-def oldBlockCover(blocks, sample_ids, required_per_sample, preference):
-    """The cover loop as Worker.getUniqueBlocks had it before selectBlockCover, with the tie-break."""
+def oldBlockCover(blocks, sample_ids, required_per_sample, preference, cap=0, demoted=frozenset()):
+    """The cover loop as Worker.getUniqueBlocks had it before selectBlockCover, with the tie-break,
+    rescanning every block for each pick; <cap> and <demoted> as selectBlockCover takes them."""
     selected, sample_coverage, samples_covered = [], {sample_id: 0 for sample_id in sample_ids}, set()
+    function_picks: Dict[Any, int] = {}
     while True:
         candidates = []
         for block_hash, entry in blocks.items():
             coverable = set(entry["samples"]).difference(samples_covered)
+            if cap and entry.get("function_id") is not None and function_picks.get(entry["function_id"], 0) >= cap:
+                continue
             if coverable and block_hash not in selected:
-                candidates.append(((len(coverable), entry["score"], preference(block_hash, entry)), block_hash, coverable))
+                candidates.append(((len(coverable), block_hash not in demoted, entry["score"], preference(block_hash, entry)), block_hash, coverable))
         if len(samples_covered) == len(sample_ids) or not candidates:
             break
         candidates.sort(key=lambda candidate: candidate[0])
         _, block_hash, coverable = candidates.pop()
         selected.append(block_hash)
+        function_picks[blocks[block_hash].get("function_id")] = function_picks.get(blocks[block_hash].get("function_id"), 0) + 1
         for sample_id in coverable:
             sample_coverage[sample_id] += 1
         samples_covered = {sample_id for sample_id, count in sample_coverage.items() if count >= required_per_sample}
@@ -156,7 +235,7 @@ def oldBlockCover(blocks, sample_ids, required_per_sample, preference):
 
 
 class SelectBlockCoverTest(unittest.TestCase):
-    def test_without_options_it_picks_what_the_old_loop_picked(self):
+    def test_it_picks_what_the_old_loop_picked(self):
         rng = random.Random(283)
         for case in range(300):
             sample_ids = list(range(1, rng.randint(1, 5) + 1))
@@ -174,6 +253,16 @@ class SelectBlockCoverTest(unittest.TestCase):
             required = rng.randint(1, 3)
             with self.subTest(case=case):
                 self.assertEqual(oldBlockCover(blocks, sample_ids, required, coverPreference), selectBlockCover(blocks, sample_ids, required))
+            cap, demoted = rng.randint(1, 2), {block_hash for block_hash in blocks if rng.random() < 0.5}
+            with self.subTest(case=case, cap=cap, demoted=demoted):
+                self.assertEqual(
+                    oldBlockCover(blocks, sample_ids, required, coverPreference, cap=cap, demoted=demoted),
+                    selectBlockCover(blocks, sample_ids, required, max_blocks_per_function=cap, demoted=demoted),
+                )
+
+    def test_one_hash_keyed_as_int_and_as_str_does_not_compare_the_keys(self):
+        blocks = {16: block(DISTINCT, "b8efbeadde 35adde0000 c3"), "0x10": block(DISTINCT, "b8efbeadde 35adde0000 c3")}
+        self.assertEqual([16, "0x10"], selectBlockCover(blocks, [1], 2)[0])
 
     def test_blocks_without_a_function_are_not_capped(self):
         blocks = {1: block(DISTINCT, "b8efbeadde 35adde0000 c3", function_id=None), 2: block(LOCALS, "8b45fc 0345f8 8945f4", function_id=None)}
@@ -196,6 +285,47 @@ class SelectBlockCoverTest(unittest.TestCase):
         generic = dict(block(EPILOGUE, "5f 5e 81c448030000 c3"), samples=[1, 2])
         blocks = {1: generic, 2: block(DISTINCT, "b8efbeadde 35adde0000 c3")}
         self.assertEqual([1], selectBlockCover(blocks, [1, 2], 1, demoted={1})[0])
+
+
+class UniqueBlocksProgressTest(unittest.TestCase):
+    def test_steps_that_complete_no_unit_poll_for_termination(self):
+        reporter = RecordingReporter()
+        progress = UniqueBlocksProgressReporter.wrap(reporter)
+        # more steps than units, and more than the phase expected: each completes a unit or polls
+        progress.start_phase("eliminate", 2500)
+        for _ in range(2550):
+            progress.step()
+        self.assertEqual(UniqueBlocksProgressReporter._PHASE_UNITS["eliminate"], reporter.count)
+        self.assertEqual(2550, reporter.count + reporter.polls)
+        progress.finish()
+        self.assertEqual(reporter.total, reporter.count)
+
+    def test_steps_past_the_expected_count_do_not_leave_the_phase(self):
+        reporter = RecordingReporter()
+        progress = UniqueBlocksProgressReporter.wrap(reporter)
+        progress.start_phase("eliminate", 10)
+        for _ in range(30):
+            progress.step()
+        self.assertEqual(UniqueBlocksProgressReporter._PHASE_UNITS["eliminate"], reporter.count)
+        self.assertEqual(20, reporter.polls)
+
+    def test_a_phase_starts_where_the_last_one_ends_however_far_it_got(self):
+        reporter = RecordingReporter()
+        progress = UniqueBlocksProgressReporter.wrap(reporter)
+        units = UniqueBlocksProgressReporter._PHASE_UNITS
+        progress.start_phase("collect", 100)
+        progress.start_phase("eliminate", 100)
+        for _ in range(50):
+            progress.step()
+        self.assertEqual(units["collect"] + units["eliminate"] // 2, reporter.count)
+
+    def test_a_job_notices_termination_when_polled(self):
+        job = MagicMock()
+        job._is_terminated.return_value = True
+        reporter = JobProgressReporter(job, -1)
+        with self.assertRaisesRegex(Exception, "terminat"):
+            reporter.poll()
+        job._is_terminated.assert_called_once()
 
 
 class WorkerOptionsTest(unittest.TestCase):
@@ -221,33 +351,22 @@ class WorkerOptionsTest(unittest.TestCase):
         self.assertEqual(0, default["statistics"]["blocks_excluded"])
         self.assertNotIn("generic_blocks", default["statistics"])
 
-    def test_unique_blocks_progress_is_monotonic_and_finishes_after_covering(self):
-        class RecordingReporter:
-            def __init__(self):
-                self.total = 0
-                self.totals = []
-                self.count = 0
-                self.values = []
-
-            def set_total(self, total):
-                self.total = total
-                self.totals.append(total)
-
-            def step(self):
-                self.count += 1
-                self.values.append(self.count / self.total)
-
+    def test_the_job_reports_its_progress_once_through(self):
         reporter = RecordingReporter()
         result = self.worker.getUniqueBlocks([self.sample_id], progress_reporter=reporter)
         self.assertTrue(result["yara_rule"])
-        self.assertGreater(reporter.total, 0)
-        self.assertEqual([reporter.total], reporter.totals)
-        self.assertEqual(reporter.total, reporter.count)
-        self.assertTrue(reporter.values)
-        self.assertEqual(sorted(reporter.values), reporter.values)
-        self.assertTrue(all(0.0 < value <= 1.0 for value in reporter.values))
-        self.assertLess(reporter.values[0], 1.0)
-        self.assertEqual(1.0, reporter.values[-1])
+        assertProgressFinished(self, reporter)
+
+    def test_storage_called_directly_finishes_its_own_progress(self):
+        reporter = RecordingReporter()
+        self.index._storage.getUniqueBlocks([self.sample_id], progress_reporter=reporter)
+        assertProgressFinished(self, reporter)
+
+    def test_each_phase_reports_its_share(self):
+        progress = PhaseRecordingReporter()
+        self.worker.getUniqueBlocks([self.sample_id], progress_reporter=progress)
+        # memory storage reports each of its phases only once it is done
+        assertPhasesProgress(self, progress, ["collect", "eliminate", "score", "extract", "escape", "cover"], {"escape": 2}, {"escape"})
 
     def test_the_cap_spreads_the_cover_over_functions(self):
         default = self.worker.getUniqueBlocks([self.sample_id])
@@ -349,36 +468,36 @@ class MongoWorkerOptionsTest(unittest.TestCase):
         server, port = getTestMongoServerAndPort()
         pymongo.MongoClient(server, int(port)).drop_database(DB_NAME)
 
+    def test_progress_is_reported_once_through_with_and_without_the_index(self):
+        worker, sample_id = self._worker(self.mongo)
+        for index_complete in (True, False):
+            worker._storage._setPicBlockHashIndexComplete(index_complete)
+            for name, get_unique_blocks in (("worker", worker.getUniqueBlocks), ("storage", worker._storage.getUniqueBlocks)):
+                with self.subTest(index_complete=index_complete, caller=name):
+                    reporter = RecordingReporter()
+                    get_unique_blocks([sample_id], progress_reporter=reporter)
+                    assertProgressFinished(self, reporter)
+
+    def test_each_phase_moves_the_progress_with_and_without_the_index(self):
+        worker, sample_id = self._worker(self.mongo)
+        for index_complete in (True, False):
+            worker._storage._setPicBlockHashIndexComplete(index_complete)
+            with self.subTest(index_complete=index_complete):
+                progress = PhaseRecordingReporter()
+                worker.getUniqueBlocks([sample_id], progress_reporter=progress)
+                # the index is read in slices of 20,000 candidates, so one sample's candidates take a single step
+                increments = {"collect": 2, "eliminate": 1 if index_complete else 2, "score": 2, "extract": 2, "escape": 2}
+                # the collect and scan phases expect a bound of their steps, the others their count
+                exact = {"score", "extract", "escape"} | ({"eliminate"} if index_complete else set())
+                assertPhasesProgress(self, progress, ["collect", "eliminate", "score", "extract", "escape", "cover"], increments, exact)
+                self.assertEqual(progress.recorder.total, progress.recorder.count)
+
     def test_both_backends_pick_the_same_cover_with_every_option(self):
-        class RecordingReporter:
-            def __init__(self):
-                self.total = 0
-                self.totals = []
-                self.count = 0
-                self.values = []
-
-            def set_total(self, total):
-                self.total = total
-                self.totals.append(total)
-
-            def step(self):
-                self.count += 1
-                self.values.append(self.count / self.total)
-
         options = {"covers_required": 12, "gentle_length_score": True, "max_blocks_per_function": 2, "demote_generic_blocks": True}
-        results = []
-        for storage_config in (StorageConfig(STORAGE_METHOD=StorageFactory.STORAGE_METHOD_MEMORY), self.mongo):
-            worker, sample_id = self._worker(storage_config)
-            reporter = RecordingReporter()
-            results.append(worker.getUniqueBlocks([sample_id], progress_reporter=reporter, **options))
-            self.assertEqual([reporter.total], reporter.totals)
-            self.assertEqual(reporter.total, reporter.count)
-            self.assertTrue(reporter.values)
-            self.assertEqual(sorted(reporter.values), reporter.values)
-            self.assertTrue(all(0.0 < value <= 1.0 for value in reporter.values))
-            self.assertLess(reporter.values[0], 1.0)
-            self.assertEqual(1.0, reporter.values[-1])
-        memory, mongo = results
+        worker, sample_id = self._worker(StorageConfig(STORAGE_METHOD=StorageFactory.STORAGE_METHOD_MEMORY))
+        memory = worker.getUniqueBlocks([sample_id], **options)
+        worker, sample_id = self._worker(self.mongo)
+        mongo = worker.getUniqueBlocks([sample_id], **options)
         self.assertEqual(memory["yara_rule"], [blockHashAsInt(block_hash) for block_hash in mongo["yara_rule"]])
 
     def test_a_block_in_several_functions_counts_against_the_lowest(self):

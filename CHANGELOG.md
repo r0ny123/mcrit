@@ -38,10 +38,17 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   from those statistics, so given the job's `covers_required` and no size filters, the rule MCRITweb
   renders is the one the job picked.
 
+### Changed
+
+- **The unique-blocks cover no longer rescans every block after each pick** ([#283]). It keeps the
+  blocks in a heap by how many samples each reached when last checked, a count that only shrinks,
+  and rechecks only the block on top until its count is current. It picks the same cover, faster the
+  more blocks it picks: with `covers_required=10`, 20,000 blocks over 50 samples take about 0.1 s
+  instead of 2 s when each reaches 1 to 3 of them, and 0.06 s instead of 0.4 s when they reach up to
+  all 50.
+
 ### Fixed
 
-- **Unique-blocks jobs now report progress through candidate collection, scoring, instruction
-  extraction, and cover selection**, so the job no longer reaches completion before its CPU work.
 - **The unique-blocks cover broke score ties by dict order** ([#283]). A block's score is 80% the
   samples it covers and 20% its length, and with one input sample every unique block of 7 to 11
   instructions scores exactly 100.0. Among those the cover took whichever the storage happened to
@@ -63,6 +70,19 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 - **`UniqueBlocksResult.generateBlockCover` stopped after one block for `required_per_sample=0`**
   ([#283]). It now clamps it to 1, as `Worker.getUniqueBlocks` already did with `covers_required`,
   and answers the same 1-of-1 cover as the job.
+- **A unique-blocks job's progress overshot 100% on MongoDB and stayed at 0% on memory storage.**
+  On MongoDB it jumped to 100% once the candidates were eliminated and could then read 200%, or
+  far more after the full scan that an instance without the picblockhash index falls back to; on
+  memory storage it stayed at 0% until the end. Each phase now fills a fixed share, so progress only
+  grows and ends at 100%. A terminated job used to be noticed only at the end, and on MongoDB also
+  during that scan and after the elimination. It is now also noticed at each phase boundary and
+  while the Worker builds the blocks' escaped byte strings. On MongoDB, storage also checks while it
+  collects, eliminates (with the index, once per 20,000 candidates) and scores the candidates, and
+  while it extracts their instructions.
+- **`McritClient.requestUniqueBlocksForSamples` and `requestUniqueBlocksForFamily` ignored
+  `raw_responses`** and answered the parsed job id; they now answer the `requests.Response`, as most
+  other request methods do. A caller that set `raw_responses` but took the job id from these two
+  methods' answers now has to read it from the response.
 
 ## [1.16.0] - 2026-10-16
 

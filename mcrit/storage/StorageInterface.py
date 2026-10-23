@@ -26,73 +26,6 @@ if TYPE_CHECKING:  # pragma: no cover
 
 LOGGER = logging.getLogger(__name__)
 
-
-def _startProgressPhase(progress_reporter, name: str, total: int):
-    """Start a named phase for staged reporters, preserving the legacy reporter API."""
-    if progress_reporter is None:
-        return None
-    start_phase = getattr(progress_reporter, "start_phase", None)
-    if start_phase is not None:
-        return start_phase(name, total)
-    progress_reporter.set_total(total)
-    return progress_reporter
-
-
-def _finishProgressPhase(phase) -> None:
-    finish = getattr(phase, "finish", None)
-    if finish is not None:
-        finish()
-
-
-class StagedUniqueBlocksProgressReporter:
-    """Map unique-block phases onto one monotonic, bounded progress total."""
-
-    _PHASE_UNITS = {"collect": 18, "eliminate": 16, "score": 9, "extract": 20, "filter": 8, "escape": 20, "cover": 9}
-    _TOTAL_UNITS = sum(_PHASE_UNITS.values())
-
-    def __init__(self, reporter):
-        self._reporter = reporter
-        self._reported = 0
-        reporter.set_total(self._TOTAL_UNITS)
-
-    def start_phase(self, name, total):
-        return _StagedUniqueBlocksProgressPhase(self, self._PHASE_UNITS[name], total)
-
-    def _advance(self, units):
-        for _ in range(units):
-            self._reporter.step()
-        self._reported += units
-
-    def finish(self):
-        self._advance(self._TOTAL_UNITS - self._reported)
-
-
-class _StagedUniqueBlocksProgressPhase:
-    def __init__(self, progress, units, total):
-        self._progress = progress
-        self._units = units
-        self._total = max(1, total)
-        self._completed = 0
-        self._reported = 0
-
-    def step(self):
-        self._completed = min(self._total, self._completed + 1)
-        target = self._units * self._completed // self._total
-        self._progress._advance(target - self._reported)
-        self._reported = target
-
-    def finish(self):
-        self._progress._advance(self._units - self._reported)
-        self._reported = self._units
-
-
-def _prepareUniqueBlocksProgress(progress_reporter):
-    """Give direct storage callers the same staged reporting contract as Worker callers."""
-    if progress_reporter is None or hasattr(progress_reporter, "start_phase"):
-        return progress_reporter, False
-    return StagedUniqueBlocksProgressReporter(progress_reporter), True
-
-
 SampleId = int
 FunctionId = int
 FamilyId = int
@@ -905,7 +838,8 @@ class StorageInterface:
 
         Args:
             sample_ids: a list of sample_ids
-            progress_reporter: (optional) might be passed by worker to inquiry progress of this DB only operation
+            progress_reporter: (optional) a UniqueBlocksProgressReporter, as Worker.getUniqueBlocks passes
+                it, whose phases this fills, or any reporter with set_total, step and poll
 
         Returns:
             a dictionary with the isolated blocks

@@ -192,7 +192,65 @@ def isGenericBlock(entry) -> bool:
     return None not in roles and "restore" in roles
 
 
-def selectBlockCover(blocks, sample_ids, required_per_sample, max_blocks_per_function=0, demoted=frozenset(), progress_reporter=None) -> Tuple[list, dict]:
+class UniqueBlocksProgressReporter:
+    """Spreads the phases of a unique-blocks job, in storage and in the Worker, over one total.
+
+    Each phase gets a fixed share of it, so the job's progress only grows and reaches 100% when the
+    job is done. A phase is started with how many steps it expects and may take more: its share is
+    full after that many, the next start_phase() fills whatever it did not reach, and finish() the
+    rest of the job. It lives here rather than with JobProgressReporter so that storage need not
+    import the queue.
+    """
+
+    # rough shares of the total, in proportion to how long each phase took on MongoDB for the two
+    # small reports in tests/
+    _PHASE_UNITS = {"collect": 25, "eliminate": 26, "score": 2, "extract": 37, "escape": 7, "cover": 3}
+
+    def __init__(self, reporter=None):
+        self._reporter = reporter
+        self._reported = 0
+        self._phase_start = 0
+        self._phase_units = 0
+        self._phase_total = 1
+        self._phase_steps = 0
+        if reporter is not None:
+            reporter.set_total(sum(self._PHASE_UNITS.values()))
+
+    @classmethod
+    def wrap(cls, reporter):
+        """<reporter> itself if it is one, so storage called by the Worker reports into the Worker's total"""
+        return reporter if isinstance(reporter, cls) else cls(reporter)
+
+    def start_phase(self, name, total):
+        self._finish_phase()
+        self._phase_start = self._reported
+        self._phase_units = self._PHASE_UNITS[name]
+        self._phase_total = max(1, total)
+        self._phase_steps = 0
+
+    def step(self, count=1):
+        self._phase_steps = min(self._phase_total, self._phase_steps + count)
+        reached = self._phase_start + self._phase_units * self._phase_steps // self._phase_total
+        if reached > self._reported:
+            self._advance(reached - self._reported)
+        elif self._reporter is not None:
+            # a step that completes no unit still lets a job notice that it was terminated
+            self._reporter.poll()
+
+    def _finish_phase(self):
+        self._advance(self._phase_start + self._phase_units - self._reported)
+
+    def finish(self):
+        self._advance(sum(self._PHASE_UNITS.values()) - self._reported)
+
+    def _advance(self, units):
+        if self._reporter is not None:
+            for _ in range(units):
+                self._reporter.step()
+        self._reported += units
+
+
+def selectBlockCover(blocks, sample_ids, required_per_sample, max_blocks_per_function=0, demoted=frozenset()) -> Tuple[list, dict]:
     """Greedily pick a multi-set cover of <blocks> for <sample_ids>, i.e. the blocks of a YARA rule.
 
     Each round takes the block that reaches the most samples not yet covered <required_per_sample>
@@ -211,20 +269,19 @@ def selectBlockCover(blocks, sample_ids, required_per_sample, max_blocks_per_fun
     candidates = []
     for position, (block_hash, entry) in enumerate(blocks.items()):
         fixed, negative_hash = coverPreference(block_hash, entry)
-        candidates.append((-len(set(entry["samples"])), -(block_hash not in demoted), -entry["score"], -fixed, -negative_hash, position, block_hash))
-        if progress_reporter is not None:
-            progress_reporter.step()
+        # the position settles a tie before block_hash is compared, which for the same hash keyed
+        # once as int and once as str would raise
+        candidates.append((-len(set(entry["samples"])), block_hash in demoted, -entry["score"], -fixed, -negative_hash, position, block_hash))
     heapq.heapify(candidates)
     while len(samples_covered) < len(sample_ids):
-        # Reach only shrinks. Revalidate the heap's best upper bound until its key is current;
-        # this preserves the greedy ordering without rescanning every block after every pick.
+        # a block's reach only shrinks, so the heap holds an upper bound of each: the first block
+        # popped whose bound is still its reach is the best, and one whose bound is stale goes back
+        # with its current reach
         best = None
         while candidates:
             candidate = heapq.heappop(candidates)
             block_hash = candidate[-1]
             entry = blocks[block_hash]
-            if progress_reporter is not None:
-                progress_reporter.step()
             function_id = entry.get("function_id")
             if max_blocks_per_function and function_id is not None and function_picks.get(function_id, 0) >= max_blocks_per_function:
                 continue
