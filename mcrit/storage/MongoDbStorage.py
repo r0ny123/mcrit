@@ -1852,11 +1852,13 @@ class MongoDbStorage(StorageInterface):
     def getPicHashMatchesByFunctionIds(self, function_ids: List[int]) -> Dict[int, Set[Tuple[int, int, int]]]:
         # internal format!
         pichash_raw = self._getDb().functions.find({"function_id": {"$in": function_ids}}, {"_pichash": 1, "_id": 0})
-        pichashes_list = list(pichash_raw)  # broken? TODO
+        pichashes_list = list(pichash_raw)
         pichashes = {}
         encoded_to_decoded = {}
         for pichash in pichashes_list:
-            # TODO what happens if pichash does not exist??
+            # a function document without one has no pichash to match, as in the single-id lookup
+            if "_pichash" not in pichash:
+                continue
             self._decodePichash(pichash, delete_old=False)
             encoded_pichash = pichash["_pichash"]
             decoded_pichash = pichash["pichash"]
@@ -3013,11 +3015,16 @@ class MongoDbStorage(StorageInterface):
         return None
 
     def isPicHash(self, pichash: int) -> bool:
+        # 0 is what a function without a PicHash is stored with, not a hash (as in MemoryStorage)
+        if not pichash:
+            return False
         query = {"pichash": pichash}
         self._encodePichash(query)
         return self._getDb().functions.find_one(query) is not None
 
     def getMatchesForPicHash(self, pichash: int) -> Set[Tuple[int, int, int]]:
+        if not pichash:
+            return set()
         query = {"pichash": pichash}
         self._encodePichash(query)
         return set(
@@ -3030,6 +3037,8 @@ class MongoDbStorage(StorageInterface):
     def getMatchesForPicHashes(self, pichashes: List[int]) -> Dict[int, Set[Tuple[int, int, int]]]:
         encoded_to_decoded = {}
         for pichash in set(pichashes):
+            if not pichash:
+                continue
             query = {"pichash": pichash}
             self._encodePichash(query)
             encoded_to_decoded[query["_pichash"]] = pichash

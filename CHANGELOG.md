@@ -55,9 +55,10 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 - Functions whose report carries no PicHash are stored with PicHash 0. The vs and vs-group matchers
   and the MongoDB sample matching treated 0 as a hash like any other and reported every such
-  function as an exact match of every other one; the in-memory storage failed sample matching with
-  `KeyError: 0`. A PicHash of 0 now never matches. Cached matching results from before are
-  recomputed on their next request.
+  function as an exact match of every other one; the in-memory storage failed sample matching, and
+  moving such a sample or its family to another family, with `KeyError: 0`. On MongoDB, a query for
+  PicHash `0000000000000000` answered with every such function. A PicHash of 0 now never matches.
+  Cached matching results from before are recomputed on their next request.
 
 ### Changed
 

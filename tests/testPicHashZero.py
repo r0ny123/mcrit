@@ -94,11 +94,27 @@ class PicHashZeroTest(unittest.TestCase):
         for function_id in self.storage.getFunctionIdsBySampleId(self.sample_a.sample_id):
             self.assertIsNone(self.storage.getPicHashMatchesByFunctionId(function_id))
 
+    def test_pichash_zero_is_not_a_pichash(self):
+        self.assertFalse(self.storage.isPicHash(0))
+        self.assertEqual(set(), self.storage.getMatchesForPicHash(0))
+        self.assertEqual({}, self.storage.getMatchesForPicHashes([0]))
+
     def test_comparing_two_functions_without_a_pichash_sets_no_pichash_flag(self):
         function_a = self.storage.getFunctionIdsBySampleId(self.sample_a.sample_id)[0]
         function_b = self.storage.getFunctionIdsBySampleId(self.sample_b.sample_id)[0]
         result = self.index.getMatchesFunctionVs(function_a, function_b)
         self.assertEqual(0, result["match_entry"]["matches"][4] & IS_PICHASH_FLAG)
+
+    def test_samples_and_families_without_a_pichash_can_change_family(self):
+        self.assertTrue(self.storage.modifySample(self.sample_a.sample_id, {"family_name": "family_c"}))
+        moved = self.storage.getSampleById(self.sample_a.sample_id)
+        assert moved is not None
+        self.assertEqual("family_c", moved.family)
+        self.assertTrue(self.storage.modifyFamily(self.sample_b.family_id, {"family_name": "family_c"}))
+        self.assertEqual(
+            {moved.family_id},
+            {entry.family_id for sample in (self.sample_a, self.sample_b) for entry in self.storage.getFunctionsBySampleId(sample.sample_id)},
+        )
 
 
 @pytest.mark.mongo
@@ -112,6 +128,11 @@ class MongoPicHashZeroTest(PicHashZeroTest):
             STORAGE_METHOD=StorageFactory.STORAGE_METHOD_MONGODB, STORAGE_SERVER=server, STORAGE_PORT=port, STORAGE_MONGODB_DBNAME=self.DB_NAME
         )
         return mcrit_config
+
+    def test_a_function_document_without_a_pichash_is_skipped_by_the_batch_lookup(self):
+        function_ids = self.storage.getFunctionIdsBySampleId(self.sample_a.sample_id)
+        self.storage._getDb().functions.update_one({"function_id": function_ids[0]}, {"$unset": {"_pichash": ""}})
+        self.assertEqual({}, self.storage.getPicHashMatchesByFunctionIds(function_ids))
 
     def tearDown(self):
         server, port = getTestMongoServerAndPort()

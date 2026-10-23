@@ -274,8 +274,10 @@ class MemoryStorage(StorageInterface):
                 if function_entry.sample_id == sample_id:
                     function_entry.family_id = family_id
                     self._functions[function_id] = function_entry
-                    self._pichashes[function_entry.pichash].remove((old_family_id, sample_id, function_id))
-                    self._pichashes[function_entry.pichash].add((family_id, sample_id, function_id))
+                    # 0 is what a function without a PicHash is stored with, and never indexed
+                    if function_entry.pichash:
+                        self._pichashes[function_entry.pichash].remove((old_family_id, sample_id, function_id))
+                        self._pichashes[function_entry.pichash].add((family_id, sample_id, function_id))
                     num_functions_moved += 1
             # update family information itself, by the functions moved as MongoDbStorage does
             self._families[old_family_id].num_samples -= 1
@@ -353,8 +355,9 @@ class MemoryStorage(StorageInterface):
             for function_id, function_entry in self._functions.items():
                 if family_id == function_entry.family_id:
                     self._functions[function_id].family_id = new_family_id
-                    self._pichashes[function_entry.pichash].remove((family_id, function_entry.sample_id, function_id))
-                    self._pichashes[function_entry.pichash].add((new_family_id, function_entry.sample_id, function_id))
+                    if function_entry.pichash:
+                        self._pichashes[function_entry.pichash].remove((family_id, function_entry.sample_id, function_id))
+                        self._pichashes[function_entry.pichash].add((new_family_id, function_entry.sample_id, function_id))
         self._updateDbState()
         return True
 

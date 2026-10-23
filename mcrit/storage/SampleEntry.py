@@ -40,7 +40,6 @@ class SampleEntry:
         field of a report unchecked, and MongoDB reads an object in its place as a query operator."""
         return isinstance(sha256, str) and SampleEntry.SHA256_PATTERN.fullmatch(sha256) is not None
 
-    # TODO -> rename to fromSmdaReport
     def __init__(self, smda_report: Optional["SmdaReport"], sample_id=-1, family_id=0):
         self.sample_id = sample_id
         self.family_id = family_id
