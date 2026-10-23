@@ -3004,7 +3004,6 @@ class MongoDbStorage(StorageInterface):
         # STORAGE_DROP_DISASSEMBLY now genuinely shrinks the instance (#137)
         self._getDb()["xcfg"].drop()
 
-    # TODO move to storage interface, remove this from memory storage?
     def getLibraryInfoForSampleId(self, sample_id: int) -> Optional[Dict[str, str]]:
         sample_entry = self.getSampleById(sample_id)
         if sample_entry is None:

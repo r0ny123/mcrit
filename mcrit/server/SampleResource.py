@@ -186,14 +186,34 @@ class SampleResource:
         filename = req.params["filename"] if "filename" in req.params else None
         family = req.params["family"] if "family" in req.params else None
         version = req.params["version"] if "version" in req.params else None
-        is_dump = True if ("is_dump" in req.params and req.params["is_dump"] in ["True", "true", "1", 1]) else False
+        # a blank value (falcon keeps "?is_dump=" as an empty string) is as good as absent
+        is_dump = False
+        if req.params.get("is_dump"):
+            if req.params["is_dump"] not in ["True", "true", "1", "False", "false", "0"]:
+                resp.data = jsonify({"status": "failed", "data": {"message": "is_dump must be one of true, false, 1 or 0."}})
+                resp.status = falcon.HTTP_400
+                db_log_msg(self.index, req, "SampleResource.on_post_submit_binary - failed - invalid is_dump.")
+                return
+            is_dump = req.params["is_dump"] in ["True", "true", "1"]
         base_address = 0
-        if "base_addr" in req.params:
+        if req.params.get("base_addr"):
             try:
                 base_address = int(req.params["base_addr"], 16)
+                if not 0 <= base_address < 2**64:
+                    raise ValueError
             except ValueError:
-                pass
-        bitness = int(req.params["bitness"]) if ("bitness" in req.params and req.params["bitness"] in ["32", "64"]) else 32
+                resp.data = jsonify({"status": "failed", "data": {"message": "base_addr must be a hexadecimal address below 2**64."}})
+                resp.status = falcon.HTTP_400
+                db_log_msg(self.index, req, "SampleResource.on_post_submit_binary - failed - invalid base_addr.")
+                return
+        bitness = 32
+        if req.params.get("bitness"):
+            if req.params["bitness"] not in ["32", "64"]:
+                resp.data = jsonify({"status": "failed", "data": {"message": "bitness must be 32 or 64."}})
+                resp.status = falcon.HTTP_400
+                db_log_msg(self.index, req, "SampleResource.on_post_submit_binary - failed - invalid bitness.")
+                return
+            bitness = int(req.params["bitness"])
         # binary itself
         binary = req.stream.read()
         binary_sha256 = hashlib.sha256(binary).hexdigest()

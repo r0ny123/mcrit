@@ -48,11 +48,26 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   sample) is answered with 400 and nothing is stored. A report smda refuses as malformed is also
   answered with 400 instead of a server error.
 
+- A function in a submitted report whose `pic_hash` is not an unsigned 64-bit integer is now
+  answered with 400 and nothing of the report is stored. Before, the in-memory storage stored -1,
+  2**64, 1.5, strings and booleans as they came, and a PicHash like `{"$ne": 0}` or `[1]` failed
+  with a 500 after the sample had already been partly stored.
+
 - Functions whose report carries no PicHash are stored with PicHash 0. The vs and vs-group matchers
   and the MongoDB sample matching treated 0 as a hash like any other and reported every such
   function as an exact match of every other one; the in-memory storage failed sample matching with
   `KeyError: 0`. A PicHash of 0 now never matches. Cached matching results from before are
   recomputed on their next request.
+
+### Changed
+
+- **`POST /samples/binary` refuses `is_dump`, `bitness` and `base_addr` values it used to misread.**
+  `is_dump=yes` was read as false, so a dump was disassembled as an unmapped file; `bitness=16`
+  became 32 and an unparsable `base_addr` became 0, each without a word. They are now answered with
+  400 and nothing is enqueued. `is_dump` takes `true`/`True`/`1` or `false`/`False`/`0`, `bitness`
+  32 or 64, `base_addr` a hexadecimal address from 0 to 2**64 - 1, and a blank value (`is_dump=`)
+  still means the parameter is absent. A client that sent such a value and got a sample anyway now
+  has to correct it.
 
 ## [1.16.0] - 2026-10-16
 

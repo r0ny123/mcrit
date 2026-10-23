@@ -436,6 +436,11 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         # checked before the lookup, where MongoDB would read an object as a query operator
         if not SampleEntry.isValidSha256(smda_report.sha256):
             raise ValueError("the report's sha256 is not 64 hex digits")
+        for smda_function in smda_report.getFunctions():
+            # None is a function without a PicHash (stored as 0); anything else is stored through hex()
+            pic_hash = smda_function.pic_hash
+            if pic_hash is not None and (not isinstance(pic_hash, int) or isinstance(pic_hash, bool) or not 0 <= pic_hash < 2**64):
+                raise ValueError(f"the pic_hash of function at {smda_function.offset} is not an unsigned 64-bit integer")
         storage = self.getStorage()
         sample_entry = storage.getSampleBySha256(smda_report.sha256)
         if sample_entry:

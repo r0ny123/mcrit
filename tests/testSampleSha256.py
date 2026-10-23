@@ -74,6 +74,24 @@ class SampleSha256Test(unittest.TestCase):
         # the lookup itself does not read an object as an operator either
         self.assertIsNone(self.storage.getSampleBySha256({"$regex": "^ab"}))
 
+    def _report_with_pic_hash(self, sha256, pic_hash):
+        report = self._report(sha256)
+        # 4.8.0 is recent enough that smda keeps the stated PicHash instead of recalculating it
+        report["smda_version"] = "4.8.0"
+        next(iter(report["xcfg"].values()))["metadata"]["pic_hash"] = pic_hash
+        return report
+
+    def test_a_report_with_a_pic_hash_that_is_not_an_unsigned_64_bit_int_is_rejected_unstored(self):
+        for pic_hash in (-1, 2**64, 1.5, "ab", True, {"$ne": 0}, [1]):
+            result = self.client.simulate_post("/samples", json=self._report_with_pic_hash("ab" * 32, pic_hash))
+            self.assertEqual("400 Bad Request", result.status, pic_hash)
+            self.assertEqual("failed", result.json["status"])
+        self.assertEqual({}, self.client.simulate_get("/samples").json["data"])
+        # the bounds themselves and a function without a PicHash are stored
+        for pic_hash, sha256 in ((0, "ab" * 32), (2**64 - 1, "cd" * 32), (None, "ef" * 32)):
+            result = self.client.simulate_post("/samples", json=self._report_with_pic_hash(sha256, pic_hash))
+            self.assertEqual("200 OK", result.status, pic_hash)
+
     def test_a_malformed_report_is_rejected(self):
         result = self.client.simulate_post("/samples", json={"sha256": "ab" * 32})
         self.assertEqual("400 Bad Request", result.status)
