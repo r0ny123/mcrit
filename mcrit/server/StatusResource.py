@@ -111,8 +111,11 @@ class StatusResource:
 
     @timing
     def on_get_complete_minhashes(self, req, resp):
-        """Schedule a job that calculates every missing minhash, for samples whose hashing job failed earlier. Answers the job id."""
-        minhash_report = self.index.updateMinHashes(None, force_recalculation=True, username=get_username(req))
+        """Schedule a job that calculates every missing minhash - for samples submitted with deferred hashing, or whose hashing job failed earlier - and finishes the samples it completes. Answers the job id."""
+        # finish_samples records the minhash version of what it hashed and drops its disassembly
+        # where configured, as hashing on submission does; a separate method name would take these
+        # jobs out of every listing that knows them as updateMinHashes, MCRITweb's job pages included
+        minhash_report = self.index.updateMinHashes(None, finish_samples=True, force_recalculation=True, username=get_username(req))
         resp.data = jsonify({"status": "successful", "data": minhash_report})
         db_log_msg(self.index, req, "StatusResource.on_get_complete_minhashes - success.")
         return
