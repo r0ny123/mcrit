@@ -9,7 +9,6 @@ import re
 import uuid
 from collections import defaultdict
 from copy import copy, deepcopy
-from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from packaging import version as packaging_version
@@ -221,7 +220,10 @@ class MemoryStorage(StorageInterface):
             del self._functions[function_id]
             # remove pichash entries
             if function_entry.pichash:
-                self._pichashes[function_entry.pichash].remove((function_entry.family_id, sample_id, function_id))
+                matches = self._pichashes[function_entry.pichash]
+                matches.remove((function_entry.family_id, sample_id, function_id))
+                if not matches:
+                    del self._pichashes[function_entry.pichash]
             # remove minhash entries, if necessary - one that cannot have been banded is not read at all
             if not self._hasBandableLength(function_entry.minhash):
                 continue
@@ -603,7 +605,11 @@ class MemoryStorage(StorageInterface):
         for function_id in self._sample_id_to_function_ids.pop(sample_id, []):
             function_entry = self._functions.pop(function_id, None)
             if function_entry is not None and function_entry.pichash:
-                self._pichashes.get(function_entry.pichash, set()).discard((function_entry.family_id, sample_id, function_id))
+                matches = self._pichashes.get(function_entry.pichash)
+                if matches is not None:
+                    matches.discard((function_entry.family_id, sample_id, function_id))
+                    if not matches:
+                        del self._pichashes[function_entry.pichash]
         del self._samples[sample_id]
         self._sample_by_sha256.pop(sample_entry.sha256, None)
         # the mirror of importSampleEntry's increment; the family stays, as in MongoDbStorage
@@ -1233,37 +1239,36 @@ class MemoryStorage(StorageInterface):
         }
 
     def rebuildMinhashBandIndex(self, progress_reporter=None):
-        # TODO while minhashes are considerably small, there is a still chance that the
-        # sum of all minhashes will eventually exceed available memory on a given system.
-        # in this case we can start doing batches in our database interation already
-        minhashes = []
-        # get all minhash objects from all functions - as in MongoDbStorage, leaving out any of another
-        # length than the configured signatures, which would fail the rebuild after the bands were reset
+        # Collect the entries first, for the progress total, without constructing MinHash objects; the
+        # bands are then fed from this snapshot, not from the dict a concurrent writer may change. As in
+        # MongoDbStorage, leave out any minhash of another length than the configured signature, which
+        # would fail the rebuild after the bands were reset. Not _hasBandableLength: that also admits a
+        # longer one.
         signature_bytes = self._minhash_config.MINHASH_SIGNATURE_LENGTH * (1 if self._minhash_config.MINHASH_SIGNATURE_BITS <= 8 else 4)
         num_skipped = 0
-        for function_id, function_entry in self._functions.items():
+        bandable_entries = []
+        for function_entry in list(self._functions.values()):
             if function_entry.minhash and len(function_entry.minhash) != signature_bytes:
                 num_skipped += 1
             elif function_entry.minhash:
-                minhash_obj = function_entry.getMinHash(self._minhash_config.MINHASH_SIGNATURE_BITS)
-                minhashes.append(minhash_obj)
+                bandable_entries.append(function_entry)
+        num_minhashes = len(bandable_entries)
         if num_skipped:
             LOGGER.warning("Left %d functions out of the band index, their minhashes are not %d bytes long; recalculating minhashes indexes them.", num_skipped, signature_bytes)
         # drop band collections
         # recreate indices for band collections
         for band_id in range(self._storage_config.STORAGE_NUM_BANDS):
             self._bands[band_id] = {}
-        # re-add minhashes in batches
-        batch_size = self._minhash_config.MINHASH_BAND_REBUILD_WORK_PACKAGE_SIZE
+        # re-add minhashes in batches, decoding one work package at a time
+        batch_size = max(1, self._minhash_config.MINHASH_BAND_REBUILD_WORK_PACKAGE_SIZE)
         if progress_reporter:
-            progress_reporter.set_total((len(minhashes) // batch_size) + 1)
-        for minhash_batch in zip_longest(*[iter(minhashes)] * batch_size):
-            minhash_batch = [mh for mh in minhash_batch if mh is not None]
-            for mh in minhash_batch:
+            progress_reporter.set_total((num_minhashes + batch_size - 1) // batch_size)
+        for offset in range(0, num_minhashes, batch_size):
+            for mh in [entry.getMinHash(self._minhash_config.MINHASH_SIGNATURE_BITS) for entry in bandable_entries[offset : offset + batch_size]]:
                 self._addMinHashToBands(mh)
             if progress_reporter:
                 progress_reporter.step()
-        return len(minhashes)
+        return num_minhashes
 
     ##### helpers for search ######
 

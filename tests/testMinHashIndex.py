@@ -331,6 +331,24 @@ class EscaperProvenanceTestSuite(unittest.TestCase):
         report = index.addImportData(self._minimalExport(index))
         self.assertFalse(report["escaper_mismatch"])
 
+    def testImportVersionIsComparedByPep440Ordering(self):
+        index = MinHashIndex(config)
+        # the floor is 0.0.0: a prerelease of it is older, and 0.0.10 is newer although "0.0.10" < "0.0.9" as strings
+        for version in ("0.0.0rc1", "0.0.0"):
+            self.assertIsNone(index.addImportData(self._minimalExport(index, version=version)))
+        for version in ("0.0.10", "0.0.9"):
+            self.assertIsNotNone(index.addImportData(self._minimalExport(index, version=version)))
+
+    def testImportWithoutParsableVersionIsRefused(self):
+        index = MinHashIndex(config)
+        for version in ("invalid", "", None, 1):
+            with self.assertRaises(ValueError):
+                index.addImportData(self._minimalExport(index, version=version))
+        export_data = self._minimalExport(index)
+        del export_data["config"]["version"]
+        with self.assertRaises(ValueError):
+            index.addImportData(export_data)
+
     def testImportOfDifferingEscaperIsFlaggedButAccepted(self):
         index = MinHashIndex(config)
         report = index.addImportData(self._minimalExport(index, escaper={"intel": "0000000000000000"}))

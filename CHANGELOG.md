@@ -15,6 +15,23 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Fixed
+
+- **`POST /import` answers 400 for an export whose version is missing or not a version.** A missing
+  or non-text version was a 500, and any text sorting above `"0.0.0"` was accepted, `latest` and
+  `0.0.0rc1` included, because versions were compared as strings. They are now compared by PEP 440
+  ordering, and an invalid one is answered with 400 ("Import rejected"). The oldest accepted version
+  is still above `0.0.0`, and the shingler and MinHash configuration hashes must still match.
+
+- **Memory storage: deleting a sample left its PicHashes behind.** `deleteSample` and
+  `discardImportedSample` emptied a PicHash's set of matches but kept the key, so `isPicHash` stayed
+  true and `num_pichashes` counted hashes no function carried. The key is now removed with its last
+  match. MongoDB storage is not affected.
+
+- **Memory storage: `/rebuild_index` held every MinHash of the corpus in one list.** The bands are
+  now rebuilt one work package at a time, with the same result, and the progress total is exactly
+  the number of work packages (it was one too many when the count divided evenly).
+
 ### Security
 
 - `POST /import` no longer attaches functions to a sample it did not create. An export entry whose

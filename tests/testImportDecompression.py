@@ -122,6 +122,18 @@ class ImportDecompressionTestSuite(unittest.TestCase):
         self.assertEqual(1, json.loads(response.data)["data"]["num_samples_imported"])
         self.assertEqual(export["content"]["num_functions"], len(index.getStorage().getFunctions(0, 0)))
 
+    def testExportWithoutValidVersionIsAnsweredAsBadInput(self):
+        for version in ("invalid", None):
+            export = self._export()
+            export["config"]["version"] = version
+            response = self._post_import(MinHashIndex(config), json.dumps(export))
+            self.assertEqual(falcon.HTTP_400, response.status)
+            self.assertIn("Import rejected", json.loads(response.data)["data"]["message"])
+        export = self._export()
+        del export["config"]["version"]
+        response = self._post_import(MinHashIndex(config), json.dumps(export))
+        self.assertEqual(falcon.HTTP_400, response.status)
+
     def testBombIsAnsweredAsBadInput(self):
         export = self._export()
         for sha256 in export["function_entries"]:
