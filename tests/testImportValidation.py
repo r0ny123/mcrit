@@ -49,8 +49,8 @@ class ImportValidationTestSuite(unittest.TestCase):
 
     def testFailingInsertIsNotAnsweredAsBadInput(self):
         # a ValueError of the storage is the server's failure, not the export's; the samples the import
-        # had added are removed again - and when removing one fails in turn, that must not hide the
-        # cause. The families it added may stay, as they did before
+        # had added are removed again, and the families it added once they hold none (#299) - and when
+        # removing one fails in turn, that must not hide the cause
         for discard_fails in (False, True):
             with self.subTest(discard_fails=discard_fails):
                 export = self._exportOfNewFamily()
@@ -63,6 +63,7 @@ class ImportValidationTestSuite(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "Database insert failed"):
                         self._post_import(index, json.dumps(export))
                 self.assertEqual(1 if discard_fails else 0, len(storage.getSampleIds()))
+                self.assertEqual(discard_fails, storage.getFamilyId("win.added") is not None)
 
     def testActorsThatCannotBeStoredDoNotFailTheImport(self):
         # they are merged once the import is complete: before its minhashes were added, a failure
