@@ -1,3 +1,4 @@
+import datetime
 import json
 import unittest
 import uuid
@@ -343,3 +344,50 @@ class JobCollectionSelectorsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeletingJobsByFilter(unittest.TestCase):
+    """DELETE /jobs narrows by every filter it is given, and refuses one it can't read."""
+
+    def setUp(self):
+        self.index = MinHashIndex(config)
+        app = falcon.App()
+        app.add_route("/jobs", JobResource(self.index), suffix="collection")
+        self.client = falcon.testing.TestClient(app)
+
+    def test_a_date_that_does_not_parse_is_a_400_and_deletes_nothing(self):
+        job_id = self.index.recomputeFamilyStats()
+        for name in ("created_before", "finished_before"):
+            for value in ("2026-13-45", "yesterday", "2026-01-01 00:00:00", ""):
+                with self.subTest(name=name, value=value):
+                    response = self.client.simulate_delete("/jobs", params={name: value}, params_csv=False)
+                    self.assertEqual(falcon.HTTP_400, response.status)
+                    self.assertIsNotNone(self.index.getJobData(job_id))
+
+    def test_a_repeated_date_is_a_400_too(self):
+        job_id = self.index.recomputeFamilyStats()
+        response = self.client.simulate_delete("/jobs", query_string="created_before=2000-01-01&created_before=2999-01-01")
+        self.assertEqual(falcon.HTTP_400, response.status)
+        self.assertIsNotNone(self.index.getJobData(job_id))
+
+    def test_both_date_forms_still_select(self):
+        job_id = self.index.recomputeFamilyStats()
+        for value in ("2000-01-01", "2000-01-01T00:00:00"):
+            response = self.client.simulate_delete("/jobs", params={"created_before": value})
+            self.assertEqual((falcon.HTTP_200, 0), (response.status, response.json["data"]["num_deleted"]))
+        response = self.client.simulate_delete("/jobs", params={"created_before": "2999-01-01", "method": "recomputeFamilyStats"})
+        self.assertEqual((falcon.HTTP_200, 1), (response.status, response.json["data"]["num_deleted"]))
+        self.assertIsNone(self.index.getJobData(job_id))
+
+    def test_the_memory_queue_applies_every_filter(self):
+        """LocalQueue.delete_jobs ignored created_before, failed without finished_before and deleted nothing without a method."""
+        queue = self.index.queue
+        family_job = self.index.recomputeFamilyStats()
+        failed_job = self.index.getMatchesForSample(12345)  # no such sample: fails, never finishes
+        self.assertEqual(0, queue.delete_jobs(method="noSuchMethod"))
+        self.assertEqual(0, queue.delete_jobs(created_before=datetime.datetime(2000, 1, 1)))
+        # the failed job has no finished_at, so only the finished one is old enough
+        self.assertEqual(1, queue.delete_jobs(finished_before=datetime.datetime(2999, 1, 1)))
+        self.assertIsNone(self.index.getJobData(family_job))
+        self.assertIsNotNone(self.index.getJobData(failed_job))
+        self.assertEqual(1, queue.delete_jobs(method="getMatchesForSample", created_before=datetime.datetime(2999, 1, 1)))
