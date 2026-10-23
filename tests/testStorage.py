@@ -371,7 +371,8 @@ class MemoryStorageTest(_MemoryStorageFixture, TestCase):
         self.assertIsNone(self.storage.getFamily(family_2))
         self.assertEqual({"num_samples": 1, "num_functions": 10, "num_library_samples": 0}, self._storedFamilyCounts(family_1))
         self.assertEqual(
-            {"num_families": 0, "num_families_corrected": 0, "num_families_created": 0, "corrections": {}} | {"num_families": len(self.storage.getFamilyIds())},
+            {"num_families": 0, "num_families_corrected": 0, "num_families_created": 0, "num_families_merged": 0, "corrections": {}}
+            | {"num_families": len(self.storage.getFamilyIds())},
             self.storage.recomputeFamilyStats(),
         )
 
@@ -460,9 +461,34 @@ class MemoryStorageTest(_MemoryStorageFixture, TestCase):
         self.assertEqual(10, stats["num_functions"])
 
     def _nameFamilyInStorage(self, family_id, family_name):
-        # bypasses modifyFamily, the way recomputeFamilyStats re-creates a missing family document
-        # under the name its samples carry, whatever other family has it
+        # bypasses modifyFamily: a name held by two families, as a MongoDB database from before family
+        # names were unique (#299) can hold one. recomputeFamilyStats no longer makes one, it files the
+        # samples of a missing family under the family of their name
         self.storage._families[family_id].family_name = family_name
+
+    def _removeFamilyEntry(self, family_id):
+        del self.storage._families[family_id]
+
+    def testRecomputeFilesTheSamplesOfAMissingFamilyUnderTheFamilyOfItsName(self):
+        # a name is one family (#299): the family's entry is gone, and its name another family's by now
+        self.storage.clearStorage()
+        report_a, _ = self._twoReports()
+        sample_a = self.storage.addSmdaReport(report_a)
+        assert sample_a is not None
+        missing_family_id = sample_a.family_id
+        self._removeFamilyEntry(missing_family_id)
+        family_id = self.storage.addFamily("family_1")
+        self.assertNotEqual(missing_family_id, family_id)
+        report = self.storage.recomputeFamilyStats()
+        self.assertEqual((0, 1), (report["num_families_created"], report["num_families_merged"]))
+        self.assertIsNone(self.storage.getFamily(missing_family_id))
+        self.assertEqual(family_id, self.storage.getSampleById(sample_a.sample_id).family_id)
+        function_entries = self.storage.getFunctionsBySampleId(sample_a.sample_id) or []
+        self.assertEqual({family_id}, {function_entry.family_id for function_entry in function_entries})
+        function_entry = function_entries[0]
+        self.assertIn((family_id, sample_a.sample_id, function_entry.function_id), self.storage.getMatchesForPicHash(function_entry.pichash))
+        self.assertEqual({"num_samples": 1, "num_functions": 10, "num_library_samples": 0}, self._storedFamilyCounts(family_id))
+        self.assertEqual(self._actualFamilyCounts(family_id), self._storedFamilyCounts(family_id))
 
     def _driftFamilyCounters(self, family_id, num_samples, num_functions):
         family = self.storage._families[family_id]
@@ -1366,7 +1392,15 @@ class MongoDbStorageTest(MemoryStorageTest):
         self.storage._getDb().families.update_one({"family_id": family_id}, {"$set": {"num_samples": num_samples, "num_functions": num_functions}})
 
     def _nameFamilyInStorage(self, family_id, family_name):
-        self.storage._getDb().families.update_one({"family_id": family_id}, {"$set": {"family_name": family_name}})
+        # a name held twice, as a database from before family names were unique (#299) can hold one:
+        # it cannot get the unique index
+        families = self.storage._getDb().families
+        families.drop_index("family_name_1")
+        families.create_index("family_name")
+        families.update_one({"family_id": family_id}, {"$set": {"family_name": family_name}})
+
+    def _removeFamilyEntry(self, family_id):
+        self.storage._getDb().families.delete_one({"family_id": family_id})
 
     def testRecomputeCreatesTheFamilyDocumentSamplesReferenceWithoutOne(self):
         # the family_id 1908 case of #151: samples carry an id that no family document describes
