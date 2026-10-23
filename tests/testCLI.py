@@ -10,13 +10,15 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import MagicMock, call, patch
 
-from mcrit.client.McritConsole import McritConsole, get_base_addr, get_primary_smda_meta_data, is_smda_report
+from mcrit.client.McritConsole import McritConsole, get_base_addr, get_primary_smda_meta_data, is_smda_report, submitViaSubprocess
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(message)s")
 logging.disable(logging.CRITICAL)
 
 SHA256 = "a" * 64
+REPORT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "example_report_meta.smda")
+REPORT_SHA256 = "ae38ff0778fb8dfa1deb17301a15165934312648d232d167cd0c0034c24689e1"
 
 
 class TestCLI(unittest.TestCase):
@@ -103,6 +105,12 @@ def sampleEntry(sample_id, content, family, version):
     return MagicMock(sample_id=sample_id, sha256=hashlib.sha256(content).hexdigest(), family=family, version=version, is_library=False)
 
 
+def unnamedReport():
+    # the example report with an empty family and version, as SMDA writes one it was given neither for
+    with open(REPORT_PATH, "rb") as fin:
+        return fin.read().replace(b'"example_family"', b'""').replace(b'"example_version"', b'""')
+
+
 class TestSubmitConsistency(unittest.TestCase):
     def testDirModeNamesTheSkippedFile(self):
         with tempfile.TemporaryDirectory() as root:
@@ -127,7 +135,7 @@ class TestSubmitConsistency(unittest.TestCase):
             # SMDA finds no functions in the one file and some in the other
             reports = {empty_path: MagicMock(xcfg={}), full_path: MagicMock(xcfg={0x401000: MagicMock()})}
             arguments = {
-                "file": argparse.Namespace(filepath=empty_path, force_update=False),
+                "file": argparse.Namespace(filepath=empty_path, smda=False, force_update=False),
                 "dir": argparse.Namespace(filepath=os.path.dirname(empty_path), worker=False, smda=False, force_update=False),
                 # the family folder, as the Malpedia root also holds malpedia.bib
                 "recursive": argparse.Namespace(filepath=os.path.join(malpedia_root, "win.family"), worker=False, force_update=False),
@@ -174,6 +182,128 @@ class TestSubmitConsistency(unittest.TestCase):
                     self.assertCountEqual(calls, console.client.modifySample.call_args_list)
                     if not force_update:
                         self.assertEqual(3, output.getvalue().count("- already in MCRIT."))
+
+    def testFileAndDirModeForceUpdateFromTheCommandLine(self):
+        # a file other than a report takes what --family, --version and --library give, and None keeps MCRIT's
+        with tempfile.TemporaryDirectory() as root:
+            filepath = os.path.join(root, "a.bin")
+            writeFile(filepath, b"a")
+            for mode, family, version, library, update in (
+                ("file", "win.new", "1.0", True, call(7, family_name="win.new", version="1.0", is_library=True)),
+                ("file", None, "1.0", False, call(7, family_name="win.old", version="1.0", is_library=False)),
+                ("dir", "win.new", "1.0", True, call(7, family_name="win.new", version="1.0", is_library=True)),
+                ("dir", None, "1.0", False, call(7, family_name="win.old", version="1.0", is_library=False)),
+            ):
+                console = consoleWithSamples(sampleEntry(7, b"a", "win.old", "0.9"))
+                args = argparse.Namespace(
+                    filepath=filepath if mode == "file" else root, mode=mode, worker=False, smda=False, force_update=True, family=family, version=version, library=library
+                )
+                with self.subTest(mode=mode, family=family, library=library), redirect_stdout(io.StringIO()):
+                    getattr(console, f"_handle_submit_{mode}")(args)
+                    console.client.addReport.assert_not_called()
+                    self.assertEqual([update], console.client.modifySample.call_args_list)
+
+    def testFileModeKnowsAReportByItsSample(self):
+        # with --smda it compared the report file's own sha256, so it never found the sample in MCRIT
+        known = MagicMock(sample_id=7, sha256=REPORT_SHA256, family="win.old", version="0.9", is_library=False)
+        with tempfile.TemporaryDirectory() as root:
+            unnamed_path = os.path.join(root, "unnamed.smda")
+            writeFile(unnamed_path, unnamedReport())
+            for report_path, force_update, family, version, library, update in (
+                (REPORT_PATH, False, None, None, False, None),
+                # a report updates its sample to what it would have been submitted as
+                (REPORT_PATH, True, None, None, False, call(7, family_name="example_family", version="example_version", is_library=False)),
+                (REPORT_PATH, True, "win.new", None, False, call(7, family_name="win.new", version="example_version", is_library=False)),
+                (REPORT_PATH, True, None, "2.0", True, call(7, family_name="example_family", version="2.0", is_library=True)),
+                # what neither the report nor the command line names, MCRIT keeps
+                (REPORT_PATH, True, None, "", False, call(7, family_name="example_family", version="0.9", is_library=False)),
+                (unnamed_path, True, None, None, False, None),
+                (unnamed_path, True, "win.new", None, False, call(7, family_name="win.new", version="0.9", is_library=False)),
+            ):
+                console = consoleWithSamples(known)
+                output = io.StringIO()
+                args = argparse.Namespace(filepath=report_path, mode="file", smda=True, force_update=force_update, family=family, version=version, library=library, output=None)
+                with (
+                    self.subTest(report=os.path.basename(report_path), force_update=force_update, family=family, version=version, library=library),
+                    redirect_stdout(output),
+                ):
+                    console._handle_submit_file(args)
+                    console.client.addReport.assert_not_called()
+                    self.assertEqual([update] if update else [], console.client.modifySample.call_args_list)
+                    if not force_update:
+                        self.assertIn(f"SKIPPING: {report_path} - already in MCRIT.", output.getvalue())
+        # a report of a sample MCRIT lacks is still added
+        console = consoleWithSamples()
+        args = argparse.Namespace(filepath=REPORT_PATH, mode="file", smda=True, force_update=False, family="win.new", version=None, library=False, output=None)
+        with redirect_stdout(io.StringIO()):
+            console._handle_submit_file(args)
+        console.client.addReport.assert_called_once()
+        report = console.client.addReport.call_args.args[0]
+        self.assertEqual((REPORT_SHA256, "win.new"), (report.sha256, report.family))
+
+    def testDirModeForceUpdatesFromAReport(self):
+        # it only skipped a known report's sample, warning when the report named another family or version
+        known = MagicMock(sample_id=7, sha256=REPORT_SHA256, family="win.old", version="0.9", is_library=False)
+        with tempfile.TemporaryDirectory() as root:
+            with open(REPORT_PATH, "rb") as fin:
+                writeFile(os.path.join(root, "named.smda"), fin.read())
+            writeFile(os.path.join(root, "unnamed", "unnamed.smda"), unnamedReport())
+            for folder, force_update, family, version, library, update in (
+                ("", False, None, None, False, None),
+                ("", True, None, None, False, call(7, family_name="example_family", version="example_version", is_library=False)),
+                ("", True, "win.new", None, False, call(7, family_name="win.new", version="example_version", is_library=False)),
+                ("", True, None, "2.0", True, call(7, family_name="example_family", version="2.0", is_library=True)),
+                # what neither the report nor the command line names, MCRIT keeps
+                ("", True, None, "", False, call(7, family_name="example_family", version="0.9", is_library=False)),
+                ("unnamed", True, None, None, False, None),
+                ("unnamed", True, "win.new", None, False, call(7, family_name="win.new", version="0.9", is_library=False)),
+            ):
+                console = consoleWithSamples(known)
+                output = io.StringIO()
+                args = argparse.Namespace(filepath=os.path.join(root, folder), worker=False, smda=True, force_update=force_update, family=family, version=version, library=library)
+                with self.subTest(folder=folder, force_update=force_update, family=family, version=version, library=library), redirect_stdout(output):
+                    console._handle_submit_dir(args)
+                    console.client.addReport.assert_not_called()
+                    self.assertEqual([update] if update else [], console.client.modifySample.call_args_list)
+                    if not force_update:
+                        self.assertIn("WARNING/SKIPPING", output.getvalue())
+
+    def testDirModeWorkerGetsForceUpdate(self):
+        # dir mode leaves a file already in MCRIT to its worker, which never got --force_update
+        process = MagicMock()
+        process.communicate.return_value = (b"", b"")
+
+        def workerCommand(**arguments):
+            args = dict(
+                mode="dir",
+                force_update=False,
+                server=None,
+                apitoken=None,
+                family=None,
+                version=None,
+                library=False,
+                executables_only=False,
+                output=None,
+                smda=False,
+                worker_timeout=1,
+            )
+            args.update(arguments)
+            with patch("mcrit.client.McritConsole.subprocess.Popen", return_value=process) as popen:
+                submitViaSubprocess(argparse.Namespace(**args), "sample.bin")
+            command = popen.call_args.args[0]
+            self.assertEqual("sample.bin", command[-1])
+            return command
+
+        for mode, force_update, passed in (("dir", True, True), ("dir", False, False), ("recursive", True, False), ("malpedia", True, False)):
+            with self.subTest(mode=mode, force_update=force_update):
+                command = workerCommand(mode=mode, force_update=force_update)
+                self.assertEqual(passed, "--force_update" in command)
+                self.assertNotIn("--family", command)
+                self.assertNotIn("--version", command)
+        # an empty --family or --version was dropped, where dir mode without a worker applies it
+        command = workerCommand(force_update=True, family="", version="")
+        self.assertEqual(["--family", ""], command[command.index("--family") :][:2])
+        self.assertEqual(["--version", ""], command[command.index("--version") :][:2])
 
 
 if __name__ == "__main__":

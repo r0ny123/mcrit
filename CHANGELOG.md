@@ -36,6 +36,21 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   updated to the family and version its folders name, as dir mode updates it to `--family` and
   `--version`. What no folder names, MCRIT keeps: the version of a file directly in a family folder,
   and both for a file directly in the given folder.
+- **`client submit --smda` in file mode never found a report's sample in MCRIT.** It looked up the
+  sha256 of the `.smda` file instead of the one the report names, so a report of a known sample was
+  uploaded again and `--force_update` changed nothing. It now reads the report's sha256, as dir mode
+  does; dir mode with `--worker` runs each file in file mode and gets the same. Such a report is no
+  longer uploaded, so the function names in it are no longer added as labels to the known sample,
+  which dir mode without `--worker` never did either.
+- **`client submit --mode dir --smda` ignored `--force_update`.** It skipped a known report's
+  sample, with a warning when the report named another family or version. Dir and file mode now
+  update the sample to what the report would have been submitted as: the report's family and
+  version, unless `--family` or `--version` is given. What is empty there, MCRIT keeps.
+- **`client submit --mode dir --worker` ignored `--force_update`.** Dir mode hands every file to a
+  worker, also one already in MCRIT, and the worker's `client submit <file>` lacked the flag.
+  Recursive mode updates such a file before reaching its worker, and malpedia mode takes no
+  `--force_update`, so only dir mode passes it on. An empty `--family` or `--version`, which was
+  dropped before, now reaches the worker too.
 - **`client submit --mode dir` named the folder, not the file, when skipping a file already in
   MCRIT.**
 
