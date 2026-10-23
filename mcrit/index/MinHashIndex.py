@@ -687,7 +687,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         # are those that would take a family past MAX_TAGS_PER_ENTITY: the first that fit are added
         try:
             family_tags = export_data.get("family_tags") or {}
-            for exported_family_id, tags in (family_tags.items() if isinstance(family_tags, dict) else []):
+            for exported_family_id, tags in family_tags.items() if isinstance(family_tags, dict) else []:
                 remapped_family_id = family_id_remapping.get(int(exported_family_id))
                 local_family = storage.getFamily(remapped_family_id) if remapped_family_id is not None else None
                 tags = normalizeTags(tags, drop_invalid=True)
@@ -697,7 +697,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                 new_tags = [tag for tag in tags if tag not in known_tags]
                 fitting_tags = new_tags[: max(0, MAX_TAGS_PER_ENTITY - len(local_family.tags))]
                 if len(fitting_tags) < len(new_tags):
-                    LOGGER.warning("Family %d would carry more than %d tags, dropping %d imported tags.", remapped_family_id, MAX_TAGS_PER_ENTITY, len(new_tags) - len(fitting_tags))
+                    LOGGER.warning(
+                        "Family %d would carry more than %d tags, dropping %d imported tags.", remapped_family_id, MAX_TAGS_PER_ENTITY, len(new_tags) - len(fitting_tags)
+                    )
                 if fitting_tags:
                     try:
                         storage.addTags("family", remapped_family_id, fitting_tags)

@@ -1306,7 +1306,7 @@ class McritClient:
         gentle_length_score: Optional[bool] = None,
         max_blocks_per_function: Optional[int] = None,
         demote_generic_blocks: Optional[bool] = None,
-        exclude_picblockhashes: Optional[Iterable[Any]] = None,
+        exclude_picblockhashes: Any = None,
     ) -> Optional[str]:
         """GET (or, with ``exclude_picblockhashes``, POST) /uniqueblocks/samples/{sample_ids}: schedule the search for basic blocks unique to these samples; see Worker.getUniqueBlocks for the options. Answers the job id.
 
@@ -1332,7 +1332,7 @@ class McritClient:
         gentle_length_score: Optional[bool] = None,
         max_blocks_per_function: Optional[int] = None,
         demote_generic_blocks: Optional[bool] = None,
-        exclude_picblockhashes: Optional[Iterable[Any]] = None,
+        exclude_picblockhashes: Any = None,
     ) -> Optional[str]:
         """GET (or, with ``exclude_picblockhashes``, POST) /uniqueblocks/family/{family_id}: schedule the search for basic blocks unique to the family's samples; parameters as for requestUniqueBlocksForSamples. Answers the job id.
 
