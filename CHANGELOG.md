@@ -15,6 +15,83 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
 
 ## [Unreleased]
 
+### Security
+
+- `POST /import` no longer attaches functions to a sample it did not create. An export entry whose
+  own `sha256` differed from its key, or named a sample already present (including one added by a
+  second import running at the same time), was reported as imported and its functions were stored
+  under the sample id of the exporting instance, on whatever local sample held that id or on none.
+  `importSampleEntry` now returns None for a known sha256, as its interface documents, and the
+  import skips such a sample together with its functions and counts it as skipped. Functions
+  attached by earlier imports are not detached; a sample whose `statistics.num_functions` is lower
+  than its number of functions is worth checking.
+
+- `POST /import` drops imported minhashes whose length is not the configured signature length. Such
+  a minhash used to be stored and banded next to the code it was copied from, and every matching job
+  that drew it as a candidate then failed. The function is still imported, without a minhash, and a
+  minhash repair computes it again. Minhashes of a wrong length stored by earlier imports keep
+  failing matching jobs until `/repair_minhashes` rehashes their sample, if it has disassembly.
+
+- The band projection for the `random` band strategy is derived from the configured signature length
+  instead of from the first minhash a process happens to band. An imported minhash of another length
+  could previously change the band hashes of everything that process wrote afterwards, or make every
+  later banding fail. For correctly configured instances the projection is unchanged.
+
+- A single imported function that cannot be rebuilt from its stored disassembly (for example an
+  `xcfg` holding only an offset) no longer fails `/complete_minhashes`, `/repair_minhashes`,
+  `/recalculate_minhashes` and `/recalculate_pichashes` on every run. Such a function is skipped
+  with a warning naming it, like one without disassembly. `/recalculate_pichashes` does not stamp
+  its sample as rehashed. `/repair_minhashes` leaves a sample with such a function alone, keeping
+  its minhashes and its stale mark, and counts it as skipped. `/recalculate_minhashes` does not
+  record such a sample as current, so a later repair tries it again.
+
+- Deleting a sample or family, and `/repair_minhashes`, no longer fail on a stored minhash shorter
+  than the configured signature (or not a whole number of entries), as an earlier import could have
+  stored. It never had band entries and is skipped with a warning; before, the sample could not be
+  deleted through the API and every repair run stopped at it.
+
+- `/rebuild_index` no longer stops half way after having emptied the band collections when it meets
+  a function without a minhash field or with a minhash of the wrong length. Those functions are left
+  out with a warning and the rest is indexed.
+
+- `POST /import` limits what it decompresses. Compressed sample content is accepted only as deflate
+  (or stored) data and only up to 20 times its encoded size, or 8 MiB if that is more; anything
+  else is answered with 400 instead of growing the server by gigabytes. Exports of the live corpus
+  inflate to 4 times their encoded size at the median and 11.6 at most. A body that is not JSON is
+  now answered with 400 instead of 500. An export that compresses better than that has to be
+  imported uncompressed. The whole export is read before any sample is stored, so a refused import
+  leaves no sample or function behind.
+
+- A family is attributed to at most 64 actors. `PUT /families/{id}` answers 400 for a longer list,
+  and an import or a family rename that merges into another family adds the first actors that fit
+  and logs a warning for the rest. Deduplication of actor names now takes linear time instead of
+  quadratic. Families already holding more actors keep them.
+
+## [1.16.0] - 2026-10-16
+
+**Minor release: bounded search and listing, the SMDA report rebuilt from storage, and correct
+bookkeeping when samples are deleted, imported or retried.** Nothing changes matching results at
+default configuration. There are no repair jobs, but the API now caps what one request can ask for.
+
+- **Behaviour changes for API callers (#271):**
+  - `GET /functions` and `GET /search/{families,samples,functions}` answer at most 1,000 entries per
+    request. Page with `start` or the `cursor`.
+  - `POST /functions` takes at most 10,000 ids. `McritClient.getFunctionsByIds` splits larger
+    requests itself; a client from an earlier release gets `{}` back for more than that.
+  - A search query longer than 16,384 characters is refused with 400.
+  - Search cursors name the sort they belong to, and one replayed under another sort is a 400.
+    Cursors from an older server are still accepted.
+- **New setting:** `STORAGE_MONGODB_SEARCH_MAX_TIME_MS` (30 s, 0 = no limit) bounds the MongoDB scans of
+  a search. A deployment that ships its own config modules needs it added; without it the default
+  applies.
+- **New route:** `GET /samples/{id}/smda` rebuilds a sample's SMDA report. Its extras live in two new
+  collections, `smda_extras` and `query_smda_extras`, filled for samples submitted from now on.
+- **First start** creates the indexes of those two collections, and the `pichash_counts` and
+  `function_ranges` indexes where no rebuild had created them yet (#262).
+- **After upgrading:** a corpus that deleted samples before this release still carries surplus pichash
+  counts, which only matter with `MINHASH_PICHASH_MAX_MATCHES` set. `rebuildPicHashCountIndex()`
+  clears them, and is also owed after any `recalculatePicHashes` that changes a pichash (#262).
+
 ### Added
 
 - **`GET /samples/{id}/smda` and `McritClient.getSmdaReportForSample` rebuild a sample's SMDA
@@ -242,56 +319,6 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   (with `raw_responses` it still sends one request, and the server's answer is returned as it is).
   Behaviour change: a caller that relied on either listing to return every entry receives the
   first 1,000, and one that posts ids to `/functions` itself can send at most 10,000 per request; a `McritClient` from an earlier release sends all ids in one request and gets `{}` back for more than that.
-
-- `POST /import` no longer attaches functions to a sample it did not create. An export entry whose
-  own `sha256` differed from its key, or named a sample already present (including one added by a
-  second import running at the same time), was reported as imported and its functions were stored
-  under the sample id of the exporting instance, on whatever local sample held that id or on none.
-  `importSampleEntry` now returns None for a known sha256, as its interface documents, and the
-  import skips such a sample together with its functions and counts it as skipped. Functions
-  attached by earlier imports are not detached; a sample whose `statistics.num_functions` is lower
-  than its number of functions is worth checking.
-
-- `POST /import` drops imported minhashes whose length is not the configured signature length. Such
-  a minhash used to be stored and banded next to the code it was copied from, and every matching job
-  that drew it as a candidate then failed. The function is still imported, without a minhash, and a
-  minhash repair computes it again. Minhashes of a wrong length stored by earlier imports keep
-  failing matching jobs until `/repair_minhashes` rehashes their sample, if it has disassembly.
-
-- The band projection for the `random` band strategy is derived from the configured signature length
-  instead of from the first minhash a process happens to band. An imported minhash of another length
-  could previously change the band hashes of everything that process wrote afterwards, or make every
-  later banding fail. For correctly configured instances the projection is unchanged.
-
-- A single imported function that cannot be rebuilt from its stored disassembly (for example an
-  `xcfg` holding only an offset) no longer fails `/complete_minhashes`, `/repair_minhashes`,
-  `/recalculate_minhashes` and `/recalculate_pichashes` on every run. Such a function is skipped
-  with a warning naming it, like one without disassembly. `/recalculate_pichashes` does not stamp
-  its sample as rehashed. `/repair_minhashes` leaves a sample with such a function alone, keeping
-  its minhashes and its stale mark, and counts it as skipped. `/recalculate_minhashes` does not
-  record such a sample as current, so a later repair tries it again.
-
-- Deleting a sample or family, and `/repair_minhashes`, no longer fail on a stored minhash shorter
-  than the configured signature (or not a whole number of entries), as an earlier import could have
-  stored. It never had band entries and is skipped with a warning; before, the sample could not be
-  deleted through the API and every repair run stopped at it.
-
-- `/rebuild_index` no longer stops half way after having emptied the band collections when it meets
-  a function without a minhash field or with a minhash of the wrong length. Those functions are left
-  out with a warning and the rest is indexed.
-
-- `POST /import` limits what it decompresses. Compressed sample content is accepted only as deflate
-  (or stored) data and only up to 20 times its encoded size, or 8 MiB if that is more; anything
-  else is answered with 400 instead of growing the server by gigabytes. Exports of the live corpus
-  inflate to 4 times their encoded size at the median and 11.6 at most. A body that is not JSON is
-  now answered with 400 instead of 500. An export that compresses better than that has to be
-  imported uncompressed. The whole export is read before any sample is stored, so a refused import
-  leaves no sample or function behind.
-
-- A family is attributed to at most 64 actors. `PUT /families/{id}` answers 400 for a longer list,
-  and an import or a family rename that merges into another family adds the first actors that fit
-  and logs a warning for the rest. Deduplication of actor names now takes linear time instead of
-  quadratic. Families already holding more actors keep them.
 
 ## [1.15.0] - 2026-10-12
 
