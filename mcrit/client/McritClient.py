@@ -3,7 +3,7 @@ import functools
 import logging
 import time
 import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import requests
 from smda.common.SmdaReport import SmdaReport
@@ -1192,6 +1192,11 @@ class McritClient:
             params["demote_generic_blocks"] = "true"
         return params
 
+    @staticmethod
+    def _passthrough(response: requests.Response) -> Any:
+        # raw_responses mode: the Response itself, whatever the method's annotation says
+        return response
+
     def _requestUniqueBlocks(self, url, params, exclude_picblockhashes):
         # a negative set goes in a POST body: thousands of hashes do not fit a URL. Checked as the
         # server checks them, so a bad hash fails here rather than as a 400
@@ -1202,7 +1207,7 @@ class McritClient:
             response = self._session.post(url, headers=self.headers, params=params, json={"exclude_picblockhashes": excluded}, timeout=self.timeout)
         else:
             response = self._session.get(url, headers=self.headers, params=params, timeout=self.timeout)
-        return self._handle(response)
+        return self._passthrough(response) if self.raw else self._handle(response)
 
     def requestUniqueBlocksForSamples(
         self,
@@ -1213,7 +1218,7 @@ class McritClient:
         max_blocks_per_function=None,
         demote_generic_blocks=None,
         exclude_picblockhashes=None,
-    ) -> Dict:
+    ) -> Optional[str]:
         """Schedule a unique-blocks job for <sample_ids>; see Worker.getUniqueBlocks for the options.
 
         <exclude_picblockhashes> is a negative set, e.g. mcrit.storage.UniqueBlocksResult.picBlockHashesOfReport
@@ -1236,7 +1241,7 @@ class McritClient:
         max_blocks_per_function=None,
         demote_generic_blocks=None,
         exclude_picblockhashes=None,
-    ) -> Dict:
+    ) -> Optional[str]:
         """Schedule a unique-blocks job for the samples of <family_id>, as requestUniqueBlocksForSamples."""
         if isinstance(family_id, int):
             params = self._getUniqueBlocksParams(covers_required, min_instructions, gentle_length_score, max_blocks_per_function, demote_generic_blocks)

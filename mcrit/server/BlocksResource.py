@@ -45,11 +45,13 @@ class BlocksResource:
 
     @timing
     def on_get_unique_blocks_for_family(self, req, resp, family_id: int):
+        """Schedule a unique-block cover for a family's samples. Cover and block-selection options are query parameters; the response contains the job id."""
         db_log_msg(self.index, req, "BlocksResource.on_get_unique_blocks_for_family")
         self._uniqueBlocksForFamily(req, resp, family_id, getUniqueBlocksParams(req.params))
 
     @timing
     def on_get_unique_blocks_for_samples(self, req, resp, comma_separated_sample_ids=None):
+        """Schedule a unique-block cover for comma-separated sample ids, with the same selection options as the family route."""
         db_log_msg(self.index, req, "BlocksResource.on_get_unique_blocks")
         self._uniqueBlocksForSamples(req, resp, comma_separated_sample_ids, getUniqueBlocksParams(req.params))
 
@@ -57,6 +59,7 @@ class BlocksResource:
 
     @timing
     def on_post_unique_blocks_for_family(self, req, resp, family_id: int):
+        """Schedule a family's unique-block cover, subtracting the exclude_picblockhashes array supplied in the JSON body."""
         db_log_msg(self.index, req, "BlocksResource.on_post_unique_blocks_for_family")
         parameters = self._postParams(req, resp, "on_post_unique_blocks_for_family")
         if parameters is not None:
@@ -64,6 +67,7 @@ class BlocksResource:
 
     @timing
     def on_post_unique_blocks_for_samples(self, req, resp, comma_separated_sample_ids=None):
+        """Schedule a sample selection's unique-block cover, subtracting the exclude_picblockhashes array in the JSON body."""
         db_log_msg(self.index, req, "BlocksResource.on_post_unique_blocks")
         parameters = self._postParams(req, resp, "on_post_unique_blocks")
         if parameters is not None:
