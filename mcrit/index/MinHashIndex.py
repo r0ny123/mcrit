@@ -5,6 +5,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional
 
+from packaging.version import InvalidVersion, Version
 from smda.common.SmdaReport import SmdaReport
 from smda.SmdaConfig import SmdaConfig
 
@@ -36,6 +37,9 @@ LOGGER = logging.getLogger(__name__)
 # the smda that this process will escape with; recorded alongside the escaper fingerprint so an
 # export or a status response says which smda produced the minhashes it describes
 SMDA_VERSION = SmdaConfig().VERSION
+# Exports newer than this floor (PEP 440 ordering) are eligible when their shingler and MinHash
+# configuration hashes match. Raise it only with a change that makes older objects incompatible.
+MINIMUM_IMPORT_VERSION = Version("0.0.0")
 
 
 #### Helper methods for nested sort_by in search
@@ -234,9 +238,11 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             "num_families_skipped": 0,
             "escaper_mismatch": False,
         }
-        # TODO adjust minimum required MCRIT version if we ever extend in a way that objects become incompatible
-        # TODO do not compare version as string
-        if export_data["config"]["version"] <= "0.0.0":
+        try:
+            export_version = Version(export_data["config"]["version"])
+        except (InvalidVersion, TypeError, KeyError) as error:
+            raise ValueError("export has no valid version") from error
+        if export_version <= MINIMUM_IMPORT_VERSION:
             LOGGER.error("Cannot import data, version of export is incompatible / too old.")
             return
         if export_data["config"]["shingler"] != self._shingler_config.getConfigHash():
