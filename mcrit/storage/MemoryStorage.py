@@ -633,6 +633,8 @@ class MemoryStorage(StorageInterface):
         if function_entry.function_name and len(function_entry.function_labels) == 0:
             new_function_entry_label = FunctionLabelEntry(function_entry.function_name, "mcrit-import")
             function_entry.function_labels.append(new_function_entry_label)
+        # counted before it is stored, as in importFunctionEntries
+        self._updateFamilyStats(function_entry.family_id, 0, 1, 0)
         # add function to regular storage
         self._functions[function_entry.function_id] = function_entry
         if function_entry.sample_id not in self._sample_id_to_function_ids:
@@ -642,7 +644,6 @@ class MemoryStorage(StorageInterface):
             if function_entry.pichash not in self._pichashes:
                 self._pichashes[function_entry.pichash] = set()
             self._pichashes[function_entry.pichash].add((function_entry.family_id, function_entry.sample_id, function_entry.function_id))
-        self._updateFamilyStats(function_entry.family_id, 0, 1, 0)
         return function_entry
 
     def importFunctionEntries(self, function_entries: List["FunctionEntry"]) -> Optional[List["FunctionEntry"]]:
@@ -651,6 +652,9 @@ class MemoryStorage(StorageInterface):
             if function_entry.function_name and len(function_entry.function_labels) == 0:
                 new_function_entry_label = FunctionLabelEntry(function_entry.function_name, "mcrit-import")
                 function_entry.function_labels.append(new_function_entry_label)
+            # counted before it is stored, so that discardImportedSample, which takes off the functions
+            # it finds stored, never takes off one its family did not count
+            self._updateFamilyStats(function_entry.family_id, 0, 1, 0)
             # add function to regular storage
             self._functions[function_entry.function_id] = function_entry
             if function_entry.sample_id not in self._sample_id_to_function_ids:
@@ -660,7 +664,6 @@ class MemoryStorage(StorageInterface):
                 if function_entry.pichash not in self._pichashes:
                     self._pichashes[function_entry.pichash] = set()
                 self._pichashes[function_entry.pichash].add((function_entry.family_id, function_entry.sample_id, function_entry.function_id))
-            self._updateFamilyStats(function_entry.family_id, 0, 1, 0)
         return function_entries
 
     # TODO return type?

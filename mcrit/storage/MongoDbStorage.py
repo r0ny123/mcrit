@@ -14,7 +14,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from itertools import zip_longest
 from operator import itemgetter
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
 import gridfs
 import numpy as np
@@ -1706,16 +1706,8 @@ class MongoDbStorage(StorageInterface):
         # add function to regular storage
         function_dict = function_entry.toDict()
         self._encodeFunction(function_dict)
-        try:
-            self._insertXcfgDocuments([function_dict])
-            self._dbInsert("functions", function_dict)
-        except Exception:
-            self._discardFunctions([function_entry.function_id])
-            raise
-        # counted once stored, so that discardImportedSample takes off what it finds stored
-        self._updateFamilyStats(function_entry.family_id, 0, 1, 0)
+        self._insertAndCountFunctions([function_dict], lambda: self._dbInsert("functions", function_dict))
         self._addToPicBlockHashIndex([function_dict])
-        self._addToPicHashCounts([function_dict])
         self._recordFunctionRange(function_entry.sample_id, [function_entry.function_id])
         self._updateDbState()
         return function_entry
@@ -1732,18 +1724,8 @@ class MongoDbStorage(StorageInterface):
             function_dict = function_entry.toDict()
             self._encodeFunction(function_dict)
             functions_as_dicts.append(function_dict)
-        try:
-            self._insertXcfgDocuments(functions_as_dicts)
-            self._dbInsertMany("functions", functions_as_dicts)
-        except Exception:
-            # none of them, rather than the ones before the document that failed
-            self._discardFunctions(function_ids)
-            raise
-        # counted once stored, so that discardImportedSample takes off what it finds stored
-        for family_id, num_functions in Counter(function_dict["family_id"] for function_dict in functions_as_dicts).items():
-            self._updateFamilyStats(family_id, 0, num_functions, 0)
+        self._insertAndCountFunctions(functions_as_dicts, lambda: self._dbInsertMany("functions", functions_as_dicts))
         self._addToPicBlockHashIndex(functions_as_dicts)
-        self._addToPicHashCounts(functions_as_dicts)
         # as addSmdaReport does: without a range, a shortlisted match never attributes these
         # functions to their sample, and their minhash matches are dropped
         function_ids_by_sample: Dict[int, List[int]] = {}
@@ -1754,6 +1736,67 @@ class MongoDbStorage(StorageInterface):
         # the range lookup is cached per db state: one built while these were being written must not outlive them
         self._updateDbState()
         return function_entries
+
+    def _insertAndCountFunctions(self, function_dicts: List[Dict], insert_functions: Callable[[], Any]) -> None:
+        """Store imported functions with insert_functions, then count them: their pichashes, and their
+        families' function counters.
+
+        discardImportedSample takes both counts of the functions it finds stored out again, so every
+        function it can find has to be counted in both by then. An insert that fails removes what it
+        wrote; should that fail as well, or the pichash counting itself, functions may be stored
+        without their pichashes being counted, and the count index is marked incomplete instead: the
+        discard then leaves the counts alone, and rebuildPicHashCountIndex counts what is stored. A
+        family counter that fails - one that would overflow, say - takes back the functions with their
+        pichash counts, so that the discard finds none of them, and once they are gone the families
+        counted before it. Should removing the functions fail, those families stay raised for the
+        discard to take off what it finds, and the count index is marked incomplete.
+        """
+        function_ids = [function_dict["function_id"] for function_dict in function_dicts]
+        may_be_uncounted = True
+        try:
+            try:
+                self._insertXcfgDocuments(function_dicts)
+                insert_functions()
+            except Exception:
+                # none of them, rather than the ones before the document that failed
+                self._discardFunctions(function_ids)
+                may_be_uncounted = False
+                raise
+            self._addToPicHashCounts(function_dicts)
+            may_be_uncounted = False
+        except Exception:
+            if may_be_uncounted:
+                self._markPicHashCountsUntrusted()
+            raise
+        counted_families = []
+        try:
+            for family_id, num_functions in Counter(function_dict["family_id"] for function_dict in function_dicts).items():
+                self._updateFamilyStats(family_id, 0, num_functions, 0)
+                counted_families.append((family_id, num_functions))
+        except Exception:
+            # the functions go first: only once none of them is left for the discard to find may the
+            # families counted so far be taken back, or the discard would take them off a second time
+            try:
+                self._subtractPicHashCounts(function_dicts)
+                self._discardFunctions(function_ids)
+            except Exception:
+                # stored, or counted, without the other: only a rebuild can tell. The families counted
+                # so far stay raised, for the discard to take off what it finds of theirs
+                LOGGER.exception("Could not remove the functions of a failed import, their pichash counts are left to a rebuild.")
+                self._markPicHashCountsUntrusted()
+            else:
+                for family_id, num_functions in counted_families:
+                    try:
+                        self._updateFamilyStats(family_id, 0, -num_functions, 0)
+                    except Exception:
+                        LOGGER.exception("Could not take the functions of a failed import off family %d.", family_id)
+            raise
+
+    def _markPicHashCountsUntrusted(self) -> None:
+        try:
+            self._setPicHashCountIndexComplete(False)
+        except Exception:
+            LOGGER.exception("Could not mark the pichash counts incomplete, the imported functions may be stored uncounted.")
 
     def _discardFunctions(self, function_ids: Iterable[int]) -> None:
         """Remove what a failed insert of these functions may have written before it failed."""
@@ -1768,8 +1811,19 @@ class MongoDbStorage(StorageInterface):
         # carries the id it had elsewhere, which here may well be another sample's
         if self._getDb().samples.find_one({"sample_id": sample_id, "sha256": sample_entry.sha256}, {"_id": 1}) is None:
             return
-        # the picblockhash index is read from the functions, so before they go, as in deleteSample
+        # the indexes are read from the functions, so before they go, as in deleteSample: the
+        # picblockhash index, and the pichash counts, taken out at most once. The import counts its
+        # functions right after the insert, and marks the count index incomplete where they may not
+        # be (_insertAndCountFunctions), so every function found here was counted or is not taken out
         self._removeSampleFromPicBlockHashIndex(sample_id)
+        claim = self._getDb().samples.update_one(
+            {"sample_id": sample_id, "sha256": sample_entry.sha256, "pichash_counts_removed": {"$ne": True}}, {"$set": {"pichash_counts_removed": True}}
+        )
+        if claim.modified_count:
+            self._removeSampleFromPicHashCounts(sample_id)
+        # and its function ranges: left behind, they would attribute the function ids to a sample
+        # that is gone
+        self._getDb()[self._FUNCTION_RANGE_COLLECTION].delete_many({"sample_id": sample_id})
         function_ids = [document["function_id"] for document in self._getDb().functions.find({"sample_id": sample_id}, {"function_id": 1, "_id": 0})]
         self._discardFunctions(function_ids)
         num_samples_deleted = self._getDb().samples.delete_one({"sample_id": sample_id, "sha256": sample_entry.sha256}).deleted_count
@@ -2741,12 +2795,22 @@ class MongoDbStorage(StorageInterface):
         delete matches `df <= 0` per document, so a count raised again by a concurrent insert in
         between is left alone.
         """
+
+        def function_documents():
+            # a generator, so that nothing is read while the index is incomplete
+            yield from self._getDb().functions.find({"sample_id": sample_id, "_pichash": {"$ne": None}}, {"_pichash": 1, "_id": 0})
+
+        self._subtractPicHashCounts(function_documents())
+
+    def _subtractPicHashCounts(self, function_documents: Iterable[Dict]) -> None:
+        """Take these functions out of the pichash counts, the mirror of _addToPicHashCounts."""
         if not self.isPicHashCountIndexComplete():
             return
         decrements: Dict[Any, int] = {}
-        for function_document in self._getDb().functions.find({"sample_id": sample_id, "_pichash": {"$ne": None}}, {"_pichash": 1, "_id": 0}):
-            encoded_pichash = function_document["_pichash"]
-            decrements[encoded_pichash] = decrements.get(encoded_pichash, 0) + 1
+        for function_document in function_documents:
+            encoded_pichash = function_document.get("_pichash")
+            if encoded_pichash is not None:
+                decrements[encoded_pichash] = decrements.get(encoded_pichash, 0) + 1
         if not decrements:
             return
         collection = self._getDb()[self._PICHASH_COUNT_COLLECTION]

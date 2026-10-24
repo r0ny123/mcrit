@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+from copy import deepcopy
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -122,6 +123,72 @@ class MemoryStorageTest(_MemoryStorageFixture, TestCase):
         self.assertEqual(10, self.storage.getStats()["num_pichashes"])
         self.storage.discardImportedSample(sample_b)
         self.assertEqual(0, self.storage.getStats()["num_pichashes"])
+
+    def _storeASampleAndAnotherFamily(self):
+        report_a, _ = self._twoReports()
+        source = self.storage.addSmdaReport(report_a)
+        assert source is not None
+        return source, self.storage.addFamily("family_2")
+
+    def _importTwoSampleEntries(self, source, other_family_id):
+        """The stored sample imported twice under new sha256s, once in its own family and once in the
+        other, with its functions ready for importFunctionEntries - as addImportData has them at that
+        point. Returns the imported entries and the function entries."""
+        imported, function_entries = [], []
+        for sha256, family_id in (("c" * 64, source.family_id), ("d" * 64, other_family_id)):
+            sample_entry = deepcopy(self.storage.getSampleById(source.sample_id))
+            sample_entry.sha256, sample_entry.family_id = sha256, family_id
+            imported_entry = self.storage.importSampleEntry(sample_entry)
+            assert imported_entry is not None
+            imported.append(imported_entry)
+            for function_entry in deepcopy(self.storage.getFunctionsBySampleId(source.sample_id)):
+                function_entry.sample_id, function_entry.family_id = imported_entry.sample_id, family_id
+                function_entries.append(function_entry)
+        return imported, function_entries
+
+    def _failingForFamily(self, failing_family_id):
+        update_family_stats = self.storage._updateFamilyStats
+
+        def updateFamilyStats(family_id, num_samples_inc, num_functions_inc, num_library_samples_inc):
+            if family_id == failing_family_id and num_functions_inc > 0:
+                raise RuntimeError("connection lost")
+            update_family_stats(family_id, num_samples_inc, num_functions_inc, num_library_samples_inc)
+
+        return patch.object(self.storage, "_updateFamilyStats", side_effect=updateFamilyStats)
+
+    def _familyCounters(self):
+        counters = {}
+        for family_id in self.storage.getFamilyIds():
+            family_entry = self.storage.getFamily(family_id)
+            counters[family_id] = (family_entry.num_samples, family_entry.num_functions, family_entry.num_library_samples)
+        return counters
+
+    def _picHashCountDocuments(self):
+        # only MongoDB storage keeps a pichash count index
+        if not isinstance(self.storage, MongoDbStorage):
+            return None
+        collection = self.storage._getDb()[self.storage._PICHASH_COUNT_COLLECTION]
+        return sorted((document["_pichash"], document["df"]) for document in collection.find({}, {"_id": 0}))
+
+    def testAFailedFamilyCountLeavesEveryFamilyAsItWasAfterTheDiscard(self):
+        # an import of two samples in two families, whose second family's function counter fails
+        # after the first one's was raised: the import is rolled back sample by sample, and each
+        # discard takes off the functions it finds stored, so those must be exactly the ones counted
+        self.storage.clearStorage()
+        source, other_family_id = self._storeASampleAndAnotherFamily()
+        families_before, counts_before, stats_before = self._familyCounters(), self._picHashCountDocuments(), self.storage.getStats()
+        imported, function_entries = self._importTwoSampleEntries(source, other_family_id)
+
+        with self._failingForFamily(other_family_id):
+            with self.assertRaises(RuntimeError):
+                self.storage.importFunctionEntries(function_entries)
+        for imported_entry in imported:
+            self.storage.discardImportedSample(imported_entry)
+
+        self.assertEqual(families_before, self._familyCounters())
+        self.assertEqual(counts_before, self._picHashCountDocuments())
+        stats_after = self.storage.getStats()
+        self.assertEqual((stats_before["num_samples"], stats_before["num_functions"]), (stats_after["num_samples"], stats_after["num_functions"]))
 
     def testModifyFunction(self):
         # fkie-cad/mcritweb#72: a function's name can be set; the name is recorded as a label
@@ -1164,6 +1231,29 @@ class MongoDbStorageTest(MemoryStorageTest):
         THIS_FILE_PATH = str(os.path.abspath(__file__))
         PROJECT_ROOT = str(os.path.abspath(os.sep.join([THIS_FILE_PATH, "..", ".."])))
         self.example_file_path = os.sep.join([PROJECT_ROOT, "tests", "example_report.smda"])
+
+    def testAFailedFamilyCountWhoseFunctionsCannotBeRemovedKeepsTheCountedFamiliesRaised(self):
+        # the second family's counter fails, and so does removing the functions: they stay stored, so
+        # the first family stays raised for the discard to take its functions off once - taken back
+        # here as well, the discard took them off a second time. The second family never counted
+        # its functions, which the discard cannot tell, so only the first is checked. The pichash
+        # counts were taken back from functions that stay stored, which only a rebuild sets right
+        self.storage.clearStorage()
+        source, other_family_id = self._storeASampleAndAnotherFamily()
+        family_before = self._familyCounters()[source.family_id]
+        imported, function_entries = self._importTwoSampleEntries(source, other_family_id)
+
+        with self._failingForFamily(other_family_id), patch.object(self.storage, "_discardFunctions", side_effect=RuntimeError("connection lost")):
+            with self.assertRaisesRegex(RuntimeError, "connection lost"):
+                self.storage.importFunctionEntries(function_entries)
+        self.assertFalse(self.storage.isPicHashCountIndexComplete())
+        for imported_entry in imported:
+            self.storage.discardImportedSample(imported_entry)
+
+        self.assertEqual(family_before, self._familyCounters()[source.family_id])
+        self.assertEqual([source.sample_id], self.storage.getSampleIds())
+        self.storage.rebuildPicHashCountIndex()
+        self.assertEqual(10, len(self._picHashCountDocuments()))
 
     def testAStrayExtrasChunkDoesNotBlockStoringTheExtras(self):
         # a chunk an interrupted store left behind under the same id must not cause a duplicate key

@@ -235,7 +235,7 @@ class StorageInterface:
         raise NotImplementedError
 
     def discardImportedSample(self, sample_entry: "SampleEntry") -> None:
-        """Undo importSampleEntry for an import that failed: the sample, the functions it got, and its family counters.
+        """Undo importSampleEntry for an import that failed: the sample, the functions it got, the indexes they were added to, and its family counters.
 
         Args:
             sample_entry: the entry importSampleEntry returned
