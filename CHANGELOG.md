@@ -243,6 +243,21 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   non-ASCII included, are stored as given, as before. A client that sent such a value and got a
   sample anyway now has to correct it.
 
+### Fixed
+
+- **The unique-blocks cover broke score ties by dict order** ([#283]). A block's score is 80% the
+  samples it covers and 20% its length, and with one input sample every unique block of 7 to 11
+  instructions scores exactly 100.0. Among those the cover took whichever the storage happened to
+  return last. Ties are now broken by how many hex digits of the block's YARA string are fixed,
+  wildcards not counted, and then by the lowest picblockhash, in both `Worker.getUniqueBlocks` and
+  `UniqueBlocksResult.generateBlockCover`. The same input now always gives the same cover. Scores,
+  the length scoring and every default are unchanged. This prefers longer fixed patterns, not
+  necessarily more distinctive ones: whether it makes rules better, and the issue's other
+  directions (reshaping the length score, one block per function, down-weighting epilogues, a
+  negative sample set), still need the evaluation the issue proposes. `RESULTS_VERSION` is now 3,
+  and since every report job is keyed on it, cached match and unique-blocks reports alike are
+  recomputed once on their next request.
+
 ## [1.16.0] - 2026-10-16
 
 **Minor release: bounded search and listing, the SMDA report rebuilt from storage, and correct
@@ -1759,3 +1774,4 @@ date, the version, and what changed.
 [#57]: https://github.com/danielplohmann/mcrit/issues/57
 [#68]: https://github.com/danielplohmann/mcrit/issues/68
 [#95]: https://github.com/danielplohmann/mcrit/issues/95
+[#283]: https://github.com/danielplohmann/mcrit/issues/283

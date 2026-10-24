@@ -37,6 +37,7 @@ from mcrit.queue.QueueRemoteCalls import NoProgressReporter, QueueRemoteCallee, 
 from mcrit.storage.FunctionEntry import smdaFunctionFromXcfg
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
+from mcrit.storage.UniqueBlocksResult import coverPreference
 
 if TYPE_CHECKING:
     from mcrit.storage.StorageInterface import StorageInterface
@@ -515,7 +516,10 @@ class Worker(QueueRemoteCallee):
         blocks every sample must be reached by. Lower values yield a smaller rule on weaker
         evidence. <min_instructions> drops shorter blocks before the selection runs, so the cover is
         chosen from blocks a caller would keep rather than from ones it discards afterwards - a
-        two-instruction block is not worth a YARA string. Both are clamped to sane values.
+        two-instruction block is not worth a YARA string. Both are clamped to sane values. Among
+        blocks that cover as many samples with the same score, the cover takes the one whose YARA
+        string has the most fixed hex digits, then the lowest picblockhash (coverPreference, #283),
+        so the same input always gives the same rule.
 
         NOTE: result["yara_rule"] is the cover's selection as a list of picblockhash strings, not
         YARA source - the byte patterns live per block in unique_blocks[hash]["escaped_sequence"].
@@ -549,51 +553,7 @@ class Worker(QueueRemoteCallee):
         blocks_result_dict["statistics"]["covers_required"] = covers_required
         blocks_result_dict["statistics"]["min_instructions"] = min_instructions
         blocks_result_dict["statistics"]["blocks_considered"] = len(unique_blocks)
-        # greedily produce a multi set cover of picblockhashes for sample_ids, i.e. a YARA rule :)
-        # Every round selects the block that reaches the most samples not covered yet, then the one with
-        # the higher score, then the later one. A block's reach only shrinks as samples become covered, so
-        # the blocks wait in a heap keyed on the reach they had when last looked at, and the top one is
-        # selected once its reach is confirmed. Rescanning and resorting every block in every round instead
-        # took cubic time in the number of blocks whenever covers_required was more than they could reach.
-        yara_rule = []
-        sample_coverage = {sample_id: 0 for sample_id in sample_ids}
-        samples_covered = set()
-        block_candidates = [(-len(set(entry["samples"])), -entry["score"], -position, block_hash) for position, (block_hash, entry) in enumerate(unique_blocks.items())]
-        heapq.heapify(block_candidates)
-        while True:
-            # check if we are done yet, successful or not
-            if len(samples_covered) == len(sample_ids):
-                # an empty request covers its zero samples vacuously - do not report a rule for it
-                blocks_result_dict["statistics"]["has_yara_rule"] = bool(yara_rule)
-                blocks_result_dict["statistics"]["has_complete_yara_rule"] = bool(yara_rule)
-                break
-            # if not, choose the best block among those still reaching an uncovered sample
-            selected_block = None
-            sample_ids_coverable = set()
-            while block_candidates:
-                negative_value, negative_score, negative_position, block_hash = heapq.heappop(block_candidates)
-                sample_ids_coverable = set(unique_blocks[block_hash]["samples"]).difference(samples_covered)
-                if not sample_ids_coverable:
-                    continue
-                if len(sample_ids_coverable) == -negative_value:
-                    selected_block = block_hash
-                    break
-                heapq.heappush(block_candidates, (-len(sample_ids_coverable), negative_score, negative_position, block_hash))
-            if selected_block is None:
-                if len(yara_rule) > 0:
-                    blocks_result_dict["statistics"]["has_yara_rule"] = True
-                break
-            yara_rule.append(selected_block)
-            # and update counters
-            for sample_id in sample_ids_coverable:
-                sample_coverage[sample_id] += 1
-                if sample_coverage[sample_id] >= covers_required:
-                    samples_covered.add(sample_id)
-        blocks_result_dict["statistics"]["num_samples_covered"] = len(samples_covered)
-        # how many selected blocks reach the least covered sample - reported as 0 before (#144)
-        blocks_result_dict["statistics"]["yara_covers"] = min(sample_coverage.values()) if sample_coverage else 0
-        blocks_result_dict["yara_rule"] = yara_rule
-        # enrich with escaped sequences
+        # enrich with escaped sequences, before the cover: it breaks score ties by their fixed hex digits (#283)
         sample_addr_borders = {}
         sample_escaper = {}
         for sample_id in sample_ids:
@@ -615,6 +575,55 @@ class Worker(QueueRemoteCallee):
                     )
                 )
             unique_blocks[block_hash]["escaped_sequence"] = " ".join(escaped_sequences)
+        # greedily produce a multi set cover of picblockhashes for sample_ids, i.e. a YARA rule :)
+        # Every round selects the block that reaches the most samples not covered yet, then the one with
+        # the higher score, then the one coverPreference ranks first (#283). A block's reach only shrinks
+        # as samples become covered, so the blocks wait in a heap keyed on the reach they had when last
+        # looked at, and the top one is selected once its reach is confirmed. Rescanning and resorting
+        # every block in every round instead took cubic time in the number of blocks whenever
+        # covers_required was more than they could reach.
+        yara_rule = []
+        sample_coverage = {sample_id: 0 for sample_id in sample_ids}
+        samples_covered = set()
+        block_candidates = []
+        for block_hash, entry in unique_blocks.items():
+            # the heap pops the smallest key first, so coverPreference's order is negated
+            preference_key = tuple(-value for value in coverPreference(block_hash, entry))
+            block_candidates.append((-len(set(entry["samples"])), -entry["score"], preference_key, block_hash))
+        heapq.heapify(block_candidates)
+        while True:
+            # check if we are done yet, successful or not
+            if len(samples_covered) == len(sample_ids):
+                # an empty request covers its zero samples vacuously - do not report a rule for it
+                blocks_result_dict["statistics"]["has_yara_rule"] = bool(yara_rule)
+                blocks_result_dict["statistics"]["has_complete_yara_rule"] = bool(yara_rule)
+                break
+            # if not, choose the best block among those still reaching an uncovered sample
+            selected_block = None
+            sample_ids_coverable = set()
+            while block_candidates:
+                negative_value, negative_score, preference_key, block_hash = heapq.heappop(block_candidates)
+                sample_ids_coverable = set(unique_blocks[block_hash]["samples"]).difference(samples_covered)
+                if not sample_ids_coverable:
+                    continue
+                if len(sample_ids_coverable) == -negative_value:
+                    selected_block = block_hash
+                    break
+                heapq.heappush(block_candidates, (-len(sample_ids_coverable), negative_score, preference_key, block_hash))
+            if selected_block is None:
+                if len(yara_rule) > 0:
+                    blocks_result_dict["statistics"]["has_yara_rule"] = True
+                break
+            yara_rule.append(selected_block)
+            # and update counters
+            for sample_id in sample_ids_coverable:
+                sample_coverage[sample_id] += 1
+                if sample_coverage[sample_id] >= covers_required:
+                    samples_covered.add(sample_id)
+        blocks_result_dict["statistics"]["num_samples_covered"] = len(samples_covered)
+        # how many selected blocks reach the least covered sample - reported as 0 before (#144)
+        blocks_result_dict["statistics"]["yara_covers"] = min(sample_coverage.values()) if sample_coverage else 0
+        blocks_result_dict["yara_rule"] = yara_rule
         blocks_result_dict["unique_blocks"] = unique_blocks
         progress_reporter.step()
         return blocks_result_dict
