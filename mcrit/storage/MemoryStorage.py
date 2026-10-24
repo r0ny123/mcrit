@@ -23,7 +23,7 @@ from mcrit.libs.tags import MAX_TAGS_PER_ENTITY, TagLimitError, checkTagEntity, 
 from mcrit.minhash.MinHash import MinHash
 from mcrit.minhash.MinHasher import MINHASH_SHINGLER_REVISION
 from mcrit.storage.FamilyEntry import FamilyEntry
-from mcrit.storage.FunctionEntry import FunctionEntry, picBlockHashEntries
+from mcrit.storage.FunctionEntry import OTHER_LABELS_FIELD, FunctionEntry, picBlockHashEntries
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache, StorageBackedMatchingCache
 from mcrit.storage.SampleEntry import TIMESTAMP_FORMAT, SampleEntry
@@ -41,6 +41,9 @@ LOGGER = logging.getLogger(__name__)
 
 # Helper Methods for search
 def _get_field_once(object, field):
+    if field == OTHER_LABELS_FIELD and isinstance(object, FunctionEntry):
+        # derived on the fly here, where MongoDB stores it: the labels that differ from the name
+        return object.getOtherLabels()
     try:
         return getattr(object, field)
     except Exception:
@@ -1672,9 +1675,9 @@ class MemoryStorage(StorageInterface):
 
     def findFunctionByString(self, search_tree: NodeType, cursor: Optional[FullSearchCursor] = None, max_num_results: int = 100) -> Dict[int, "FunctionEntry"]:
         result_dict = {}
-        # a plain term matches the name only; the labels are searched with the qualified field
-        # "function_labels.function_label", which resolves to the list of label strings
-        search_fields = ["function_name"]
+        # a plain term matches the name and the labels that differ from it (#301), as on MongoDB;
+        # "function_labels.function_label" searches every label, resolved to the list of label strings
+        search_fields = ["function_name", OTHER_LABELS_FIELD]
         filter = self._get_search_filter(search_fields, search_tree, cursor)
         sort_key = self._get_sort_key_from_cursor(cursor)
         # filtered before sorted: one pass over the functions per page (the cursor is part of the
