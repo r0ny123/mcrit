@@ -17,6 +17,8 @@ from mcrit.config.MinHashConfig import MinHashConfig
 from mcrit.config.QueueConfig import QueueConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
+from mcrit.index.SearchCursor import FullSearchCursor
+from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.storage.SampleEntry import SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
 from mcrit.Worker import Worker
@@ -288,6 +290,22 @@ class SampleVerificationTest(TestCase):
         labels = {(label.username, label.function_label) for label in self._functions(sample_id)[1004].function_labels}
         self.assertIn(("second_analyst", "added_meanwhile"), labels)
         self.assertEqual(11, result["verification"]["labels_carried"])
+        self._assertConsistent()
+
+    def testAPlainTermFindsTheNewFunctionByItsCarriedLabel(self):
+        # a label other than the name, carried to the new function, is searched as one (#301)
+        sample_entry = self._addReported()
+        sample_id = sample_entry.sample_id
+        renamed = self._functions(sample_id)[1004]
+        self.storage.modifyFunction(renamed.function_id, {"function_name": "qz_carried_label"}, username="second_analyst")
+        cursor = FullSearchCursor(None, [("function_id", True)])
+        self.assertEqual([renamed.function_id], list(self.storage.findFunctionByString(SearchQueryParser().parse("qz_carried"), cursor=cursor)))
+        result = self._upload(self._report(changed=CHANGED_OFFSETS[:2]))
+        self.assertEqual("replaced", result["verification"]["status"])
+        carried = self._functions(sample_id)[1004]
+        self.assertNotEqual("qz_carried_label", carried.function_name)
+        self.assertNotEqual(renamed.function_id, carried.function_id)
+        self.assertEqual([carried.function_id], list(self.storage.findFunctionByString(SearchQueryParser().parse("qz_carried"), cursor=cursor)))
         self._assertConsistent()
 
     def testASampleDeletedWhileItsBinaryIsDisassembledStaysDeleted(self):

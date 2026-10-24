@@ -1296,6 +1296,19 @@ class MongoDbStorage(StorageInterface):
         appended = {"$concatArrays": [{"$ifNull": ["$function_labels", []]}, [{"$literal": label.toDict()}]]}
         return [{"$set": {"function_labels": appended}}, cls._OTHER_LABELS_STAGE]
 
+    @classmethod
+    def _addLabelsUpdate(cls, labels: List[Dict]) -> List[Dict]:
+        """An update adding the labels not there yet, as $addToSet with $each does, and deriving
+        OTHER_LABELS_FIELD anew."""
+        added = {
+            "$reduce": {
+                "input": {"$literal": labels},
+                "initialValue": {"$ifNull": ["$function_labels", []]},
+                "in": {"$cond": [{"$in": ["$$this", "$$value"]}, "$$value", {"$concatArrays": ["$$value", ["$$this"]]}]},
+            }
+        }
+        return [{"$set": {"function_labels": added}}, cls._OTHER_LABELS_STAGE]
+
     ###############################################################################
     # Interface
     ###############################################################################
@@ -1613,6 +1626,7 @@ class MongoDbStorage(StorageInterface):
             # the staged disassembly merged in, whether or not its function document was
             db.xcfg.delete_many({"_id": {"$gte": function_id_range[0], "$lte": function_id_range[1]}})
         db.functions.delete_many({"sample_id": sample_id})
+        self._bumpOtherLabelsVersion()
         db[self._FUNCTION_RANGE_COLLECTION].delete_many({"sample_id": sample_id})
         self._deleteSmdaExtras(sample_id)
 
@@ -1687,6 +1701,8 @@ class MongoDbStorage(StorageInterface):
                 {"$merge": {"into": "functions", "on": "_id", "whenMatched": "keepExisting", "whenNotMatched": "insert"}},
             ]
         )
+        # staged as addSmdaReport writes functions, OTHER_LABELS_FIELD and all (#301)
+        self._bumpOtherLabelsVersion()
         db[self._STAGING_XCFG].aggregate(
             [{"$match": {"staging_id": staging_id}}, {"$unset": "staging_id"}, {"$merge": {"into": "xcfg", "on": "_id", "whenMatched": "keepExisting", "whenNotMatched": "insert"}}]
         )
@@ -1749,11 +1765,12 @@ class MongoDbStorage(StorageInterface):
             if not self._holdsClaim(sample_id, token):
                 return lost()
             if carried:
-                # added to, not set: a label put on a new function meanwhile stays
+                # added to, not set: a label put on a new function meanwhile stays. The labels
+                # other than the name follow in the same update (#301)
                 db.functions.bulk_write(
-                    [UpdateOne({"function_id": function_id}, {"$addToSet": {"function_labels": {"$each": function_labels}}}) for function_id, function_labels in carried],
-                    ordered=False,
+                    [UpdateOne({"function_id": function_id}, self._addLabelsUpdate(function_labels)) for function_id, function_labels in carried], ordered=False
                 )
+                self._bumpOtherLabelsVersion()
             self._markSwapStep(sample_id, token, "labels", labels)
             swap["labels"] = labels
         # 4. the old functions, with what is derived from them; read before their pichash counts
@@ -1774,6 +1791,7 @@ class MongoDbStorage(StorageInterface):
             db[self._FUNCTION_RANGE_COLLECTION].delete_many({"sample_id": sample_id})
         self._deleteXcfgForFunctionIds([old_document["function_id"] for old_document in old_documents])
         self._deleteFunctionsCounted(old_functions)
+        self._bumpOtherLabelsVersion()
         # 5. the sample takes the new analysis, and is verified
         sample_update = {**staged_analysis, "sha256_verified": True, "pichash_smda_version": SmdaConfig().VERSION, "picblockhash_version": PICBLOCKS_VERSION}
         if filename is not None:
