@@ -191,6 +191,10 @@ class MongoSearchTranspiler(BaseVisitor):
                 # a substring search is a regex, which cannot be hex-encoded - it is matched against
                 # the stored representation instead, so only the field has to be renamed
                 condition = {"_pichash": condition.pop("pichash")}
+            elif value is None:
+                # a search cursor pages past functions without a pichash with "= None", which matches
+                # a missing field in any encoding, so it is renamed only
+                condition = {"_pichash": condition.pop("pichash")}
             elif self.pichash_padded or not isinstance(value, int):
                 MongoDbStorage._encodePichash(condition, padded=self.pichash_padded)
             elif mongo_operator is None:

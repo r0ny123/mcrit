@@ -21,6 +21,12 @@ class TestMongoSearchTranspiler(unittest.TestCase):
         self.assertEqual(self._visit("pichash", "!=", "0x1234"), {"_pichash": {"$nin": ["0x0000000000001234", "0x1234"]}})
         self.assertEqual(self._visit("pichash", "=", "4660"), {"_pichash": {"$in": ["0x0000000000001234", "0x1234"]}})
 
+    def test_a_missing_pichash_in_a_cursor_condition_is_renamed_only(self):
+        # a search cursor pages past functions without a pichash with "= None" and "!= None"
+        for padded in (False, True):
+            self.assertEqual(self._visit("pichash", "=", None, padded=padded), {"_pichash": None})
+            self.assertEqual(self._visit("pichash", "!=", None, padded=padded), {"_pichash": {"$ne": None}})
+
     def test_pichash_range_operators_need_a_padded_instance(self):
         for operator in ("<", "<=", ">", ">="):
             with self.assertRaises(ValueError):
