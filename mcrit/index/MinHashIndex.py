@@ -2,7 +2,7 @@
 import json
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional
 
 from smda.common.SmdaReport import SmdaReport
@@ -14,7 +14,7 @@ from mcrit.config.MinHashConfig import MinHashConfig
 from mcrit.config.ShinglerConfig import ShinglerConfig
 from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MatchingParameters import applyMatchingPreset, resolveMatchingParams
-from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor
+from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor, sortSpec
 from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.libs.utility import compress_encode, decompress_decode
 from mcrit.matchers.MatcherQueryFunction import MatcherQueryFunction
@@ -26,7 +26,7 @@ from mcrit.queue.QueueRemoteCalls import QueueRemoteCaller
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
 from mcrit.storage.MatchedFunctionEntry import MatchedFunctionEntry
-from mcrit.storage.SampleEntry import SampleEntry
+from mcrit.storage.SampleEntry import TIMESTAMP_FORMAT, SampleEntry
 from mcrit.storage.StorageFactory import StorageFactory
 from mcrit.Worker import Worker
 
@@ -52,6 +52,15 @@ def _get_field_once(object, field):
         pass
 
 
+def _get_cursor_value(object, field):
+    """A sort field's value as a cursor carries it: JSON, and comparable to the stored value. A
+    sample's timestamp is a datetime on the entry but stored as text, so the cursor holds the text."""
+    value = _get_field(object, field)
+    if isinstance(value, datetime):
+        return value.strftime(TIMESTAMP_FORMAT)
+    return value
+
+
 def _get_field(object, field):
     dot_index = field.find(".")
     if dot_index >= 0:
@@ -63,6 +72,10 @@ def _get_field(object, field):
 
 
 class MinHashIndex(QueueRemoteCaller(Worker)):
+    # a search answers at most this many results per page; limit=-1 asked the storage for limit + 1 = 0
+    # results, which MongoDB's find() reads as no limit, so one search could load every function
+    MAX_SEARCH_RESULTS = 1000
+
     def __init__(self, config=None, base_url=None):
         if config is None:
             config = McritConfig()
@@ -93,7 +106,8 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             return
         last_timestamp = self._getLastCleanup()
         if last_timestamp:
-            now = datetime.now()
+            # the storage stamps the last cleanup in UTC
+            now = datetime.now(UTC).replace(tzinfo=None)
             if last_timestamp + self._cleanup_delta < now:
                 LOGGER.info("Scheduling a cleanup for query samples.")
                 self.doDbCleanup(force_recalculation=True)
@@ -319,43 +333,60 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         # iterate samples
         index = 0
         function_entries_to_import = []
-        for sample_sha256, sample_entry_dict in export_data["sample_entries"].items():
-            index += 1
-            # check if sample is already present, and skip if yes
-            if storage.getSampleBySha256(sample_sha256):
-                LOGGER.info(f"Sample with SHA256 {sample_sha256} already present in database, skipping...")
-                import_report["num_samples_skipped"] += 1
-                import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
-                continue
-            function_entries = []
-            if sample_sha256 in export_data["function_entries"]:
-                function_entry_dicts = export_data["function_entries"][sample_sha256]
-                # decompress function_entries if necessary
-                if is_compressed:
-                    function_entry_dicts = json.loads(decompress_decode(function_entry_dicts))
-                function_entries = [FunctionEntry.fromDict(function_entry_dict) for function_entry_dict in function_entry_dicts.values()]
-            # checked before the sample is added: a pichash that cannot be stored would be written in
-            # a form no reader decodes, failing every read, search page and export that meets it
-            if not all(function_entry.hasValidPicHashes() for function_entry in function_entries):
-                LOGGER.warning("Sample with SHA256 %s carries a pichash or picblockhash that is not an integer of 0..2**64-1, skipping...", sample_sha256)
-                import_report["num_samples_skipped"] += 1
-                import_report["num_functions_skipped"] += len(function_entries)
-                continue
-            import_report["num_samples_imported"] += 1
-            sample_entry = SampleEntry.fromDict(sample_entry_dict)
-            # adjust family_id in sample_entry using our remapping
-            sample_entry.family_id = family_id_remapping[sample_entry.family_id]
-            # add sample_entry to storage and receive new sample_id
-            remapped_sample_entry = storage.importSampleEntry(sample_entry)
-            # iterate functions and add them, adjusting family_id and sample_id
-            for function_entry in function_entries:
-                function_entry.sample_id = remapped_sample_entry.sample_id
-                function_entry.family_id = remapped_sample_entry.family_id
-                function_entries_to_import.append(function_entry)
-                import_report["num_functions_imported"] += 1
-            LOGGER.info("Sample %d with SHA256 %s added...", index, sample_sha256)
+        imported_sample_entries = []
+        # every sample is written before any function, so one that fails - a later entry that does not
+        # read, a function insert MongoDB refuses - would leave the samples before it without functions,
+        # and a corrected import would skip them as present already: they are removed again instead
+        try:
+            for sample_sha256, sample_entry_dict in export_data["sample_entries"].items():
+                index += 1
+                # check if sample is already present, and skip if yes
+                if storage.getSampleBySha256(sample_sha256):
+                    LOGGER.info(f"Sample with SHA256 {sample_sha256} already present in database, skipping...")
+                    import_report["num_samples_skipped"] += 1
+                    import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
+                    continue
+                function_entries = []
+                if sample_sha256 in export_data["function_entries"]:
+                    function_entry_dicts = export_data["function_entries"][sample_sha256]
+                    # decompress function_entries if necessary
+                    if is_compressed:
+                        function_entry_dicts = json.loads(decompress_decode(function_entry_dicts))
+                    function_entries = [FunctionEntry.fromDict(function_entry_dict) for function_entry_dict in function_entry_dicts.values()]
+                # checked before the sample is added: a pichash that cannot be stored would be written in
+                # a form no reader decodes, failing every read, search page and export that meets it
+                if not all(function_entry.hasValidPicHashes() for function_entry in function_entries):
+                    LOGGER.warning("Sample with SHA256 %s carries a pichash or picblockhash that is not an integer of 0..2**64-1, skipping...", sample_sha256)
+                    import_report["num_samples_skipped"] += 1
+                    import_report["num_functions_skipped"] += len(function_entries)
+                    continue
+                sample_entry = SampleEntry.fromDict(sample_entry_dict)
+                # adjust family_id in sample_entry using our remapping
+                sample_entry.family_id = family_id_remapping[sample_entry.family_id]
+                # add sample_entry to storage and receive new sample_id
+                remapped_sample_entry = storage.importSampleEntry(sample_entry)
+                if remapped_sample_entry is None:
+                    # another writer stored the same sample since the check above: it is theirs, so this
+                    # import neither attaches functions to it nor removes it should it fail later
+                    import_report["num_samples_skipped"] += 1
+                    import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
+                    continue
+                import_report["num_samples_imported"] += 1
+                imported_sample_entries.append(remapped_sample_entry)
+                # iterate functions and add them, adjusting family_id and sample_id
+                for function_entry in function_entries:
+                    function_entry.sample_id = remapped_sample_entry.sample_id
+                    function_entry.family_id = remapped_sample_entry.family_id
+                    function_entries_to_import.append(function_entry)
+                    import_report["num_functions_imported"] += 1
+                LOGGER.info("Sample %d with SHA256 %s added...", index, sample_sha256)
 
-        adjusted_function_entries = storage.importFunctionEntries(function_entries_to_import)
+            adjusted_function_entries = storage.importFunctionEntries(function_entries_to_import)
+        except Exception:
+            LOGGER.error("Import failed, removing the %d samples it had added.", len(imported_sample_entries))
+            for imported_sample_entry in imported_sample_entries:
+                storage.discardImportedSample(imported_sample_entry)
+            raise
         LOGGER.info(f"{len(adjusted_function_entries)} functions added")
         # we can only start indexing once our imported function_entries had their function_id adjusted to our DB
         minhashes_to_import = []
@@ -406,7 +437,8 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         storage = self.getStorage()
         sample_entry = storage.getSampleBySha256(smda_report.sha256)
         if sample_entry:
-            self._storage.updateFunctionLabels(smda_report, username)
+            # the sample may well be someone else's: its labels are held to what a rename could set
+            self._storage.updateFunctionLabels(smda_report, username, checked=True)
             return {"existed": True, "sample_info": sample_entry.toDict()}
         sample_entry = storage.addSmdaReport(smda_report)
         if not sample_entry:
@@ -636,6 +668,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
     def getFunctionsBySampleId(self, sample_id):
         return self.getStorage().getFunctionsBySampleId(sample_id)
 
+    def getSmdaReportForSample(self, sample_id):
+        return self.getStorage().getSmdaReportForSample(sample_id)
+
     def getSampleBinary(self, sample_id):
         return self.getStorage().getSampleBinary(sample_id)
 
@@ -654,6 +689,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
 
     def getFunctionById(self, function_id, with_xcfg=False):
         return self.getStorage().getFunctionById(function_id, with_xcfg=with_xcfg)
+
+    def getFunctionsByIds(self, function_ids):
+        return self.getStorage().getFunctionsByIds(function_ids)
 
     def getFunctions(self, start_index, limit):
         return self.getStorage().getFunctions(start_index, limit)
@@ -776,6 +814,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
 
     def _getSearchResultTemplate(self, search_function, search_term, sort_by_list, cursor_str, limit):
         assert isinstance(search_term, str)
+        # a page at a time: no positive limit, or one beyond the page size, answers a full page
+        if not 0 < limit <= self.MAX_SEARCH_RESULTS:
+            limit = self.MAX_SEARCH_RESULTS
 
         sort_fields = [sort_info[0] for sort_info in sort_by_list]
 
@@ -786,7 +827,14 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         is_backward_search = not full_cursor.is_forward_search
 
         parsed_search = self.search_query_parser.parse(search_term)
-        search_results_objects = search_function(parsed_search, cursor=full_cursor, max_num_results=limit + 1)
+        try:
+            search_results_objects = search_function(parsed_search, cursor=full_cursor, max_num_results=limit + 1)
+        except TypeError as mismatched_cursor:
+            # the in-memory search compares the cursor's values with the entries' and fails on a cursor
+            # that was issued for another sort field; MongoDB answers such a cursor with an arbitrary page
+            if cursor is None:
+                raise
+            raise ValueError("The search cursor does not match the requested sort order.") from mismatched_cursor
 
         # Find last last_element_key, which is used for the forward cursor
         search_results_keys = list(search_results_objects.keys())
@@ -804,7 +852,8 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             last_result = search_results_objects[last_element_key]
             forward_cursor = MinimalSearchCursor()
             forward_cursor.is_forward_search = True ^ is_backward_search  # switch for backward search, because of swap
-            forward_cursor.record_values = [_get_field(last_result, field) for field in sort_fields]
+            forward_cursor.record_values = [_get_cursor_value(last_result, field) for field in sort_fields]
+            forward_cursor.sort_spec = sortSpec(sort_by_list)
             forward_cursor_str = forward_cursor.toStr()
 
         backward_cursor_str = None
@@ -812,7 +861,8 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             first_result = search_results_objects[search_results_keys[0]]
             backward_cursor = MinimalSearchCursor()
             backward_cursor.is_forward_search = False ^ is_backward_search  # switch for backward search, because of swap
-            backward_cursor.record_values = [_get_field(first_result, field) for field in sort_fields]
+            backward_cursor.record_values = [_get_cursor_value(first_result, field) for field in sort_fields]
+            backward_cursor.sort_spec = sortSpec(sort_by_list)
             backward_cursor_str = backward_cursor.toStr()
 
         if is_backward_search:
@@ -951,7 +1001,6 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         if sort_by not in (
             None,
             "filename",
-            "function_id",
             "sample_id",
             "family_id",
             "family",
