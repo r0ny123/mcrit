@@ -801,11 +801,13 @@ class StorageInterface:
         """
         raise NotImplementedError
 
-    def addMinHash(self, minhash: "MinHash") -> bool:
+    def addMinHash(self, minhash: "MinHash", keep_composition: bool = False) -> bool:
         """Add a MinHash object to the respective functions in storage.
 
         Args:
             minhash: the minhash to add
+            keep_composition: leave the shingle composition stored with the function as it is,
+                instead of writing the one the MinHash carries
 
         Returns:
             True if the the respective function exists, and the MinHash could be added,
@@ -813,12 +815,15 @@ class StorageInterface:
         """
         raise NotImplementedError
 
-    def addMinHashes(self, minhashes: List["MinHash"]) -> None:
+    def addMinHashes(self, minhashes: List["MinHash"], keep_composition: bool = False) -> None:
         """Add multiple MinHash objects at once. MinHashes, that cannot be added
         (e.g. because of missing function ids) will be ignored.
 
         Args:
             minhashes: the list of MinHash objects to add
+            keep_composition: leave the shingle compositions stored with the functions as they are,
+                instead of writing the ones the MinHashes carry - for MinHashes rebuilt from the
+                bytes a function was stored with, such as an import's, which carry none
 
         Returns:
             None
