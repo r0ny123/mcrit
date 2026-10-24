@@ -241,6 +241,8 @@ class MongoDbStorage(StorageInterface):
     # keys collapses to as few as one count document, so tying the two together would make the
     # write batch follow how repetitive the corpus is rather than how large a write should be.
     _PICHASH_COUNT_WRITE_BATCH = 10000
+    # function documents given their minhash, or band hashes given their postings, per bulk_write
+    _MINHASH_UPDATE_BATCH = 10000
 
     _database: Optional["Database"]
 
@@ -344,6 +346,10 @@ class MongoDbStorage(StorageInterface):
             if not self.isBandDfIndexComplete():
                 self._setBandDfIndexComplete(True)
             if not self.isPicHashCountIndexComplete():
+                # counts left untrusted with no function behind them - an import whose counting
+                # failed after earlier samples were counted, then rolled back - would be trusted
+                # again with the flag, and counted twice by the next import of those samples
+                self._getDb()[self._PICHASH_COUNT_COLLECTION].delete_many({})
                 self._setPicHashCountIndexComplete(True)
         self._getDb()["samples"].create_index("sample_id")
         self._getDb()["samples"].create_index("sha256")
@@ -1856,7 +1862,8 @@ class MongoDbStorage(StorageInterface):
         self._pullBandEntries(function_minhashes)
         self._removeSampleFromPicBlockHashIndex(sample_id)
         # importFunctionEntries counts the pichashes right after the insert, so functions stored are
-        # functions counted - taken out at most once, as deleteSample does
+        # functions counted - taken out at most once, as deleteSample does. An import writes sample by
+        # sample, so one that fails later takes back samples whose functions were stored and counted
         claim = self._getDb().samples.update_one(
             {"sample_id": sample_id, "sha256": sample_entry.sha256, "pichash_counts_removed": {"$ne": True}}, {"$set": {"pichash_counts_removed": True}}
         )
@@ -2058,17 +2065,24 @@ class MongoDbStorage(StorageInterface):
                 continue
             collection = self._getDb().query_functions if is_query_function else self._getDb().functions
             function_ids = [minhash.function_id for minhash in relevant_minhashes]
-            existing_ids = set(collection.distinct("function_id", {"function_id": {"$in": function_ids}}))
-            function_updates = []
+            # looked up a slice at a time: the ids of an import of a million functions, as query
+            # and as answer, would each exceed MongoDB's 16 MB document limit
+            existing_ids = set()
+            for offset in range(0, len(function_ids), self._MINHASH_UPDATE_BATCH):
+                existing_ids.update(collection.distinct("function_id", {"function_id": {"$in": function_ids[offset : offset + self._MINHASH_UPDATE_BATCH]}}))
             stored_minhashes = []
             for minhash in relevant_minhashes:
                 if minhash.function_id not in existing_ids:
                     LOGGER.warning("addMinHashes() - no function with id %d, skipping its minhash.", minhash.function_id)
                     continue
-                set_command = {"$set": {"minhash": minhash.getMinHash().hex(), "minhash_shingle_composition": minhash.getComposition()}}
-                function_updates.append(UpdateOne({"function_id": minhash.function_id}, set_command))
                 stored_minhashes.append(minhash)
-            if function_updates:
+            # the updates built and written a slice at a time: those of an import's every function
+            # held about 0.6 kB each at once
+            for offset in range(0, len(stored_minhashes), self._MINHASH_UPDATE_BATCH):
+                function_updates = [
+                    UpdateOne({"function_id": minhash.function_id}, {"$set": {"minhash": minhash.getMinHash().hex(), "minhash_shingle_composition": minhash.getComposition()}})
+                    for minhash in stored_minhashes[offset : offset + self._MINHASH_UPDATE_BATCH]
+                ]
                 collection.bulk_write(function_updates, ordered=False)
             if stored_minhashes and not is_query_function:
                 self._addMinHashesToBands(stored_minhashes)
@@ -2079,14 +2093,26 @@ class MongoDbStorage(StorageInterface):
         self._addMinHashesToBands([minhash])
 
     def _addMinHashesToBands(self, minhashes: List["MinHash"]) -> None:
-        band_hashes = {number: {} for number in range(self._storage_config.STORAGE_NUM_BANDS)}
-        for minhash in minhashes:
-            if minhash.hasMinHash():
-                for band_number, band_hash in self.getBandHashesForMinHash(minhash).items():
-                    if band_hash not in band_hashes[band_number]:
-                        band_hashes[band_number][band_hash] = []
-                    band_hashes[band_number][band_hash].append(minhash.function_id)
-        self._updateBands(band_hashes)
+        hashed = [minhash for minhash in minhashes if minhash.hasMinHash()]
+        if not hashed:
+            return
+        # every band hash of every minhash in one matrix, then the posting lists of one band at a time:
+        # those of all bands at once held about 1.3 kB per function, which made banding an import of
+        # 210,000 functions with distinct minhashes peak at 1.8 GB. The updates are the same either way
+        band_numbers = list(self.getBandHashesForMinHash(hashed[0]))
+        band_hash_matrix = np.empty((len(hashed), len(band_numbers)), dtype=np.int64)
+        for row, minhash in enumerate(hashed):
+            band_hash_matrix[row] = list(self.getBandHashesForMinHash(minhash).values())
+        function_ids = [minhash.function_id for minhash in hashed]
+        for column, band_number in enumerate(band_numbers):
+            band_data = {}
+            for band_hash, function_id in zip(band_hash_matrix[:, column].tolist(), function_ids):
+                band_data.setdefault(band_hash, []).append(function_id)
+            # and their updates a slice of band hashes at a time; each hash is written whole, by one update
+            band_items = list(band_data.items())
+            del band_data
+            for offset in range(0, len(band_items), self._MINHASH_UPDATE_BATCH):
+                self._updateBands({band_number: dict(band_items[offset : offset + self._MINHASH_UPDATE_BATCH])})
 
     # a band document whose posting list is empty (or missing) holds nothing a candidate
     # lookup could find; it is residue, not index (#149)
@@ -3809,7 +3835,8 @@ class MongoDbStorage(StorageInterface):
             # nothing reads the index while it is not trusted, so there is nothing to keep current;
             # rebuildPicBlockHashIndex() will pick these functions up when it runs
             return 0
-        # grouped in one pass: an import hands over the functions of all its samples at once (#300)
+        # grouped in one pass: filtering the documents once per sample was quadratic in a batch of
+        # many samples (#300), which importFunctionEntries may still be handed
         documents_by_sample: Dict[int, List[Dict]] = {}
         for document in function_documents:
             documents_by_sample.setdefault(document["sample_id"], []).append(document)

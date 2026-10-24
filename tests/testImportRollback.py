@@ -72,6 +72,23 @@ def then_failing(function, error):
     return wrapper
 
 
+def failing_from(calls, function, error, before_failing, runs_first=False):
+    """function, raising error from the given call on, once it has run if runs_first, and calling
+    before_failing right before it raises"""
+    num_calls = [0]
+
+    def wrapper(*args, **kwargs):
+        num_calls[0] += 1
+        if num_calls[0] < calls:
+            return function(*args, **kwargs)
+        if runs_first:
+            function(*args, **kwargs)
+        before_failing()
+        raise error
+
+    return wrapper
+
+
 class MemoryImportRollbackTest(unittest.TestCase):
     # whether a family counter overflows as MongoDB's 64-bit integers do
     COUNTERS_OVERFLOW = False
@@ -148,6 +165,44 @@ class MemoryImportRollbackTest(unittest.TestCase):
                 if function_entry.minhash:
                     minhash = function_entry.getMinHash(self._config().MINHASH_CONFIG.MINHASH_SIGNATURE_BITS)
                     self.assertIn(function_entry.function_id, storage.getCandidatesForMinHash(minhash))
+
+    def _laterSampleFailureStages(self, before_failing):
+        """Failures from the second sample on, each calling before_failing first"""
+        storage = self.storage
+        error = ValueError("Database insert failed.")
+        return {
+            "second sample's functions refused": patch.object(storage, "importFunctionEntries", side_effect=failing_from(2, storage.importFunctionEntries, error, before_failing)),
+            "second sample's functions stored": patch.object(
+                storage, "importFunctionEntries", side_effect=failing_from(2, storage.importFunctionEntries, error, before_failing, runs_first=True)
+            ),
+        }
+
+    def testFailureAtALaterSampleTakesBackTheEarlierOnes(self):
+        # an import stores each sample with its functions before it reads the next, so when the
+        # second sample fails, the first is stored, counted and indexed already, though not banded
+        storage = self.storage
+        witnessed = []
+
+        def first_sample_is_stored():
+            sample_entry = storage.getSampleBySha256(ADDED_SHA256)
+            witnessed.append(sample_entry is not None and bool(storage.getFunctionIdsBySampleId(sample_entry.sample_id)))
+
+        for stage, failure in self._laterSampleFailureStages(first_sample_is_stored).items():
+            with self.subTest(stage=stage):
+                witnessed.clear()
+                before = self._snapshot()
+                with failure, self.assertRaisesRegex(ValueError, "Database insert failed"):
+                    self.index.addImportData(copy.deepcopy(self.export))
+                self.assertEqual([True], witnessed[-1:])
+                after = self._snapshot()
+                if "pichash_counts" in before and not storage.isPicHashCountIndexComplete():
+                    # counting failed: the counts are left as they are, the first sample's among
+                    # them, unread until rebuilt, as testPartlyCountedPichashesAreNoLongerTrusted
+                    self.assertEqual("second sample's pichash counts refused", stage)
+                    del before["pichash_counts"], after["pichash_counts"]
+                self.assertEqual(before, after)
+        report = self.index.addImportData(copy.deepcopy(self.export))
+        self.assertEqual((2, 1), (report["num_samples_imported"], report["num_families_imported"]))
 
     def testFailingRollbackDoesNotHideTheCause(self):
         storage = self.storage
@@ -467,6 +522,30 @@ class MongoImportRollbackTest(MemoryImportRollbackTest):
             "pichash counts refused": patch.object(storage, "_addToPicHashCounts", side_effect=error),
         }
 
+    def _laterSampleFailureStages(self, before_failing):
+        storage = self.storage
+        error = ValueError("Database insert failed.")
+        insert_many = storage._dbInsertMany
+        insert_functions = failing_from(2, lambda data: insert_many("functions", data), error, before_failing)
+
+        def failing_for_the_second_sample_functions(collection, data):
+            if collection == "functions":
+                return insert_functions(data)
+            return insert_many(collection, data)
+
+        return {
+            **super()._laterSampleFailureStages(before_failing),
+            "second sample's functions refused by MongoDB": patch.object(storage, "_dbInsertMany", side_effect=failing_for_the_second_sample_functions),
+            "second sample's picblockhash index refused": patch.object(
+                storage, "_addToPicBlockHashIndex", side_effect=failing_from(2, storage._addToPicBlockHashIndex, error, before_failing)
+            ),
+            "second sample's function range refused": patch.object(
+                storage, "_recordFunctionRange", side_effect=failing_from(2, storage._recordFunctionRange, error, before_failing)
+            ),
+            # last: the counts are no longer kept once counting failed
+            "second sample's pichash counts refused": patch.object(storage, "_addToPicHashCounts", side_effect=failing_from(2, storage._addToPicHashCounts, error, before_failing)),
+        }
+
     def testPartlyCountedPichashesAreNoLongerTrusted(self):
         # counting failed after some or all of the counts were written: they may be off now
         storage = self.storage
@@ -479,6 +558,35 @@ class MongoImportRollbackTest(MemoryImportRollbackTest):
         after = self._snapshot()
         del before["pichash_counts"], after["pichash_counts"]
         self.assertEqual(before, after)
+
+    def testCountsLeftByAFailedImportAreNotTrustedAgainOnAnEmptyDatabase(self):
+        # an import into a database without functions fails counting its second sample: the first
+        # sample's counts stay behind, untrusted, with no function left to hold them. The next start
+        # vouches for the counts of an empty database, so it must not vouch for those
+        storage = self.storage
+        source = storage.getSampleBySha256(load_report().sha256)
+        assert source is not None
+        self.assertTrue(storage.deleteSample(source.sample_id))
+        self.assertEqual(0, storage._getDb().functions.count_documents({}))
+        failure = failing_from(2, storage._addToPicHashCounts, ValueError("Database insert failed."), lambda: None)
+        with patch.object(storage, "_addToPicHashCounts", side_effect=failure):
+            with self.assertRaisesRegex(ValueError, "Database insert failed"):
+                self.index.addImportData(copy.deepcopy(self.export))
+        db = storage._getDb()
+        self.assertEqual(0, db.functions.count_documents({}))
+        self.assertGreater(db.pichash_counts.count_documents({}), 0)
+        self.assertFalse(storage.isPicHashCountIndexComplete())
+
+        def counts():
+            return sorted((document["_pichash"], document["df"]) for document in db.pichash_counts.find({}, {"_id": 0}))
+
+        restarted = MinHashIndex(self._config())
+        self.assertTrue(restarted.getStorage().isPicHashCountIndexComplete())
+        self.assertEqual(2, restarted.addImportData(copy.deepcopy(self.export))["num_samples_imported"])
+        imported = counts()
+        # as a clean import counts them, which a rebuild from the functions reproduces
+        restarted.getStorage().rebuildPicHashCountIndex()
+        self.assertEqual(counts(), imported)
 
     def testWriterRestoresTheFamilyAFailedImportRemovedBeforeItFiled(self):
         # the rollback of a failed import removed the family between another writer's lookup and filing
