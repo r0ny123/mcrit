@@ -111,6 +111,31 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   updates in the same order: 7 s instead of 20 s of Python for 300 samples of 700 functions.
   `MinHashIndex.addImportData` takes the size of the export as an optional `import_size`.
 
+- **`POST /import` holds one sample's functions at a time, not the export's (#304, #309).** It kept
+  every sample's parsed functions until the last was written, then built MinHash objects, band
+  postings and MongoDB updates for all of them at once: on a synthetic export of 300 samples x 700
+  functions (35 MB compressed, minhashes drawn from 20,000 distinct ones) the server peaked at 4.1
+  GB RSS. The validation pass still reads and checks the whole export before the first write, as
+  #266 and #300 require, but now lets go of each sample's entries once checked; the write pass reads
+  and checks each sample again and stores it with its functions before reading the next. Each pass
+  draws on an inflation budget of its own, of the same size, so content read twice is not counted
+  twice against the cap of #300. Only each banded function's id and minhash bytes are kept until the
+  minhashes are banded, in one call as before, so that a band hash shared across samples stays one
+  update. MongoDB storage now bands one band at a time from a matrix of band hashes, and looks up
+  the functions and writes its minhash and band updates 10,000 at a time, with the same documents as
+  result. base85 is decoded with numpy, 13 times faster than `base64.b85decode`. Same export,
+  measured before the checks of #300 were added: 4.1 GB to 0.54 GB peak and 143 s to 115 s; with
+  210,000 distinct minhashes 4.1 GB to 0.62 GB and 414 s to 361 s, nearly all of it band upserts;
+  the validation pass alone 1.7 GB and 13 s to 0.27 GB and 6 s. With them, on 100 samples x 700
+  functions and without the database's own time, what the import adds to the process falls from 820
+  MiB to 93 MiB. Banding is the one step that still grows with the export, by 1.1 to 1.4 kB per
+  function. An uncompressed export is parsed whole by `json.loads` before any of this: 406 MB of
+  JSON still peaks at 2.5 GB (4.6 GB before). As samples are now stored one by one, a later sample
+  that fails finds the earlier ones stored, counted and indexed; the rollback of #299 takes them
+  back too, except their pichash counts if counting failed: those stay untrusted until
+  `rebuildPicHashCountIndex` runs, and a database left without functions clears them at its next
+  start instead of trusting them again.
+
 ### Security
 
 - A sample whose SMDA report had no timestamp (missing or empty) was stored, but reading it back
