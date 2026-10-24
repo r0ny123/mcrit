@@ -2958,6 +2958,50 @@ class MongoDbStorageTest(MemoryStorageTest):
         self.assertEqual(len(minhashes), rebuild_result["minhash_functions_indexed"])
         self.assertEqual(bands_before, dumpBands())
 
+    def testAddingMinHashesLooksUpTheirFunctionsInSlices(self):
+        # one $in over every function id of a large import exceeds MongoDB's 16 MB document limit
+        self.storage.addSmdaReport(SmdaReport.fromFile(self.example_file_path))
+        stored_ids = [0, 2, 3, 5, 7]
+        # one id no function carries, between slices, is skipped as before
+        minhashes = [MinHash(function_id=function_id, minhash_signature=[function_id] * 10, minhash_bits=8) for function_id in stored_ids[:3] + [10**6] + stored_ids[3:]]
+        distinct = Collection.distinct
+        looked_up = []
+
+        def recording(collection, key, query, *args, **kwargs):
+            if collection.name == "functions" and key == "function_id":
+                looked_up.append(list(query["function_id"]["$in"]))
+            return distinct(collection, key, query, *args, **kwargs)
+
+        with patch.object(MongoDbStorage, "_MINHASH_UPDATE_BATCH", 2), patch.object(Collection, "distinct", autospec=True, side_effect=recording):
+            self.storage.addMinHashes(minhashes)
+        self.assertEqual([[0, 2], [3, 10**6], [5, 7]], looked_up)
+        database = self.storage._getDb()
+        with_minhash = sorted(document["function_id"] for document in database.functions.find({"minhash": {"$type": "string", "$ne": ""}}, {"_id": 0, "function_id": 1}))
+        self.assertEqual(stored_ids, with_minhash)
+
+    def testAddingMinHashesInSlicesWritesWhatOneBatchWrites(self):
+        # addMinHashes bands one band at a time and writes its updates in slices, so that banding an
+        # import does not hold every band's postings at once; posting order and df come out the same
+        def addAndDump(batch_size):
+            self.storage.clearStorage()
+            self.storage.addSmdaReport(SmdaReport.fromFile(self.example_file_path))
+            # functions 2 and 3 share their signature, and with it every band hash
+            signatures = {0: [1] * 10, 2: [7] * 10, 3: [7] * 10, 5: list(range(10)), 7: [7] * 9 + [8], 8: [0x30] * 10}
+            minhashes = [MinHash(function_id=function_id, minhash_signature=signature, minhash_bits=8) for function_id, signature in signatures.items()]
+            with patch.object(MongoDbStorage, "_MINHASH_UPDATE_BATCH", batch_size):
+                self.storage.addMinHashes(minhashes)
+            database = self.storage._getDb()
+            bands = {
+                band_id: sorted((document["band_hash"], document["function_ids"], document["df"]) for document in database["band_%d" % band_id].find({}, {"_id": 0}))
+                for band_id in range(self._storage_config.STORAGE_NUM_BANDS)
+            }
+            functions = sorted((document["function_id"], document["minhash"]) for document in database.functions.find({}, {"_id": 0, "function_id": 1, "minhash": 1}))
+            return bands, functions
+
+        whole = addAndDump(10000)
+        self.assertTrue(all(any(function_ids[:2] == [2, 3] for _, function_ids, _ in band) for band in whole[0].values()))
+        self.assertEqual(whole, addAndDump(1))
+
     def testRebuildMinhashBandIndexLeavesOutAFunctionWithoutMinhashField(self):
         """a function document without the field (an upsert racing a deletion) has nothing to band"""
         self._storageWithBandedSample()

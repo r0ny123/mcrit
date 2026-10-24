@@ -3,6 +3,8 @@ import io
 import zipfile
 import zlib
 
+import numpy as np
+
 
 def generate_unique_pairs(data):
     """For a given list of items, yield a list of unique, size-sorted pairs"""
@@ -75,6 +77,41 @@ def compress_encode(content):
     return zip_base64
 
 
+_B85_ALPHABET = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
+_B85_DIGITS = np.full(256, -1, dtype=np.int16)
+_B85_DIGITS[np.frombuffer(_B85_ALPHABET, dtype=np.uint8)] = np.arange(85, dtype=np.int16)
+# groups of five characters decoded per step, so the uint64 intermediates stay at a few dozen MB
+_B85_GROUPS_PER_CHUNK = 1 << 20
+
+
+def b85decode(data):
+    """base64.b85decode, vectorised: the standard library decodes in pure Python, at about 10 MB/s.
+
+    Returns the same bytes for every input base64.b85decode accepts. Input it refuses - characters
+    outside the alphabet, a group beyond 32 bits, anything but ASCII text or bytes - is handed to
+    base64.b85decode, so that it raises the error it always raised."""
+    if isinstance(data, str):
+        if not data.isascii():
+            return base64.b85decode(data)
+        data = data.encode("ascii")
+    if not isinstance(data, (bytes, bytearray)):
+        return base64.b85decode(data)
+    padding = -len(data) % 5
+    characters = np.frombuffer(bytes(data) + b"~" * padding, dtype=np.uint8).reshape(-1, 5)
+    decoded = []
+    for offset in range(0, len(characters), _B85_GROUPS_PER_CHUNK):
+        digits = _B85_DIGITS[characters[offset : offset + _B85_GROUPS_PER_CHUNK]]
+        if (digits < 0).any():
+            return base64.b85decode(data)
+        digits = digits.astype(np.uint64)
+        values = (((digits[:, 0] * 85 + digits[:, 1]) * 85 + digits[:, 2]) * 85 + digits[:, 3]) * 85 + digits[:, 4]
+        if (values > 0xFFFFFFFF).any():
+            return base64.b85decode(data)
+        decoded.append(values.astype(">u4").tobytes())
+    result = b"".join(decoded)
+    return result[: len(result) - padding] if padding else result
+
+
 # An export's function entries inflate to 3-12 times their encoded size: 4.1 times at the median and
 # 11.6 at most over the 475 non-Intel samples of the live corpus (a CIL sample in which 94% of the
 # functions share one pichash), 6.3 at most for Intel reports kept with their disassembly. Content
@@ -94,7 +131,7 @@ MIN_IMPORT_DECOMPRESSED_SIZE = 64 * 1024 * 1024
 def decompress_decode(compressed_b64, max_size=None):
     """Inflate content compress_encode wrote, up to its own cap and to max_size, when given: what
     remains of an import's budget."""
-    de_b64ed = base64.b85decode(compressed_b64)
+    de_b64ed = b85decode(compressed_b64)
     zip_buffer = io.BytesIO(de_b64ed)
     decompressed = ""
     own_max_size = max(MAX_DECOMPRESSION_RATIO * len(compressed_b64), MIN_DECOMPRESSED_SIZE)
