@@ -71,7 +71,9 @@ class MatcherVsGroup(MatcherInterface):
         for function_entry in self._function_entries:
             by_pichash.setdefault(function_entry.pichash, set()).add((function_entry.family_id, function_entry.sample_id, function_entry.function_id))
         for pichash, holders in self._other_pichash_holders.items():
-            by_pichash[pichash].update(holders)
+            # only a PicHash the own side is grouped by: the holders were collected by every own PicHash
+            if pichash in by_pichash:
+                by_pichash[pichash].update(holders)
         return by_pichash
 
     def _createMinHashCandidateGroups(self, start=0, end=None) -> Dict[int, Set[int]]:
