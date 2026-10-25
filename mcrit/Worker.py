@@ -604,11 +604,18 @@ class Worker(QueueRemoteCallee):
 
     # Reports PROGRESS
     @Remote(progress=True)
-    def updateMinHashes(self, function_ids, progress_reporter=NoProgressReporter()):
-        """Find unhashed functions in storage and calculate their MinHashes, optionally filter by function_ids or get function_entries passed directly"""
-        return self._updateMinHashes(function_ids, progress_reporter)
+    def updateMinHashes(self, function_ids, finish_samples=False, progress_reporter=NoProgressReporter()):
+        """Find unhashed functions in storage and calculate their MinHashes, optionally filter by function_ids or get function_entries passed directly
 
-    def _updateMinHashes(self, function_ids, progress_reporter, failed_function_ids=None):
+        With finish_samples, every sample still waiting for its minhashes is then finished the way
+        updateMinHashesForSample finishes its sample, once nothing in it is left to hash. GET
+        /complete_minhashes asks for it, as that is how samples submitted with deferred hashing get
+        hashed. recalculateMinHashes and updateMinHashesForSample record versions themselves and
+        leave it off.
+        """
+        return self._updateMinHashes(function_ids, progress_reporter, finish_samples=finish_samples)
+
+    def _updateMinHashes(self, function_ids, progress_reporter, failed_function_ids=None, finish_samples=False):
         # failed_function_ids, when given, collects the functions that could not be hashed
         # Counts every MinHash written, across every batch. It has to be initialised before the
         # loops: when there is nothing left to hash the loop body never runs, and returning
@@ -652,8 +659,34 @@ class Worker(QueueRemoteCallee):
                     num_updated += len(minhashes)
                     LOGGER.info("Updated minhashes for %d function entries.", len(minhashes))
                 progress_reporter.step()
-        # TODO if we do deferred calculation for a batch of minhashes, we might have to clear them here or address this where else updateMinHashes is used
+        if finish_samples:
+            self._finishPendingSamples()
         return num_updated
+
+    def _finishPendingSamples(self) -> None:
+        """Record the minhash version of every sample still pending since it was stored and now
+        hashed completely and, with STORAGE_DROP_DISASSEMBLY, drop its disassembly - what
+        updateMinHashesForSample does for a sample hashed on submission.
+
+        This goes by what storage holds rather than by what this run hashed, so a retried, repeated
+        or overlapping run finishes the same samples, and so does one for a sample with nothing
+        large enough to hash. A sample repairMinHashes or recalculateMinHashes rehashed stays
+        pending until then, as neither drops disassembly. Only samples stored by an smda at or above
+        the escaper compatibility threshold and by the running shingler revision count: minhashes
+        written across an incompatible upgrade, like those of an import or of a sample stored before
+        the marker existed, are left to repairMinHashes.
+        """
+        pending_sample_ids = self._storage.getSamplesWithPendingMinHashes(self.getMinHashCompatibilityThreshold())
+        # as in repairMinHashes, a function without disassembly cannot be hashed and does not hold
+        # its sample back; every other function large enough to hash has to have its minhash
+        unhashed_sample_ids = self._storage.getSamplesWithUnhashedFunctions(pending_sample_ids)
+        finished_sample_ids = [sample_id for sample_id in pending_sample_ids if sample_id not in unhashed_sample_ids]
+        LOGGER.info("Updating MinHashes: %d of %d pending samples hashed completely, recording them as current.", len(finished_sample_ids), len(pending_sample_ids))
+        if finished_sample_ids:
+            self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION, finished_sample_ids, finish_pending=True)
+            if self.config.STORAGE_CONFIG.STORAGE_DROP_DISASSEMBLY:
+                for sample_id in finished_sample_ids:
+                    self._storage.deleteXcfgForSampleId(sample_id)
 
     # Reports PROGRESS
     @Remote(progress=True)
@@ -666,7 +699,7 @@ class Worker(QueueRemoteCallee):
             LOGGER.info("Sample %d did not have any functions, proceeding.", sample_id)
             update_result = 0
         # which escaper produced them, so a later smda can tell whether they are stale (#142)
-        self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION, [sample_id])
+        self._storage.setMinHashVersionForSamples(SmdaConfig().VERSION, [sample_id], finish_pending=True)
         if not function_entries:
             return 0
         if self.config.STORAGE_CONFIG.STORAGE_DROP_DISASSEMBLY:
