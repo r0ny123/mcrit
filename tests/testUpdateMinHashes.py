@@ -104,7 +104,9 @@ class UpdateMinHashesTest(unittest.TestCase):
             function_tuples = [(entry.function_id, entry.toSmdaFunction()) for entry in hashable]
             self.assertEqual(len(hashable) - 1, len(worker.minhasher.calculateMinHashesFromStorage(function_tuples)))
             self.assertEqual(len(hashable) - 1, worker.updateMinHashes(None))
-        self.assertIn("could not be hashed", logger.warning.call_args.args[0])
+        # any of the worker's warnings, not only its last: it warns about other skipped functions too
+        warnings = [call.args[0] for call in logger.warning.call_args_list]
+        self.assertTrue(any("could not be hashed" in message for message in warnings), warnings)
         self.assertEqual([hashable[0].function_id], [entry.function_id for entry in index._storage.getUnhashedFunctions(None)])
 
 
