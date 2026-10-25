@@ -172,11 +172,6 @@ class FunctionEntry:
     def getMinHash(self, minhash_bits=32):
         return MinHash(function_id=self.function_id, minhash_bytes=self.minhash, minhash_bits=minhash_bits)
 
-    def hasValidPicHashes(self) -> bool:
-        """Whether the pichash and every picblockhash can be stored, see isValidPicHash; for an imported entry."""
-        blocks = self.picblockhashes
-        return isValidPicHash(self.pichash) and isinstance(blocks, list) and all(isinstance(block, dict) and isValidPicHash(block.get("hash")) for block in blocks)
-
     def toSmdaFunction(self) -> Optional[SmdaFunction]:
         """The SmdaFunction this entry's disassembly describes; None when it carries none."""
         binary_info = BinaryInfo(b"")

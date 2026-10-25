@@ -20,7 +20,7 @@ from smda.SmdaConfig import SmdaConfig
 
 from mcrit.config.McritConfig import McritConfig
 from mcrit.config.StorageConfig import StorageConfig
-from mcrit.index.MinHashIndex import MinHashIndex
+from mcrit.index.MinHashIndex import ImportRejected, MinHashIndex
 from mcrit.libs.utility import compress_encode, decompress_decode
 from mcrit.server import application_routes
 from mcrit.storage.FunctionEntry import isValidPicHash
@@ -138,7 +138,9 @@ class PicHashValidationTest(unittest.TestCase):
         export_data["function_entries"][sha256] = compress_encode(json.dumps(function_entries)) if compress_data else function_entries
         return export_data, sha256
 
-    def test_an_import_skips_a_sample_carrying_an_unstorable_value(self):
+    def test_an_import_carrying_an_unstorable_value_is_refused(self):
+        # the export is refused as a whole, as any malformed one is since #266, rather than the
+        # sample being skipped: an import stores all of it or nothing (#299)
         def set_pichash(value):
             return lambda entry: entry.update(pichash=value)
 
@@ -149,10 +151,8 @@ class PicHashValidationTest(unittest.TestCase):
         tampers.append(lambda entry: entry.update(picblockhashes="0x5"))
         for number, tamper in enumerate(tampers):
             export_data, sha256 = self._export(tamper, compress_data=number % 2 == 1)
-            import_report = self.index.addImportData(export_data)
-            self.assertEqual(0, import_report["num_samples_imported"], number)
-            self.assertEqual(1, import_report["num_samples_skipped"], number)
-            self.assertEqual(0, import_report["num_functions_imported"], number)
+            with self.assertRaises(ImportRejected, msg=number):
+                self.index.addImportData(export_data)
             self.assertIsNone(self.index.getStorage().getSampleBySha256(sha256), number)
         self.assertEqual(0, self._sample_count())
         self.assertEqual(0, self.index.getStatus(with_pichash=False)["status"]["num_functions"])
