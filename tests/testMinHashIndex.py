@@ -303,7 +303,7 @@ class UniqueBlocksCoverTestSuite(unittest.TestCase):
         # a block's samples are read when it joins the candidates and when it is taken - not once per round
         self.assertLessEqual(len(reads), 2 * num_blocks)
 
-    def testCoverPrefersReachThenScoreThenTheLaterBlock(self):
+    def testCoverPrefersReachThenScoreThenTheLowerBlockHash(self):
         index = MinHashIndex(config)
         worker = index.queue._worker
         report = SmdaReport.fromFile(EXAMPLE_REPORT)
@@ -316,22 +316,23 @@ class UniqueBlocksCoverTestSuite(unittest.TestCase):
             return {"samples": samples, "score": score, "length": 1, "instructions": instructions, "sample_id": samples[0]}
 
         def cover(covers_required):
-            # "b" and "c" reach two samples each at the same score, so the later one, "c", goes first
-            blocks = {"a": block([1], 90.0), "b": block([1, 2], 10.0), "c": block([2, 3], 10.0), "d": block([3], 50.0)}
+            # "0xb" and "0xc" reach two samples each at the same score and with as many fixed hex digits,
+            # so the lower picblockhash, "0xb", goes first (#283; the later block before that)
+            blocks = {"0xa": block([1], 90.0), "0xb": block([1, 2], 10.0), "0xc": block([2, 3], 10.0), "0xd": block([3], 50.0)}
             found = {"statistics": {}, "unique_blocks": blocks}
             with patch.object(index._storage, "getUniqueBlocks", return_value=found), patch.object(index._storage, "getSampleById", return_value=sample_entry):
                 return worker.getUniqueBlocks([1, 2, 3], covers_required=covers_required)
 
         once = cover(1)
-        # "c" leaves sample 1 uncovered, which "a" and "b" both reach - "a" with the higher score
-        self.assertEqual(["c", "a"], once["yara_rule"])
+        # "0xb" leaves sample 3 uncovered, which "0xc" and "0xd" both reach - "0xd" with the higher score
+        self.assertEqual(["0xb", "0xd"], once["yara_rule"])
         self.assertTrue(once["statistics"]["has_complete_yara_rule"])
         twice = cover(2)
-        self.assertEqual(["c", "b", "a", "d"], twice["yara_rule"])
+        self.assertEqual(["0xb", "0xc", "0xa", "0xd"], twice["yara_rule"])
         self.assertTrue(twice["statistics"]["has_complete_yara_rule"])
         self.assertEqual(2, twice["statistics"]["yara_covers"])
         thrice = cover(3)
-        self.assertEqual(["c", "b", "a", "d"], thrice["yara_rule"])
+        self.assertEqual(["0xb", "0xc", "0xa", "0xd"], thrice["yara_rule"])
         self.assertFalse(thrice["statistics"]["has_complete_yara_rule"])
         self.assertTrue(thrice["statistics"]["has_yara_rule"])
 
