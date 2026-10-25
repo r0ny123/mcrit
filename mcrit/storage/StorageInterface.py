@@ -235,10 +235,24 @@ class StorageInterface:
         raise NotImplementedError
 
     def discardImportedSample(self, sample_entry: "SampleEntry") -> None:
-        """Undo importSampleEntry for an import that failed: the sample, the functions it got, the indexes they were added to, and its family counters.
+        """Undo importSampleEntry for an import that failed: the sample, the functions it got with
+        their minhashes and index entries, and its family counters.
 
         Args:
             sample_entry: the entry importSampleEntry returned
+        """
+        raise NotImplementedError
+
+    def discardImportedFamily(self, family_id: int) -> bool:
+        """Undo ensureFamily for an import that failed, once its samples are discarded: the family
+        is deleted only while no sample is filed under it, so that one another writer filed there
+        meanwhile keeps its family.
+
+        Args:
+            family_id: a family ensureFamily reported as added by this import
+
+        Returns:
+            True if the family was deleted
         """
         raise NotImplementedError
 
@@ -608,6 +622,23 @@ class StorageInterface:
             family_id of the added (or already existing) family name
         """
         raise NotImplementedError
+
+    def ensureFamily(self, family_name: str) -> Tuple[int, bool]:
+        """Add family, if not already known, and say whether this call added it (#299). An import
+        removes the families it added should it fail, so a backend that two writers share has to
+        decide this atomically - of two writers adding one name, only one may be told it did. This
+        default looks the name up and then adds it, which is atomic only for a single writer.
+
+        Args:
+            family_name: The name of the family to add
+
+        Returns:
+            family_id of the added (or already existing) family name, and True when this call added it
+        """
+        family_id = self.getFamilyId(family_name)
+        if family_id is not None:
+            return family_id, False
+        return self.addFamily(family_name), True
 
     def deleteOrphanedQueryData(self) -> Dict[str, int]:
         """Delete the query functions whose query sample is gone and the query disassembly whose

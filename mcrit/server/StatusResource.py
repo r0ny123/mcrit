@@ -69,12 +69,14 @@ class StatusResource:
             db_log_msg(self.index, req, "StatusResource.on_post_import - failed - no POST body.")
             return
         try:
+            body = req.stream.read()
             try:
-                import_data = json.loads(req.stream.read())
+                import_data = json.loads(body)
             except (ValueError, RecursionError) as error:
                 # JSONDecodeError and UnicodeDecodeError are ValueErrors; a RecursionError is JSON nested too deeply
                 raise ImportRejected(f"body is no JSON export ({type(error).__name__}: {error})") from error
-            import_report = self.index.addImportData(import_data)
+            # what the export's content may inflate to is bounded by the size of the body (#300)
+            import_report = self.index.addImportData(import_data, import_size=len(body))
         except ImportRejected as error:
             # a body that is no JSON, or an export of another version or configuration, or one that
             # cannot be read; any other error of an import, a failed insert say, is the server's
