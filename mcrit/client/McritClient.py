@@ -88,7 +88,7 @@ class McritBadRequest(McritRequestError):
 
 
 class McritNotFound(McritRequestError):
-    """404: the sample, family, function or job the request named does not exist."""
+    """404: the sample, family, function, job or result the request named does not exist."""
 
 
 class McritGone(McritRequestError):
@@ -1155,14 +1155,14 @@ class McritClient:
         return self._handle(response)
 
     def deleteJob(self, job_id: str) -> Optional[Dict[str, int]]:
-        """DELETE /jobs/{job_id}: delete one job and its result. Answers ``num_deleted``."""
+        """DELETE /jobs/{job_id}: delete one job and its result. Answers ``num_deleted``; an unknown ``job_id`` is a 404: None by default (it used to answer {'num_deleted': 0}), McritNotFound with raise_client_errors."""
         response = self._session.delete(f"{self.mcrit_server}/jobs/{job_id}", headers=self.headers, timeout=self.timeout)
         if self.raw:
             return self._passthrough(response)
         return self._handle(response)
 
     def getJobData(self, job_id: str) -> Optional[Job]:
-        """GET /jobs/{job_id}: one job; None for an unknown or malformed id."""
+        """GET /jobs/{job_id}: one job; None for an unknown or malformed id (a 404, McritNotFound with raise_client_errors)."""
         response = self._session.get(f"{self.mcrit_server}/jobs/{job_id}", headers=self.headers, timeout=self.timeout)
         if self.raw:
             return self._passthrough(response)
@@ -1171,7 +1171,7 @@ class McritClient:
             return Job(data, None)
 
     def getResultForJob(self, job_id: str, compact: bool = False) -> Optional[Any]:
-        """GET /jobs/{job_id}/result: the result of a job, None while it has not finished; ``compact`` strips the per-function matches of a matching result."""
+        """GET /jobs/{job_id}/result: the result of a job, None while it has none (pending, failed, terminated, or its result was removed); ``compact`` strips the per-function matches of a matching result. An unknown ``job_id`` is a 404, also None by default but McritNotFound with raise_client_errors."""
         query_string = "?compact=True" if compact else ""
         response = self._session.get(f"{self.mcrit_server}/jobs/{job_id}/result{query_string}", headers=self.headers, timeout=self.timeout)
         if self.raw:
@@ -1179,7 +1179,7 @@ class McritClient:
         return self._handle(response)
 
     def getResult(self, result_id: str, compact: bool = False) -> Optional[Any]:
-        """GET /results/{result_id}: the result stored under a result id; ``compact`` strips the per-function matches of a matching result."""
+        """GET /results/{result_id}: the result stored under a result id; ``compact`` strips the per-function matches of a matching result. An unknown ``result_id`` is a 404: None by default, McritNotFound with raise_client_errors."""
         query_string = "?compact=True" if compact else ""
         response = self._session.get(f"{self.mcrit_server}/results/{result_id}{query_string}", headers=self.headers, timeout=self.timeout)
         if self.raw:
@@ -1187,7 +1187,7 @@ class McritClient:
         return self._handle(response)
 
     def getJobForResult(self, result_id: str) -> Optional[Job]:
-        """GET /results/{result_id}/job: the job that produced a result."""
+        """GET /results/{result_id}/job: the job that produced a result. An unknown ``result_id``, or a result whose job is gone, is a 404: None by default, McritNotFound with raise_client_errors."""
         response = self._session.get(f"{self.mcrit_server}/results/{result_id}/job", headers=self.headers, timeout=self.timeout)
         if self.raw:
             return self._passthrough(response)
@@ -1197,6 +1197,9 @@ class McritClient:
 
     def awaitResult(self, job_id: Optional[str], sleep_time: float = 2, compact: bool = False) -> Optional[Any]:
         """Poll GET /jobs/{job_id} every ``sleep_time`` seconds until the job finished, then fetch its result.
+
+        With raise_client_errors, the server's 404 for an unknown job id or one deleted while waiting raises
+        McritNotFound instead, as it does for a finished job whose result is removed before it is read.
 
         Raises:
             JobTerminatedError: when the job was terminated instead of finishing, or when looking
