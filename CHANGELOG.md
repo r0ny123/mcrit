@@ -757,6 +757,18 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   job for any id and answered 202 with its job id, and the job then did nothing. The families route
   already checked first. Repeating the deletion of a sample, once its first deletion has run, is now
   a 404 as well.
+### Fixed
+
+- **A worker that released its own jobs left the queue counters showing them in progress (#296).**
+  `MongoQueue.release_all_jobs` requeued the jobs a consumer still held but never touched the
+  counters: `in_progress` kept counting them and `queued` never did, so the status page showed work
+  that no longer ran. A job that had used its last attempt was also left without a failure, so jobs
+  awaiting it (`await_jobs`) waited forever. The worker loops call it to reconcile their locks when
+  a job's `error()` or `complete()` write was lost to a database outage, and `Worker`,
+  `SingleJobWorker` and `SpawningWorker` call it when they leave their `with` block. It now goes
+  through the per-job release that `release_orphaned_jobs` already used for dead workers. Counters
+  already skewed stay so until `GET /jobs/stats?with_refresh=true` recounts them. `LocalQueue`
+  gained a no-op `release_all_jobs`, as its jobs are never held across an exit.
 
 ## [1.16.0] - 2026-10-16
 
