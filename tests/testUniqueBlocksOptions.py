@@ -8,7 +8,7 @@ import json
 import os
 import random
 import unittest
-from typing import Any, Dict
+from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
 import falcon
@@ -637,8 +637,10 @@ class UniqueBlocksRequestTest(unittest.TestCase):
     def test_the_client_refuses_what_the_server_would(self):
         client = McritClient(mcrit_server="http://mcrit")
         client._session = MagicMock()
-        # a string or a number is not a list of hashes, though a string iterates as its digits
-        for not_a_list in ("16", 16):
+        # a string or a number is not a list of hashes, though a string iterates as its digits; typed
+        # as Any, as a caller without type checking would pass them
+        not_lists: List[Any] = ["16", 16]
+        for not_a_list in not_lists:
             with self.subTest(not_a_list=not_a_list), self.assertRaises(ValueError):
                 client.requestUniqueBlocksForSamples([1], exclude_picblockhashes=not_a_list)
         self.assertEqual({}, client._getUniqueBlocksParams(gentle_length_score="false", demote_generic_blocks=0))
