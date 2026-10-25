@@ -34,7 +34,8 @@ class MatcherVsGroup(MatcherInterface):
     def getMatchesForSample(self, sample_id: int, other_sample_ids: List[int]):
         # without disassembly, which matching never reads
         self._function_entries = self._storage.getFunctionsBySampleId(sample_id, with_xcfg=False)
-        own_pichashes = {function_entry.pichash for function_entry in self._function_entries}
+        # 0 is what a function without a PicHash is stored with, not a hash it shares
+        own_pichashes = {function_entry.pichash for function_entry in self._function_entries if function_entry.pichash}
         # The other samples one at a time and each once, keeping only what matching reads of them. A
         # child of a cross compare is matched against every other sample named, and holding all of
         # them with their disassembly made its memory grow with the samples named, and with every
@@ -69,7 +70,9 @@ class MatcherVsGroup(MatcherInterface):
     def _getPicHashMatches(self) -> Dict[int, Set[Tuple[int, int, int]]]:
         by_pichash: Dict[int, Set[Tuple[int, int, int]]] = {}
         for function_entry in self._function_entries:
-            by_pichash.setdefault(function_entry.pichash, set()).add((function_entry.family_id, function_entry.sample_id, function_entry.function_id))
+            # 0 is what a function without a PicHash is stored with, not a hash it shares
+            if function_entry.pichash:
+                by_pichash.setdefault(function_entry.pichash, set()).add((function_entry.family_id, function_entry.sample_id, function_entry.function_id))
         for pichash, holders in self._other_pichash_holders.items():
             # only a PicHash the own side is grouped by: the holders were collected by every own PicHash
             if pichash in by_pichash:
