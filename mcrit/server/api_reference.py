@@ -28,8 +28,11 @@ from mcrit.server.MatchResource import MatchResource
 from mcrit.server.QueryResource import QueryResource
 from mcrit.server.SampleResource import SampleResource
 from mcrit.server.StatusResource import StatusResource
+from mcrit.server.TagResource import TagResource
 
-RESOURCE_CLASSES = {cls.__name__: cls for cls in (StatusResource, FamilyResource, SampleResource, FunctionResource, MatchResource, BlocksResource, QueryResource, JobResource)}
+RESOURCE_CLASSES = {
+    cls.__name__: cls for cls in (StatusResource, FamilyResource, SampleResource, FunctionResource, MatchResource, BlocksResource, QueryResource, JobResource, TagResource)
+}
 # responders Falcon adds on its own for every route
 FALCON_DEFAULT_RESPONDERS = ("method_not_allowed", "options_responder")
 DEFAULT_OUTPUT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "docs", "api_reference.md")

@@ -743,46 +743,47 @@ class McritClient:
 
     _TAG_ROUTES = {"family": "families", "sample": "samples", "function": "functions"}
 
-    def _tagsRequest(self, entity: str, entity_id: int, tags: Union[str, Iterable[str]]) -> Tuple[str, Dict[str, List[str]]]:
-        """The URL and JSON body of a tag change; a single string is one tag, not its characters."""
+    def _tagsRequest(self, entity: str, tags: Union[str, Iterable[str]]) -> Tuple[str, Dict[str, List[str]]]:
+        """The route segment and JSON body of a tag change; a single string is one tag, not its characters.
+        The URL is written where the request is sent, so that docs/api_reference.md links the route to the method."""
         checkTagEntity(entity)
         tags = [tags] if isinstance(tags, str) else list(tags)
-        return f"{self.mcrit_server}/{self._TAG_ROUTES[entity]}/{int(entity_id)}/tags", {"tags": tags}
+        return self._TAG_ROUTES[entity], {"tags": tags}
 
-    def addTags(self, entity: str, entity_id: int, tags: Union[str, Iterable[str]]):
+    def addTags(self, entity: str, entity_id: int, tags: Union[str, Iterable[str]]) -> Optional[Any]:
         """
         Add <tags> to the family, sample or function (<entity>) <entity_id>; tags it carries already are kept once (#53)
         Answers the entity's tags after the change
         """
-        url, body = self._tagsRequest(entity, entity_id, tags)
-        response = self._session.post(url, json=body, headers=self.headers, timeout=self.timeout)
+        route, body = self._tagsRequest(entity, tags)
+        response = self._session.post(f"{self.mcrit_server}/{route}/{int(entity_id)}/tags", json=body, headers=self.headers, timeout=self.timeout)
         if self.raw:
-            return response
+            return self._passthrough(response)
         data = self._handle(response)
         if data is not None:
             return data["tags"]
 
-    def removeTags(self, entity: str, entity_id: int, tags: Union[str, Iterable[str]]):
+    def removeTags(self, entity: str, entity_id: int, tags: Union[str, Iterable[str]]) -> Optional[Any]:
         """
         Remove <tags> from the family, sample or function (<entity>) <entity_id>; tags it does not carry are ignored (#53)
         Answers the entity's tags after the change
         """
-        url, body = self._tagsRequest(entity, entity_id, tags)
-        response = self._session.delete(url, json=body, headers=self.headers, timeout=self.timeout)
+        route, body = self._tagsRequest(entity, tags)
+        response = self._session.delete(f"{self.mcrit_server}/{route}/{int(entity_id)}/tags", json=body, headers=self.headers, timeout=self.timeout)
         if self.raw:
-            return response
+            return self._passthrough(response)
         data = self._handle(response)
         if data is not None:
             return data["tags"]
 
-    def getTags(self, entity: str):
+    def getTags(self, entity: str) -> Optional[Any]:
         """
         The distinct tags on families, samples or functions (<entity>), each with the number of entities carrying it (#53)
         """
         checkTagEntity(entity)
         response = self._session.get(f"{self.mcrit_server}/tags", params={"entity": entity}, headers=self.headers, timeout=self.timeout)
         if self.raw:
-            return response
+            return self._passthrough(response)
         data = self._handle(response)
         if data is not None:
             return data["tags"]
@@ -1284,16 +1285,18 @@ class McritClient:
             params["demote_generic_blocks"] = "true"
         return params
 
-    def _requestUniqueBlocks(self, url, params, exclude_picblockhashes):
+    def _requestUniqueBlocks(self, kind, selector, params, exclude_picblockhashes):
         # a negative set goes in a POST body: thousands of hashes do not fit a URL. Checked as the
         # server checks them, so a bad hash fails here rather than as a 400
         if exclude_picblockhashes is not None and not isinstance(exclude_picblockhashes, (list, tuple, set, frozenset)):
             raise ValueError("exclude_picblockhashes must be a list of picblockhashes")
         excluded = sorted({parseBlockHash(block_hash) for block_hash in exclude_picblockhashes or []})
         if excluded:
-            response = self._session.post(url, headers=self.headers, params=params, json={"exclude_picblockhashes": excluded}, timeout=self.timeout)
+            response = self._session.post(
+                f"{self.mcrit_server}/uniqueblocks/{kind}/{selector}", headers=self.headers, params=params, json={"exclude_picblockhashes": excluded}, timeout=self.timeout
+            )
         else:
-            response = self._session.get(url, headers=self.headers, params=params, timeout=self.timeout)
+            response = self._session.get(f"{self.mcrit_server}/uniqueblocks/{kind}/{selector}", headers=self.headers, params=params, timeout=self.timeout)
         if self.raw:
             return self._passthrough(response)
         return self._handle(response)
@@ -1319,7 +1322,7 @@ class McritClient:
         if isinstance(sample_ids, list) and all(isinstance(item, int) for item in sample_ids):
             sample_ids_as_str = ",".join([str(sample_id) for sample_id in sample_ids])
             params = self._getUniqueBlocksParams(covers_required, min_instructions, gentle_length_score, max_blocks_per_function, demote_generic_blocks)
-            result_data = self._requestUniqueBlocks(f"{self.mcrit_server}/uniqueblocks/samples/{sample_ids_as_str}", params, exclude_picblockhashes)
+            result_data = self._requestUniqueBlocks("samples", sample_ids_as_str, params, exclude_picblockhashes)
         else:
             raise ValueError("sample_ids must be a list of int.")
         return result_data
@@ -1341,7 +1344,7 @@ class McritClient:
         """
         if isinstance(family_id, int):
             params = self._getUniqueBlocksParams(covers_required, min_instructions, gentle_length_score, max_blocks_per_function, demote_generic_blocks)
-            result_data = self._requestUniqueBlocks(f"{self.mcrit_server}/uniqueblocks/family/{family_id}", params, exclude_picblockhashes)
+            result_data = self._requestUniqueBlocks("family", family_id, params, exclude_picblockhashes)
         else:
             raise ValueError("family_id must be an int.")
         return result_data
