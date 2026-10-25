@@ -409,6 +409,41 @@ class MemoryStorageTest(_MemoryStorageFixture, TestCase):
         self.storage.clearStorage()
         self.assertIsNone(self.storage.getSmdaExtras(entry_c.sample_id))
 
+    def testSha256VerifiedIsRecordedPerSample(self):
+        # #270: only a sample MCRIT disassembled from the bytes itself is verified; a submitted
+        # report is not, and a query sample is left unknown
+        self.storage.clearStorage()
+        report_a, report_b = self._twoReports()
+        from_report = self.storage.addSmdaReport(report_a)
+        from_binary = self.storage.addSmdaReport(report_b, sha256_verified=True)
+        assert from_report is not None and from_binary is not None
+        self.assertIs(False, from_report.sha256_verified)
+        self.assertIs(True, from_binary.sha256_verified)
+        for sample_entry, expected in ((from_report, False), (from_binary, True)):
+            stored = self.storage.getSampleById(sample_entry.sample_id)
+            by_sha256 = self.storage.getSampleBySha256(sample_entry.sha256)
+            assert stored is not None and by_sha256 is not None
+            self.assertIs(expected, stored.sha256_verified)
+            self.assertIs(expected, by_sha256.sha256_verified)
+            self.assertIs(expected, stored.toDict()["sha256_verified"])
+        self.assertEqual({False, True}, {sample_entry.sha256_verified for sample_entry in self.storage.getSamples(0, 0)})
+        query_report, _ = self._twoReports()
+        query_report.sha256 = 64 * "c"
+        query_entry = self.storage.addSmdaReport(query_report, isQuery=True, sha256_verified=True)
+        assert query_entry is not None
+        self.assertIsNone(query_entry.sha256_verified)
+
+    def testAnImportedSampleIsUnverifiedWhateverTheExportSays(self):
+        self.storage.clearStorage()
+        report_a, _ = self._twoReports()
+        exported = SampleEntry.fromDict(SampleEntry(report_a, sample_id=3, family_id=0, sha256_verified=True).toDict())
+        imported = self.storage.importSampleEntry(exported)
+        assert imported is not None
+        self.assertIs(False, imported.sha256_verified)
+        stored = self.storage.getSampleBySha256(report_a.sha256)
+        assert stored is not None
+        self.assertIs(False, stored.sha256_verified)
+
     def _actualFamilyCounts(self, family_id):
         samples = [s for s in self.storage.getSamples(0, 1000) if s.family_id == family_id]
         num_functions = sum(len(self.storage.getFunctionsBySampleId(s.sample_id) or []) for s in samples)
@@ -1604,6 +1639,16 @@ class MongoDbStorageTest(MemoryStorageTest):
             with self.assertRaisesRegex(RuntimeError, "counting failed"):
                 self.storage.importFunctionEntries(function_entries)
         self.assertFalse(self.storage.isPicHashCountIndexComplete())
+    def testASampleStoredBeforeSha256VerifiedReadsAsUnknown(self):
+        self.storage.clearStorage()
+        report_a, _ = self._twoReports()
+        sample_entry = self.storage.addSmdaReport(report_a)
+        assert sample_entry is not None
+        self.storage._getDb().samples.update_one({"sample_id": sample_entry.sample_id}, {"$unset": {"sha256_verified": ""}})
+        stored = self.storage.getSampleById(sample_entry.sample_id)
+        assert stored is not None
+        self.assertIsNone(stored.sha256_verified)
+        self.assertIsNone(stored.toDict()["sha256_verified"])
 
     def testAStrayExtrasChunkDoesNotBlockStoringTheExtras(self):
         # a chunk an interrupted store left behind under the same id must not cause a duplicate key
