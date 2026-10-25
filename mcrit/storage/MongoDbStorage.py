@@ -1923,7 +1923,7 @@ class MongoDbStorage(StorageInterface):
         minhashes_to_remove: Dict[int, Dict[int, List[int]]] = {band_number: {} for band_number in range(self._storage_config.STORAGE_NUM_BANDS)}
         num_hashed = 0
         for function_minhash in function_minhashes:
-            minhash_bytes = bytes.fromhex(function_minhash.get("minhash") or "")
+            minhash_bytes = self._minHashFromStorage(function_minhash.get("minhash"))
             # remove minhash entries, if necessary
             if not minhash_bytes:
                 continue
@@ -3201,10 +3201,9 @@ class MongoDbStorage(StorageInterface):
     def isFamilyId(self, family_id: int) -> bool:
         return bool(self._getDb().families.find_one({"family_id": family_id}))
 
-    @staticmethod
-    def _minHashUpdate(minhash: "MinHash", keep_composition: bool) -> Dict[str, Any]:
+    def _minHashUpdate(self, minhash: "MinHash", keep_composition: bool) -> Dict[str, Any]:
         """the fields addMinHash(es) sets on the function's document"""
-        update: Dict[str, Any] = {"minhash": minhash.getMinHash().hex()}
+        update: Dict[str, Any] = {"minhash": self._minHashForStorage(minhash.getMinHash())}
         if not keep_composition:
             update["minhash_shingle_composition"] = minhash.getComposition()
         return {"$set": update}
@@ -4889,7 +4888,7 @@ class MongoDbStorage(StorageInterface):
                 # does not fit the band projection: it stays stored, but is left out of the bands
                 kept_minhashes = []
                 for document in kept_documents:
-                    minhash_bytes = bytes.fromhex(document.get("minhash") or "")
+                    minhash_bytes = self._minHashFromStorage(document.get("minhash"))
                     if len(minhash_bytes) != signature_bytes:
                         num_unbandable += 1
                         continue
