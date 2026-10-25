@@ -3,6 +3,7 @@ import logging
 import os
 import time
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from typing import List, cast
 from unittest import TestCase
@@ -11,7 +12,7 @@ import pymongo
 import pytest
 
 from mcrit.config.QueueConfig import QueueConfig
-from mcrit.libs.mongoqueue import MongoQueue
+from mcrit.libs.mongoqueue import MongoQueue, _utcNow
 from mcrit.queue.QueueRemoteCalls import _createJobPayload, get_descriptor, rearrange_params
 
 from .context import getTestMongoServerAndPort
@@ -37,6 +38,7 @@ class MongoQueueTest(TestCase):
         queue_config.QUEUE_SERVER, queue_config.QUEUE_PORT = getTestMongoServerAndPort()
         queue_config.QUEUE_MONGODB_DBNAME = "test_queue"
         queue_config.QUEUE_MONGODB_COLLECTION_NAME = "queue_1"
+        self.queue_config = queue_config
         self.queue = MongoQueue(queue_config, "consumer_1")
 
     def tearDown(self):
@@ -312,6 +314,133 @@ class MongoQueueTest(TestCase):
         job = self.queue.next()
         self.assertEqual(job.attempts_left, self.queue.max_attempts - 1)
 
+    def _counters(self):
+        return {c["name"]: c for c in self.queue._getQueueCounters().find({"name": "test_method"}, {"_id": 0})}.get("test_method", {})
+
+    def test_delete_jobs_applies_every_date_filter(self):
+        """finished_before was dropped whenever created_before was given too, which deleted queued and running jobs as well."""
+        self.queue.put({"method": "test_method", "descriptor": "finished"})
+        self.queue.next().complete()
+        queued_id = self.queue.put({"method": "test_method", "descriptor": "queued"})
+        running_id = self.queue.put({"method": "test_method", "descriptor": "running"})
+        self.queue.next()
+        later = datetime.now() + timedelta(days=1)
+        self.assertEqual(1, self.queue.delete_jobs(created_before=later, finished_before=later))
+        self.assertEqual({queued_id, running_id}, {job.job_id for job in self.queue.get_jobs(0, 0)})
+        self.assertEqual(0, self.queue.delete_jobs(method="other_method", created_before=later, finished_before=later))
+        self.assertEqual(2, self.queue.delete_jobs(method="test_method", created_before=later))
+
+    def test_deleting_a_job_its_dependent_waits_for_lets_the_dependent_run(self):
+        """A cross compare's combine job stayed queued forever once a child was deleted before it finished."""
+        for delete in (lambda job_id: self.queue.delete_job(job_id), lambda job_id: self.queue.delete_jobs(method="child_method")):
+            child_id = self.queue.put({"method": "child_method", "descriptor": "child"}, priority=-1)
+            combine_id = self.queue.put({"method": "test_method", "descriptor": "combine"}, await_jobs=[str(child_id)])
+            self.assertEqual([str(child_id)], self.queue._getCollection().find_one({"_id": combine_id})["unfinished_dependencies"])
+            self.assertEqual(1, delete(child_id))
+            claimed = self.queue.next()
+            assert claimed is not None
+            self.assertEqual(combine_id, claimed.job_id)
+            claimed.complete()
+        # a finished child already let its dependents go, and deleting it changes nothing for them
+        child_id = self.queue.put({"method": "child_method", "descriptor": "child"})
+        self.queue.next().complete()
+        waiting_id = self.queue.put({"method": "test_method", "descriptor": "later"}, await_jobs=[str(child_id)])
+        self.queue.delete_job(child_id)
+        self.assertEqual(waiting_id, self.queue.next().job_id)
+
+    def test_a_released_job_ignores_what_its_former_holder_writes_late(self):
+        """complete(), error() and release() took effect on whatever the job had become since."""
+        other = MongoQueue(self.queue_config, "consumer_2")
+        self.queue.put({"method": "test_method", "descriptor": "d"})
+        late = self.queue.next()
+        late.release()
+        current = other.next()
+        assert current is not None
+        self.assertEqual(late.job_id, current.job_id)
+        late.error("late")
+        late.release()
+        self.assertIsNone(late.complete("late result"))
+        document = self.queue._getCollection().find_one({"_id": late.job_id})
+        self.assertEqual(
+            ("consumer_2", None, None, self.queue.max_attempts - 1), (document["locked_by"], document["finished_at"], document["last_error"], document["attempts_left"])
+        )
+        current.complete("result")
+        document = self.queue._getCollection().find_one({"_id": late.job_id})
+        self.assertEqual("result", document["result"])
+        self.assertEqual((0, 0, 1), (self._counters()["in_progress"], self._counters()["queued"], self._counters()["finished"]))
+
+    def test_a_job_process_and_the_worker_that_spawned_it_count_one_attempt(self):
+        """A SpawningWorker's job process errors the job, and the worker errored it again: two attempts
+        per failure, a job ending at attempts_left -1 that counted as queued forever, and in between a
+        released job the worker's second error() unlocked under whoever had taken it meanwhile."""
+        self.queue.put({"method": "test_method", "descriptor": "d"})
+        worker_side = self.queue.next()
+        for attempt in range(1, self.queue.max_attempts + 1):
+            job_process_side = self.queue.get_job(worker_side.job_id)
+            job_process_side.error(f"failed in the job process {attempt}")
+            worker_side.error("child worker exited without producing a result_id")
+            document = self.queue._getCollection().find_one({"_id": worker_side.job_id})
+            self.assertEqual((self.queue.max_attempts - attempt, f"failed in the job process {attempt}"), (document["attempts_left"], document["last_error"]))
+            worker_side = self.queue.next()
+            if attempt < self.queue.max_attempts:
+                self.assertEqual(document["_id"], worker_side.job_id)
+        self.assertIsNone(worker_side)
+        self.assertEqual("failed", self.queue._identifyJobState(document))
+        self.assertEqual((0, 0, 1), (self._counters()["in_progress"], self._counters()["queued"], self._counters()["failed"]))
+
+    def test_a_job_finished_by_its_job_process_is_counted_once(self):
+        self.queue.put({"method": "test_method", "descriptor": "d"})
+        worker_side = self.queue.next()
+        self.queue.get_job(worker_side.job_id).complete("result")
+        worker_side.result = "result"
+        # the usual way a spawning worker's job ends: nothing to warn about
+        with unittest.mock.patch("mcrit.libs.mongoqueue.LOGGER.warning") as warning:
+            worker_side.complete()
+        warning.assert_not_called()
+        self.assertEqual((0, 1), (self._counters()["in_progress"], self._counters()["finished"]))
+
+    def test_a_job_process_that_died_before_notifying_has_its_dependents_released(self):
+        """The job process finished the job and died before telling the jobs that wait on it; the
+        spawning worker's own completion used to do that a second time, and still does."""
+        child_id = self.queue.put({"method": "test_method", "descriptor": "child"}, priority=1)
+        combine_id = self.queue.put({"method": "test_method", "descriptor": "combine"}, await_jobs=[str(child_id)])
+        worker_side = self.queue.next()
+        self.assertEqual(child_id, worker_side.job_id)
+        job_process_side = self.queue.get_job(child_id)
+        with unittest.mock.patch.object(self.queue, "_notify_dependent_jobs", side_effect=RuntimeError("died")):
+            with self.assertRaises(RuntimeError):
+                job_process_side.complete()
+        self.assertIsNone(self.queue.next())
+        worker_side.complete()
+        self.assertEqual(combine_id, self.queue.next().job_id)
+
+    def test_clear_leaves_the_files_of_other_queues_alone(self):
+        other_config = QueueConfig()
+        other_config.QUEUE_SERVER, other_config.QUEUE_PORT = self.queue_config.QUEUE_SERVER, self.queue_config.QUEUE_PORT
+        other_config.QUEUE_MONGODB_DBNAME = self.queue_config.QUEUE_MONGODB_DBNAME
+        other_config.QUEUE_MONGODB_COLLECTION_NAME = "queue_2"
+        other = MongoQueue(other_config, "consumer_2")
+        other_job_id = other.put({"method": "test_method", "descriptor": "d"})
+        other_result = other._dicts_to_grid({"result": 1}, metadata={"result": True, "job": str(other_job_id)})
+        own_job_id = self.queue.put({"method": "test_method", "descriptor": "d"})
+        own_result = self.queue._dicts_to_grid({"result": 2}, metadata={"result": True, "job": str(own_job_id)})
+        self.queue.clear()
+        self.assertEqual({"result": 1}, other._grid_to_dicts(other_result))
+        self.assertIsNone(self.queue._grid_to_dicts(own_result))
+
+    def test_clear_drops_the_files_and_results_in_gridfs(self):
+        """clear() dropped a collection named "fs", which GridFS doesn't use: POST /respawn left every result and query binary behind."""
+        self.queue._file_to_grid(b"binary", metadata={"jobs": [], "tmp_lock": 0, "sha256": "a"})
+        self.queue._dicts_to_grid({"result": 1}, metadata={"result": True, "job": "0" * 24})
+        database = self.queue._getCollection().database
+        self.assertEqual((2, 2), (database["fs.files"].count_documents({}), database["fs.chunks"].count_documents({})))
+        self.queue.clear()
+        self.assertEqual((0, 0), (database["fs.files"].count_documents({}), database["fs.chunks"].count_documents({})))
+        # and the queue keeps working, files included
+        self.assertIn("metadata.sha256_1", database["fs.files"].index_information())
+        file_id = self.queue._file_to_grid(b"again")
+        self.assertEqual(b"again", self.queue._grid_to_file(file_id, results_only=False))
+
     def test_context_manager_complete(self):
         self.queue.put({"method": "test_method", "context_id": "alpha", "data": [1, 2, 3], "more-data": time.time()})
         job = self.queue.next()
@@ -354,7 +483,10 @@ class WorkerLivenessTest(TestCase):
         return document
 
     def _age_heartbeat(self, consumer_id, seconds):
-        self.worker_a._getQueueCounters().update_one({"name": "workers"}, {"$set": {f"heartbeats.{consumer_id}": datetime.now() - timedelta(seconds=seconds)}})
+        age = timedelta(seconds=seconds)
+        self.worker_a._getQueueCounters().update_one(
+            {"name": "workers"}, {"$set": {f"heartbeats.{consumer_id}": datetime.now() - age, f"heartbeats_utc.{consumer_id}": _utcNow() - age}}
+        )
 
     def _claimed_by(self, queue, descriptor="d"):
         queue.put({"method": "test_method", "descriptor": descriptor})
@@ -383,12 +515,12 @@ class WorkerLivenessTest(TestCase):
         # a registration without any heartbeat is a process from before heartbeats existed
         # (a rolling upgrade): it is stamped now and gets one timeout of grace before it is
         # judged like everybody else
-        self.worker_a._getQueueCounters().update_one({"name": "workers"}, {"$unset": {"heartbeats.Worker-a": ""}})
+        self.worker_a._getQueueCounters().update_one({"name": "workers"}, {"$unset": {"heartbeats.Worker-a": "", "heartbeats_utc.Worker-a": ""}})
         self.worker_a._stopHeartbeatThread()
         self.assertEqual({"Worker-a"}, self.server._live_worker_ids())
         self.assertIsInstance(self._registration()["heartbeats"]["Worker-a"], datetime)
-        self.assertEqual({"Worker-a"}, self.server._live_worker_ids(now=datetime.now() + timedelta(seconds=self.timeout - 1)))
-        self.assertEqual(set(), self.server._live_worker_ids(now=datetime.now() + timedelta(seconds=self.timeout + 1)))
+        self.assertEqual({"Worker-a"}, self.server._live_worker_ids(now=_utcNow() + timedelta(seconds=self.timeout - 1)))
+        self.assertEqual(set(), self.server._live_worker_ids(now=_utcNow() + timedelta(seconds=self.timeout + 1)))
 
     def test_the_heartbeat_keeps_going_while_a_job_runs(self):
         """jobs run synchronously in the poll loop, so a job longer than the timeout would look
@@ -465,8 +597,58 @@ class WorkerLivenessTest(TestCase):
         self.assertEqual(job.job_id, self.server.get_cached_job_id(payload))
         # a finished job is served whatever its worker's state
         self.worker_b.next().complete()
-        self.worker_b._getQueueCounters().update_one({"name": "workers"}, {"$set": {"heartbeats.Worker-b": datetime.now() - timedelta(seconds=self.timeout + 1)}})
+        self._age_heartbeat("Worker-b", self.timeout + 1)
         self.assertEqual(job.job_id, self.server.get_cached_job_id(payload))
+
+    def _in_time_zone(self, zone):
+        previous = os.environ.get("TZ")
+        os.environ["TZ"] = zone
+        time.tzset()
+
+        def restore():
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        self.addCleanup(restore)
+
+    def test_heartbeats_from_another_time_zone_are_judged_by_their_age(self):
+        """Heartbeats were compared in local time: a worker west of the server looked dead and lost its
+        jobs, one east of it looked alive hours after it died, and so did every worker over a DST change."""
+        self._in_time_zone("UTC+10")  # POSIX: ten hours west of UTC
+        self.worker_a._getCollection()
+        self.worker_a._stopHeartbeatThread()  # so that only the aging below moves the heartbeat
+        self._in_time_zone("UTC-10")  # the server, ten hours east of UTC
+        self.assertEqual({"Worker-a"}, self.server._live_worker_ids())
+        self._age_heartbeat("Worker-a", self.timeout + 1)
+        self.assertEqual(set(), self.server._live_worker_ids())
+
+    def test_a_worker_of_an_older_release_is_judged_by_its_local_heartbeat(self):
+        """Such a worker writes only the local-time heartbeat; it is compared as before, not mistaken for one without any."""
+        self.worker_a._getCollection()
+        self.worker_a._stopHeartbeatThread()
+        counters = self.worker_a._getQueueCounters()
+        counters.update_one({"name": "workers"}, {"$unset": {"heartbeats_utc.Worker-a": ""}})
+        self._in_time_zone("UTC-10")
+        counters.update_one({"name": "workers"}, {"$set": {"heartbeats.Worker-a": datetime.now()}})
+        self.assertEqual({"Worker-a"}, self.server._live_worker_ids())
+        counters.update_one({"name": "workers"}, {"$set": {"heartbeats.Worker-a": datetime.now() - timedelta(seconds=self.timeout + 1)}})
+        self.assertEqual(set(), self.server._live_worker_ids())
+        self.assertNotIn("Worker-a", self._registration().get("heartbeats_utc", {}))
+        # a dead registration goes with both of its heartbeats
+        self._age_heartbeat("Worker-a", self.timeout + 1)
+        self.server.release_orphaned_jobs()
+        registration = self._registration()
+        self.assertNotIn("Worker-a", registration.get("heartbeats", {}))
+        self.assertNotIn("Worker-a", registration.get("heartbeats_utc", {}))
+
+    def test_a_utc_heartbeat_an_older_release_left_behind_is_dropped(self):
+        """An older release drops only the local heartbeat of a dead worker."""
+        self.worker_a._getQueueCounters().update_one({"name": "workers"}, {"$set": {"heartbeats_utc.Worker-gone": _utcNow()}}, upsert=True)
+        self.server.release_orphaned_jobs()
+        self.assertNotIn("Worker-gone", self._registration().get("heartbeats_utc", {}))
 
     def test_polling_refreshes_the_heartbeat_and_reclaims_periodically(self):
         stranded = self._claimed_by(self.worker_a)

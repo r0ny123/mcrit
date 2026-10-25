@@ -10,7 +10,7 @@ import uuid
 from collections import defaultdict
 from copy import copy, deepcopy
 from itertools import zip_longest
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from packaging import version as packaging_version
 from picblocks.blockhasher import BlockHasher
@@ -23,7 +23,7 @@ from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
 from mcrit.storage.FunctionLabelEntry import FunctionLabelEntry
 from mcrit.storage.MatchingCache import MatchingCache, StorageBackedMatchingCache
-from mcrit.storage.SampleEntry import SampleEntry
+from mcrit.storage.SampleEntry import TIMESTAMP_FORMAT, SampleEntry
 from mcrit.storage.StorageInterface import BinaryStream, StorageInterface
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -110,16 +110,20 @@ class MemorySearchTranspiler(BaseVisitor):
 
             return check_regex
 
-        if node.field in ("pichash", "offset") or node.field.endswith("_id") or "num_" in node.field:
-            try:
-                value = int(value, 0)
-            except Exception:
-                pass
+        compared: Any = node.numericValue() if node.isNumeric() else value
 
         chosen_operator = string_to_operator[node.operator]
+        is_ordering = node.operator in ("<", "<=", ">", ">=")
 
         def compare(entry):
-            return chosen_operator(_get_field(entry, node.field), value)
+            entry_value = _get_field(entry, node.field)
+            if isinstance(entry_value, datetime.datetime):
+                # compared as stored in MongoDB: as text, which orders like the datetime
+                entry_value = entry_value.strftime(TIMESTAMP_FORMAT)
+            if is_ordering and (entry_value is None or compared is None):
+                # nothing orders against a missing value, as in MongoDB
+                return False
+            return chosen_operator(entry_value, compared)
 
         return compare
 
@@ -136,6 +140,8 @@ class MemoryStorage(StorageInterface):
     _counters: Dict[str, int]
     _sample_by_sha256: Dict[str, int]
     _sample_id_to_function_ids: Dict[int, List[int]]
+    # the SMDA report's extras by sample id, kept apart from the entries as MongoDB does (#94)
+    _smda_extras: Dict[int, Dict[str, Any]]
 
     def __init__(self, config: "McritConfig") -> None:
         super().__init__(config)  # sets config
@@ -156,6 +162,7 @@ class MemoryStorage(StorageInterface):
         self._functions = {}
         self._query_samples = {}
         self._query_functions = {}
+        self._smda_extras = {}
         self._pichashes = {}
         self._bands = {band_number: {} for band_number in range(self._storage_config.STORAGE_NUM_BANDS)}
         self._minhash_versions: Dict[int, str] = {}
@@ -201,10 +208,12 @@ class MemoryStorage(StorageInterface):
             return False
         function_ids = self._sample_id_to_function_ids[sample_id]
         if sample_id < 0:
+            # a query sample and its functions are kept apart from the regular ones
             for function_id in function_ids:
-                del self._functions[function_id]
+                self._query_functions.pop(function_id, None)
             del self._sample_id_to_function_ids[sample_id]
-            del self._samples[sample_id]
+            self._query_samples.pop(sample_id, None)
+            self._smda_extras.pop(sample_id, None)
             return True
         for function_id in function_ids:
             function_entry = self._functions[function_id]
@@ -238,6 +247,7 @@ class MemoryStorage(StorageInterface):
         self._updateFamilyStats(sample_entry.family_id, -1, -len(function_ids), -int(sample_entry.is_library))
         # remove sample
         del self._samples[sample_id]
+        self._smda_extras.pop(sample_id, None)
         self.deleteSampleBinary(sample_id)
         if sample_entry.family_id != 0 and not any(s.family_id == sample_entry.family_id for s in self._samples.values()):
             self._families.pop(sample_entry.family_id, None)
@@ -435,6 +445,22 @@ class MemoryStorage(StorageInterface):
         self._minhash_shingler_revisions.pop(sample_id, None)
         return num_hashed
 
+    def deleteRehashableMinHashes(self, progress_reporter=None) -> Set[int]:
+        self._bands = {band_number: {} for band_number in self._bands}
+        kept_sample_ids: Set[int] = set()
+        for function_entry in self._functions.values():
+            minhash = function_entry.getMinHash(self._minhash_config.MINHASH_SIGNATURE_BITS)
+            if not minhash or not minhash.hasMinHash():
+                continue
+            if function_entry.xcfg:
+                function_entry.minhash = b""
+                function_entry.minhash_shingle_composition = {}
+            else:
+                # no disassembly to compute it from again: kept, and banded again
+                self.addMinHash(minhash)
+                kept_sample_ids.add(function_entry.sample_id)
+        return kept_sample_ids
+
     def deleteAllMinHashes(self, progress_reporter=None) -> int:
         num_deleted = 0
         for sample_id in list(self._samples):
@@ -442,9 +468,10 @@ class MemoryStorage(StorageInterface):
         self._bands = {band_number: {} for band_number in self._bands}
         return num_deleted
 
-    def setMinHashVersionForSamples(self, smda_version: str, sample_ids: Optional[List[int]] = None) -> None:
+    def setMinHashVersionForSamples(self, smda_version: str, sample_ids: Optional[List[int]] = None, except_sample_ids: Optional[Iterable[int]] = None) -> None:
+        excepted = set(except_sample_ids or [])
         for sample_id in list(self._samples) if sample_ids is None else sample_ids:
-            if sample_id in self._samples:
+            if sample_id in self._samples and sample_id not in excepted:
                 self._minhash_versions[sample_id] = smda_version
                 self._minhash_shingler_revisions[sample_id] = MINHASH_SHINGLER_REVISION
 
@@ -461,12 +488,16 @@ class MemoryStorage(StorageInterface):
         if family_id not in self._families:
             return False
         sample_entries = self.getSamplesByFamilyId(family_id) or []
+        if not keep_samples:
+            # while the family still exists: deleteSample updates its counts
+            for sample_entry in sample_entries:
+                self.deleteSample(sample_entry.sample_id)
         if family_id == 0:
             self._families[0].num_samples = 0
             self._families[0].num_functions = 0
             self._families[0].num_library_samples = 0
         else:
-            self._families.pop(family_id)
+            self._families.pop(family_id, None)
         if keep_samples:
             for sample_entry in sample_entries:
                 self._samples[sample_entry.sample_id].family_id = 0
@@ -480,13 +511,10 @@ class MemoryStorage(StorageInterface):
             self._families[0].num_samples += len(sample_entries)
             self._families[0].num_functions += len(function_ids_to_modify)
             self._families[0].num_library_samples += len([s for s in sample_entries if s.is_library])
-        else:
-            for sample_entry in sample_entries:
-                self.deleteSample(sample_entry.sample_id)
         self._updateDbState()
         return True
 
-    def updateFunctionLabels(self, smda_report: "SmdaReport", username: str) -> Optional["SampleEntry"]:
+    def updateFunctionLabels(self, smda_report: "SmdaReport", username: str, checked: bool = False) -> Optional["SampleEntry"]:
         assert smda_report.sha256 is not None
         sample_entry = self.getSampleBySha256(smda_report.sha256)
         if not sample_entry:
@@ -494,9 +522,9 @@ class MemoryStorage(StorageInterface):
         # check which functions in the SmdaReport have suitable function_names
         extracted_labels = {}
         for smda_function in smda_report.getFunctions():
-            function_name = smda_function.function_name
-            if function_name and smda_function.offset is not None and not re.match("sub_[a-fA-F0-9]{1,16}", function_name):
-                extracted_labels[smda_function.offset] = function_name
+            label = FunctionLabelEntry.labelFromReport(smda_function.function_name, checked=checked)
+            if label is not None and smda_function.offset is not None:
+                extracted_labels[smda_function.offset] = label
         # get the respective FunctionEntries and check if the label is novel
         sample_function_entries = {entry.offset: entry for entry in self.getFunctionsBySampleId(sample_entry.sample_id) or []}
         for label_offset, extracted_label in extracted_labels.items():
@@ -520,6 +548,7 @@ class MemoryStorage(StorageInterface):
         if isQuery:
             sample_entry = SampleEntry(smda_report, sample_id=-1 * self._useCounter("query_samples"), family_id=0)
             self._query_samples[sample_entry.sample_id] = sample_entry
+            self._smda_extras[sample_entry.sample_id] = SampleEntry.smdaExtrasOf(smda_report)
             function_ids = []
             for smda_function in smda_report.getFunctions():
                 function_entry = self._addFunction(sample_entry, smda_function, isQuery=True)
@@ -531,6 +560,7 @@ class MemoryStorage(StorageInterface):
                 sample_entry = SampleEntry(smda_report, sample_id=self._useCounter("samples"), family_id=family_id)
                 self._samples[sample_entry.sample_id] = sample_entry
                 self._sample_by_sha256[sample_entry.sha256] = sample_entry.sample_id
+                self._smda_extras[sample_entry.sample_id] = SampleEntry.smdaExtrasOf(smda_report)
                 function_ids = []
                 for smda_function in smda_report.getFunctions():
                     function_entry = self._addFunction(sample_entry, smda_function)
@@ -548,9 +578,26 @@ class MemoryStorage(StorageInterface):
             self._samples[sample_id] = sample_entry
             self._sample_by_sha256[sample_entry.sha256] = sample_id
             self._updateFamilyStats(sample_entry.family_id, +1, sample_entry.statistics["num_functions"], int(sample_entry.is_library))
-        else:
-            LOGGER.warning("Sample %s already existed, skipping.", sample_entry.sha256)
-        return sample_entry
+            return sample_entry
+        # the entry still carries the id it had in the export, which here may well be another sample's
+        LOGGER.warning("Sample %s already existed, skipping.", sample_entry.sha256)
+        return None
+
+    def discardImportedSample(self, sample_entry: "SampleEntry") -> None:
+        sample_id = sample_entry.sample_id
+        stored = self._samples.get(sample_id)
+        # only the sample this entry was imported as, as MongoDbStorage does
+        if stored is None or stored.sha256 != sample_entry.sha256:
+            return
+        for function_id in self._sample_id_to_function_ids.pop(sample_id, []):
+            function_entry = self._functions.pop(function_id, None)
+            if function_entry is not None and function_entry.pichash:
+                self._pichashes.get(function_entry.pichash, set()).discard((function_entry.family_id, sample_id, function_id))
+        del self._samples[sample_id]
+        self._sample_by_sha256.pop(sample_entry.sha256, None)
+        # the mirror of importSampleEntry's increment; the family stays, as in MongoDbStorage
+        self._updateFamilyStats(sample_entry.family_id, -1, -sample_entry.statistics["num_functions"], -int(sample_entry.is_library))
+        self._updateDbState()
 
     def importFunctionEntry(self, function_entry: "FunctionEntry") -> Optional["FunctionEntry"]:
         function_entry.function_id = self._useCounter("functions")
@@ -749,6 +796,14 @@ class MemoryStorage(StorageInterface):
             self._families[family_id] = FamilyEntry(family_name=family_name, family_id=family_id)
         return family_id
 
+    def getFunctionsByIds(self, function_ids: List[int]) -> Dict[int, "FunctionEntry"]:
+        function_entries = {}
+        for function_id in function_ids:
+            function_entry = self.getFunctionById(function_id, with_xcfg=False)
+            if function_entry:
+                function_entries[function_id] = function_entry
+        return function_entries
+
     def getFunctionById(self, function_id: int, with_xcfg=False) -> Optional["FunctionEntry"]:
         function_entry = None
         if function_id < 0:
@@ -801,6 +856,13 @@ class MemoryStorage(StorageInterface):
             return deepcopy(self._samples[sample_id])
         if sample_id in self._query_samples:
             return deepcopy(self._query_samples[sample_id])
+
+    def _deleteSmdaExtras(self, sample_id: int) -> None:
+        self._smda_extras.pop(sample_id, None)
+
+    def getSmdaExtras(self, sample_id: int) -> Optional[Dict[str, Any]]:
+        extras = self._smda_extras.get(sample_id)
+        return deepcopy(extras) if extras is not None else None
 
     def getSampleEntriesByIds(self, sample_ids: List[int]) -> Dict[int, "SampleEntry"]:
         entries = {}
@@ -962,6 +1024,8 @@ class MemoryStorage(StorageInterface):
             "samples": {sample_id: sample.toDict() for sample_id, sample in self._samples.items()},
             "functions": {function_id: function.toDict() for function_id, function in self._functions.items()},
             "bands": self._bands,
+            # query samples are not saved, so neither are their extras
+            "smda_extras": {sample_id: extras for sample_id, extras in self._smda_extras.items() if sample_id >= 0},
             # kept binaries (#95) travel with the rest; base64, as the content is carried as JSON
             "sample_binaries": {
                 sha256: {"binary": base64.b64encode(binary).decode("ascii"), "sample_ids": sorted(sample_ids)} for sha256, (binary, sample_ids) in self._sample_binaries.items()
@@ -974,6 +1038,8 @@ class MemoryStorage(StorageInterface):
         self._families = {int(k): FamilyEntry.fromDict(v) for k, v in content["families"].items()}
         self._samples = {int(k): SampleEntry.fromDict(v) for k, v in content["samples"].items()}
         self._bands = {int(k): {int(ik): iv for ik, iv in v.items()} for k, v in content["bands"].items()}
+        # content saved before #94 has no extras
+        self._smda_extras = {int(k): v for k, v in content.get("smda_extras", {}).items()}
         self._sample_by_sha256 = {sample.sha256: sample_id for sample_id, sample in self._samples.items()}
         # content saved before binaries were kept has none
         self._sample_binaries = {
@@ -1187,9 +1253,14 @@ class MemoryStorage(StorageInterface):
     def _get_sort_key_from_cursor(full_cursor: Optional[FullSearchCursor]):
         assert full_cursor is not None
 
-        # Mapping entry -> tuple to sort by
+        # Mapping entry -> tuple to sort by; a datetime is sorted as the text MongoDB stores, which
+        # also leaves out its time zone, so naive and aware timestamps sort together
+        def get_value(entry, field):
+            value = _get_field(entry, field)
+            return value.strftime(TIMESTAMP_FORMAT) if isinstance(value, datetime.datetime) else value
+
         def get_tuple_from_entry(entry):
-            return tuple(_get_field(entry, field) for field in full_cursor.sort_fields)
+            return tuple(get_value(entry, field) for field in full_cursor.sort_fields)
 
         # custom tuple compare function considering sort direction per dimension
         is_backward_search = not full_cursor.is_forward_search
@@ -1201,7 +1272,7 @@ class MemoryStorage(StorageInterface):
                 val1 = tuple1[i]
                 val2 = tuple2[i]
                 if val1 == val2:
-                    pass
+                    continue
                 if val1 is None:
                     return -direction
                 if val2 is None:
