@@ -421,6 +421,8 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             function_entry_dicts = json.loads(inflated)
             del inflated
         sample_entry = SampleEntry.fromDict(sample_entry_dict)
+        # an export is data from elsewhere: a tag this instance would not accept is dropped (#53)
+        sample_entry.tags = normalizeTags(sample_entry.tags, drop_invalid=True)[:MAX_TAGS_PER_ENTITY]
         if sample_entry.family_id not in family_names:
             raise ImportRejected(f"sample {sample_sha256} names family {sample_entry.family_id}, which the export does not hold")
         # the fields stored as they are read; family_id and sample_id are this instance's, and the
@@ -448,6 +450,7 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         function_entries = []
         for function_entry_dict in (function_entry_dicts or {}).values():
             function_entry = FunctionEntry.fromDict(function_entry_dict)
+            function_entry.tags = normalizeTags(function_entry.tags, drop_invalid=True)[:MAX_TAGS_PER_ENTITY]
             # the storage keys its pichash index by it
             # null as FunctionEntry stores a function without one
             if function_entry.pichash is None:
