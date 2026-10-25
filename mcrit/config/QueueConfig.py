@@ -37,6 +37,11 @@ class QueueConfig(ConfigInterface):
     # submission, minhash updates: an interruption could split minhashes from their band postings) or
     # to corpus maintenance (rebuild*, recalculate*, repair*, deletions, cleanup). Needs SIGALRM (POSIX).
     QUEUE_WORKER_JOB_TIMEOUT: int = 60 * 60
+    # Seconds after which the claim a job holds on a sample whose analysis it replaces by its
+    # uploaded binary's counts as abandoned, so that another upload takes it over (#270). The claim
+    # of a job the queue shows finished or failed is taken over at once; this is for one it still
+    # shows running, such as a job whose worker died before the queue noticed.
+    QUEUE_VERIFICATION_CLAIM_TIMEOUT: int = 60 * 60
     # Memory, in bytes, a job run by a SpawningWorker may hold before it is stopped; 0 is no limit.
     # Measured as the resident size of the job's process and everything it started, such as its
     # hashing pool, once a second. A job over it is killed and fails like any failing job instead
