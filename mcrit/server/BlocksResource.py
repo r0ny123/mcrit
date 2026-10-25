@@ -45,11 +45,13 @@ class BlocksResource:
 
     @timing
     def on_get_unique_blocks_for_family(self, req, resp, family_id: int):
+        """Schedule a job that finds the basic blocks unique to the family's samples; ``covers_required`` (k of the k-of-n cover), ``min_instructions`` (drop shorter blocks) and the opt-in ``gentle_length_score``, ``max_blocks_per_function`` and ``demote_generic_blocks``. Answers the job id."""
         db_log_msg(self.index, req, "BlocksResource.on_get_unique_blocks_for_family")
         self._uniqueBlocksForFamily(req, resp, family_id, getUniqueBlocksParams(req.params))
 
     @timing
     def on_get_unique_blocks_for_samples(self, req, resp, comma_separated_sample_ids=None):
+        """Schedule a job that finds the basic blocks unique to the comma separated sample ids; parameters as for ``/uniqueblocks/family/{family_id}``. Answers the job id."""
         db_log_msg(self.index, req, "BlocksResource.on_get_unique_blocks")
         self._uniqueBlocksForSamples(req, resp, comma_separated_sample_ids, getUniqueBlocksParams(req.params))
 
@@ -57,6 +59,7 @@ class BlocksResource:
 
     @timing
     def on_post_unique_blocks_for_family(self, req, resp, family_id: int):
+        """As GET, with a JSON body ``{"exclude_picblockhashes": [...]}``: blocks with these hashes are left out of the cover (#283). Answers the job id."""
         db_log_msg(self.index, req, "BlocksResource.on_post_unique_blocks_for_family")
         parameters = self._postParams(req, resp, "on_post_unique_blocks_for_family")
         if parameters is not None:
@@ -64,6 +67,7 @@ class BlocksResource:
 
     @timing
     def on_post_unique_blocks_for_samples(self, req, resp, comma_separated_sample_ids=None):
+        """As GET, with a JSON body ``{"exclude_picblockhashes": [...]}``: blocks with these hashes are left out of the cover (#283). Answers the job id."""
         db_log_msg(self.index, req, "BlocksResource.on_post_unique_blocks")
         parameters = self._postParams(req, resp, "on_post_unique_blocks")
         if parameters is not None:
