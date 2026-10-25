@@ -10,6 +10,7 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 import pytest
+from bson import Binary
 from smda.common.SmdaReport import SmdaReport
 
 from mcrit.config.McritConfig import McritConfig
@@ -83,8 +84,8 @@ class VerifyCorpusTest(TestCase):
         reported_id, uploaded_id = self.reported.sample_id, self.uploaded.sample_id
         # a report whose statistics claim functions it does not have
         db.samples.update_one({"sample_id": uploaded_id}, {"$set": {"statistics.num_functions": 99}})
-        # a minhash of another signature
-        db.functions.update_one({"sample_id": reported_id, "minhash": {"$ne": ""}}, {"$set": {"minhash": "00ff"}})
+        # a minhash of another signature, as BSON binary the way minhashes are stored since #256
+        db.functions.update_one({"sample_id": reported_id, "minhash": {"$ne": ""}}, {"$set": {"minhash": Binary(b"\x00\xff")}})
         # a function an import attached to a sample id that is not there
         db.functions.insert_one({"function_id": 10**6, "sample_id": 4242, "family_id": 0, "offset": 0, "minhash": ""})
         # a family whose counter drifted
