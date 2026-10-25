@@ -171,7 +171,7 @@ class SampleResource:
         try:
             summary = self.index.addReportJson(req.media, username=username)
         except ValueError as error:
-            # a report smda refuses as malformed, or one stating a sha256 that is not 64 hex digits
+            # a report smda refuses as malformed, or one stating a sha256 that is not 64 hex digits or a pic_hash that cannot be stored
             resp.data = jsonify({"status": "failed", "data": {"message": f"SMDA report rejected: {error}"}})
             resp.status = falcon.HTTP_400
             db_log_msg(self.index, req, "SampleResource.on_post_collection - failed - report rejected.")
