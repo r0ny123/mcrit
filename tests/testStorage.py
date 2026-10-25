@@ -1639,6 +1639,7 @@ class MongoDbStorageTest(MemoryStorageTest):
             with self.assertRaisesRegex(RuntimeError, "counting failed"):
                 self.storage.importFunctionEntries(function_entries)
         self.assertFalse(self.storage.isPicHashCountIndexComplete())
+
     def testASampleStoredBeforeSha256VerifiedReadsAsUnknown(self):
         self.storage.clearStorage()
         report_a, _ = self._twoReports()
