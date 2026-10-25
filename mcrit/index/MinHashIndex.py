@@ -1005,6 +1005,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
             return
         sample_entry_a = storage.getSampleById(function_entry_a.sample_id)
         sample_entry_b = storage.getSampleById(function_entry_b.sample_id)
+        if sample_entry_a is None or sample_entry_b is None:
+            # a function whose sample document is gone (#270) cannot be reported, as in matching
+            return
         minhash_a = function_entry_a.getMinHash(minhash_bits=self._minhash_config.MINHASH_SIGNATURE_BITS)
         minhash_b = function_entry_b.getMinHash(minhash_bits=self._minhash_config.MINHASH_SIGNATURE_BITS)
 
