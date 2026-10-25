@@ -1745,14 +1745,17 @@ class MongoDbStorage(StorageInterface):
         function it can find has to be counted in both by then. An insert that fails removes what it
         wrote; should that fail as well, or the pichash counting itself, functions may be stored
         without their pichashes being counted, and the count index is marked incomplete instead: the
-        discard then leaves the counts alone, and rebuildPicHashCountIndex counts what is stored. A
-        family counter that fails - one that would overflow, say - takes back the functions with their
+        discard then leaves the counts alone, and rebuildPicHashCountIndex counts what is stored.
+        Functions whose pichashes could not be counted are removed again as well, since no family has
+        counted them yet, and the discard would take them off their family all the same. A family
+        counter that fails - one that would overflow, say - takes back the functions with their
         pichash counts, so that the discard finds none of them, and once they are gone the families
         counted before it. Should removing the functions fail, those families stay raised for the
         discard to take off what it finds, and the count index is marked incomplete.
         """
         function_ids = [function_dict["function_id"] for function_dict in function_dicts]
         may_be_uncounted = True
+        is_stored = False
         try:
             try:
                 self._insertXcfgDocuments(function_dicts)
@@ -1762,11 +1765,18 @@ class MongoDbStorage(StorageInterface):
                 self._discardFunctions(function_ids)
                 may_be_uncounted = False
                 raise
+            is_stored = True
             self._addToPicHashCounts(function_dicts)
             may_be_uncounted = False
         except Exception:
             if may_be_uncounted:
                 self._markPicHashCountsUntrusted()
+            if is_stored:
+                # their families are not counted yet, so the discard must not find them
+                try:
+                    self._discardFunctions(function_ids)
+                except Exception:
+                    LOGGER.exception("Could not remove the functions of a failed import, their families may be counted short until recomputed.")
             raise
         counted_families = []
         try:

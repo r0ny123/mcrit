@@ -1255,6 +1255,43 @@ class MongoDbStorageTest(MemoryStorageTest):
         self.storage.rebuildPicHashCountIndex()
         self.assertEqual(10, len(self._picHashCountDocuments()))
 
+    def testAFailedPicHashCountLeavesEveryFamilyAsItWasAfterTheDiscard(self):
+        # the counting fails after the insert, before any family counter is raised: functions left
+        # stored would be taken off their families by the discard, which never counted them. Memory
+        # storage has no such step, it counts each family before storing the function
+        self.storage.clearStorage()
+        source, other_family_id = self._storeASampleAndAnotherFamily()
+        families_before = self._familyCounters()
+        imported, function_entries = self._importTwoSampleEntries(source, other_family_id)
+
+        with patch.object(self.storage, "_addToPicHashCounts", side_effect=RuntimeError("counting failed")):
+            with self.assertRaisesRegex(RuntimeError, "counting failed"):
+                self.storage.importFunctionEntries(function_entries)
+        self.assertFalse(self.storage.isPicHashCountIndexComplete())
+        for imported_entry in imported:
+            self.assertEqual([], self.storage.getFunctionIdsBySampleId(imported_entry.sample_id))
+            self.storage.discardImportedSample(imported_entry)
+
+        self.assertEqual(families_before, self._familyCounters())
+        self.assertEqual([source.sample_id], self.storage.getSampleIds())
+        self.storage.rebuildPicHashCountIndex()
+        self.assertEqual(10, len(self._picHashCountDocuments()))
+
+    def testAFailedPicHashCountWhoseFunctionsCannotBeRemovedRaisesTheCountError(self):
+        # removing the functions fails as well: logged, and the error that failed the import is the
+        # one raised
+        self.storage.clearStorage()
+        source, other_family_id = self._storeASampleAndAnotherFamily()
+        _, function_entries = self._importTwoSampleEntries(source, other_family_id)
+
+        with (
+            patch.object(self.storage, "_addToPicHashCounts", side_effect=RuntimeError("counting failed")),
+            patch.object(self.storage, "_discardFunctions", side_effect=RuntimeError("removing failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "counting failed"):
+                self.storage.importFunctionEntries(function_entries)
+        self.assertFalse(self.storage.isPicHashCountIndexComplete())
+
     def testAStrayExtrasChunkDoesNotBlockStoringTheExtras(self):
         # a chunk an interrupted store left behind under the same id must not cause a duplicate key
         self.storage.clearStorage()

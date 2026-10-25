@@ -52,15 +52,16 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
   are now taken out with the functions. The PicHashes of imported functions are counted right after
   the insert, so that the rollback takes out only what was counted; where functions may be stored
   without being counted (the counting failed, or removing what a failed insert wrote did), the
-  count index is marked for its rebuild and the rollback leaves the counts alone. The rollback also
-  lowers the family function counters by the functions it finds stored; on either storage, a
-  counter update that failed left functions stored that their family had not counted, which the
-  rollback then took off it. On MongoDB the import now removes the functions with their PicHash
-  counts before failing, and then takes back the families it had counted; memory storage counts
-  each function before storing it. Every family then keeps its counters, unless removing the
-  functions fails as well: the families counted stay raised for the rollback to lower, while the
-  family whose counter failed is lowered by functions it never counted, until
-  `POST /recompute_family_stats` runs.
+  count index is marked for its rebuild and the rollback leaves the counts alone. Functions whose
+  PicHashes could not be counted are also removed before the import fails: no family has counted
+  them yet, and the rollback would have lowered their family by them. The rollback also lowers the
+  family function counters by the functions it finds stored; on either storage, a counter update
+  that failed left functions stored that their family had not counted, which the rollback then took
+  off it. On MongoDB the import now removes the functions with their PicHash counts before failing,
+  and then takes back the families it had counted; memory storage counts each function before
+  storing it. Every family then keeps its counters, unless removing the functions fails as well: the
+  families counted stay raised for the rollback to lower, while the family whose counter failed is
+  lowered by functions it never counted, until `POST /recompute_family_stats` runs.
 
 - **Memory storage: deleting a sample left its PicHashes behind.** `deleteSample` and
   `discardImportedSample` emptied a PicHash's set of matches but kept the key, so `isPicHash` stayed
