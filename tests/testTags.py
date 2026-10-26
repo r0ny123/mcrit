@@ -20,6 +20,7 @@ from mcrit.index.MinHashIndex import MinHashIndex
 from mcrit.index.SearchCursor import FullSearchCursor
 from mcrit.index.SearchQueryParser import SearchQueryParser
 from mcrit.libs.tags import MAX_TAGS_PER_ENTITY, MAX_TAGS_PER_REQUEST, TagLimitError, isValidTag, normalizeTags
+from mcrit.libs.utility import decode_two_complement
 from mcrit.server import application_routes
 from mcrit.storage.FamilyEntry import FamilyEntry
 from mcrit.storage.FunctionEntry import FunctionEntry
@@ -452,6 +453,38 @@ class ExportImportTags(unittest.TestCase):
         self.assertEqual(["fine"], imported.tags)
         self.assertTrue(all(entry.tags == [] for entry in target.getStorage().getFunctionsBySampleId(imported.sample_id)))
         self.assertEqual([], target.getStorage().getFamily(imported.family_id).tags)
+        for index in (source, target):
+            index.getStorage().clearStorage()
+
+    def test_an_import_says_which_tags_it_dropped(self):
+        """tags an import leaves out - invalid here, or past the cap - were dropped without a word,
+        while invalid actor names are logged; whoever imports has no other way to learn of them"""
+        source = MinHashIndex(storage_config(self.source_db))
+        source.getStorage().clearStorage()
+        sample = source.getStorage().addSmdaReport(load_report(EXAMPLE_REPORT, family="noisy_family"))
+        assert sample is not None
+        export_data = json.loads(json.dumps(source.getExportData()))
+        export_data["family_tags"] = {str(sample.family_id): ["fine", "$bad", "<script>"]}
+        export_data["sample_entries"][sample.sha256]["tags"] = ["fine", "$bad"] + [f"t{number}" for number in range(MAX_TAGS_PER_ENTITY + 2)]
+        function_dicts = list(export_data["function_entries"][sample.sha256].values())
+        function_dicts[0]["tags"] = ["fine", "$bad"]
+        function_dicts[1]["tags"] = "not a list"
+        target = MinHashIndex(storage_config(self.target_db))
+        target.getStorage().clearStorage()
+        with patch("mcrit.index.MinHashIndex.LOGGER") as logger:
+            self.assertEqual(1, target.addImportData(export_data)["num_samples_imported"])
+        warnings = [call.args[0] % call.args[1:] for call in logger.warning.call_args_list]
+        self.assertIn(f"Dropping 2 invalid tag(s) of imported family {sample.family_id}.", warnings)
+        self.assertIn(f"Dropping 1 invalid tag(s) and 3 past the cap of {MAX_TAGS_PER_ENTITY} of imported sample {sample.sha256}.", warnings)
+        self.assertIn(f"Dropping 2 invalid tag(s) and 0 past the cap of {MAX_TAGS_PER_ENTITY} of the imported functions of sample {sample.sha256}.", warnings)
+        # what is kept is unchanged by the reporting
+        imported = target.getStorage().getSampleBySha256(sample.sha256)
+        self.assertEqual(MAX_TAGS_PER_ENTITY, len(imported.tags))
+        self.assertEqual(["fine"], target.getStorage().getFamily(imported.family_id).tags)
+        # a string is no tags, not one tag per character
+        imported_functions = {entry.offset: entry for entry in target.getStorage().getFunctionsBySampleId(imported.sample_id)}
+        self.assertEqual(["fine"], imported_functions[decode_two_complement(function_dicts[0]["offset"])].tags)
+        self.assertEqual([], imported_functions[decode_two_complement(function_dicts[1]["offset"])].tags)
         for index in (source, target):
             index.getStorage().clearStorage()
 

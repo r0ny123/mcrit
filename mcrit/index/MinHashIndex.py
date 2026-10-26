@@ -16,7 +16,7 @@ from mcrit.config.StorageConfig import StorageConfig
 from mcrit.index.MatchingParameters import applyMatchingPreset, resolveMatchingParams
 from mcrit.index.SearchCursor import FullSearchCursor, MinimalSearchCursor, sortSpec
 from mcrit.index.SearchQueryParser import SearchQueryParser
-from mcrit.libs.tags import MAX_TAGS_PER_ENTITY, TagLimitError, normalizeTags
+from mcrit.libs.tags import MAX_TAGS_PER_ENTITY, TagLimitError, countInvalidTags, normalizeTags
 from mcrit.libs.utility import compress_encode, decompress_decode
 from mcrit.matchers.MatcherQueryFunction import MatcherQueryFunction
 from mcrit.minhash.EscaperFingerprint import FINGERPRINT_UNAVAILABLE, getEscaperFingerprint, getEscaperFingerprints
@@ -340,6 +340,9 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
         for exported_family_id, tags in (export_data.get("family_tags") or {}).items():
             remapped_family_id = family_id_remapping.get(int(exported_family_id))
             local_family = storage.getFamily(remapped_family_id) if remapped_family_id is not None else None
+            num_invalid = countInvalidTags(tags)
+            if num_invalid:
+                LOGGER.warning("Dropping %d invalid tag(s) of imported family %s.", num_invalid, exported_family_id)
             tags = normalizeTags(tags, drop_invalid=True)
             if local_family is None or not tags:
                 continue
@@ -371,7 +374,13 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                     import_report["num_functions_skipped"] += sample_entry_dict["statistics"]["num_functions"]
                     continue
                 sample_entry = SampleEntry.fromDict(sample_entry_dict)
-                sample_entry.tags = normalizeTags(sample_entry.tags, drop_invalid=True)[:MAX_TAGS_PER_ENTITY]
+                # counted on the dict: fromDict reads a value that is not a list as no tags
+                num_invalid = countInvalidTags(sample_entry_dict.get("tags"))
+                sample_entry.tags = normalizeTags(sample_entry.tags, drop_invalid=True)
+                num_past_cap = max(0, len(sample_entry.tags) - MAX_TAGS_PER_ENTITY)
+                sample_entry.tags = sample_entry.tags[:MAX_TAGS_PER_ENTITY]
+                if num_invalid or num_past_cap:
+                    LOGGER.warning("Dropping %d invalid tag(s) and %d past the cap of %d of imported sample %s.", num_invalid, num_past_cap, MAX_TAGS_PER_ENTITY, sample_sha256)
                 # adjust family_id in sample_entry using our remapping
                 sample_entry.family_id = family_id_remapping[sample_entry.family_id]
                 # add sample_entry to storage and receive new sample_id
@@ -390,13 +399,26 @@ class MinHashIndex(QueueRemoteCaller(Worker)):
                     if is_compressed:
                         function_entries = json.loads(decompress_decode(function_entries))
                     # iterate functions and add them, adjusting family_id and sample_id
+                    # dropped tags are counted over the sample and reported once, not once per function
+                    num_invalid = num_past_cap = 0
                     for old_function_id, function_entry_dict in function_entries.items():
                         function_entry = FunctionEntry.fromDict(function_entry_dict)
-                        function_entry.tags = normalizeTags(function_entry.tags, drop_invalid=True)[:MAX_TAGS_PER_ENTITY]
+                        num_invalid += countInvalidTags(function_entry_dict.get("tags"))
+                        function_entry.tags = normalizeTags(function_entry.tags, drop_invalid=True)
+                        num_past_cap += max(0, len(function_entry.tags) - MAX_TAGS_PER_ENTITY)
+                        function_entry.tags = function_entry.tags[:MAX_TAGS_PER_ENTITY]
                         function_entry.sample_id = remapped_sample_entry.sample_id
                         function_entry.family_id = remapped_sample_entry.family_id
                         function_entries_to_import.append(function_entry)
                         import_report["num_functions_imported"] += 1
+                    if num_invalid or num_past_cap:
+                        LOGGER.warning(
+                            "Dropping %d invalid tag(s) and %d past the cap of %d of the imported functions of sample %s.",
+                            num_invalid,
+                            num_past_cap,
+                            MAX_TAGS_PER_ENTITY,
+                            sample_sha256,
+                        )
                 LOGGER.info("Sample %d with SHA256 %s added...", index, sample_sha256)
 
             adjusted_function_entries = storage.importFunctionEntries(function_entries_to_import)

@@ -77,6 +77,16 @@ def tagsOfEntryDict(entry_dict: Dict[str, Any]) -> List[str]:
     return list(tags) if isinstance(tags, list) else []
 
 
+def countInvalidTags(tags: Any) -> int:
+    """How many entries normalizeTags(tags, drop_invalid=True) drops as invalid: an import reports
+    them rather than dropping them unseen. A value that is not a list at all counts as one."""
+    if tags is None:
+        return 0
+    if isinstance(tags, (str, bytes)) or not isinstance(tags, (list, tuple, set)):
+        return 1
+    return sum(1 for tag in tags if not isValidTag(tag))
+
+
 def mergeTags(tags: List[str], added: List[str]) -> List[str]:
     """tags followed by those of added it does not hold yet, each once and in order."""
     return list(dict.fromkeys([*tags, *added]))
