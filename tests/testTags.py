@@ -127,6 +127,22 @@ class EntryTags(unittest.TestCase):
         del legacy_function["tags"]
         self.assertEqual([], FunctionEntry.fromDict(legacy_function).tags)
 
+    def test_a_tags_value_that_is_not_a_list_reads_as_no_tags(self):
+        """fromDict took list() of whatever it found, so an export carrying "tags": "packed" read
+        as the tags p, a, c, k, e, d - each of them valid, so an import stored them all"""
+        report = load_report(EXAMPLE_REPORT)
+        sample = SampleEntry(report, sample_id=1, family_id=0)
+        function = FunctionEntry(sample, report.getFunctions().__next__(), 7)
+        for value in ("packed", {"packed": 1}, 5):
+            family_dict = FamilyEntry(family_name="win.x", family_id=3).toDict()
+            sample_dict = sample.toDict()
+            function_dict = function.toDict()
+            for entry_dict in (family_dict, sample_dict, function_dict):
+                entry_dict["tags"] = value
+            self.assertEqual([], FamilyEntry.fromDict(family_dict).tags)
+            self.assertEqual([], SampleEntry.fromDict(sample_dict).tags)
+            self.assertEqual([], FunctionEntry.fromDict(function_dict).tags)
+
 
 class MemoryStorageTags(unittest.TestCase):
     mongo_db_name = None

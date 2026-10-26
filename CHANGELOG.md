@@ -59,6 +59,8 @@ reasoning is still at hand, rather than reconstructing it from the commit log at
     of a sample the target already holds are not merged, because the import skips that sample
     as a whole. An imported tag this instance would not accept is dropped, not the import, and
     so are those past the entity cap: an entity keeps the first that fit, in the exported order.
+    A `tags` value that is not a list, as in an export edited by hand, reads as no tags rather
+    than as one tag per character.
   - A function's dict - its REST answer, an export entry, a report - leaves `tags` out while the
     function carries none, instead of an empty list in every function of a whole-corpus export
     (~12 bytes each). Read it with a default, as `FunctionEntry.fromDict` does. Families and
